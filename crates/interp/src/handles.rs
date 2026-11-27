@@ -15,7 +15,7 @@ pub use heap::handle::{
 };
 use {
     crate::{
-        TaskCallbackRoutine,
+        PooledReference, TaskCallbackRoutine,
         builtin_libraries::NativeCall,
         builtins::{Arg, Call},
         bytecode,
@@ -3120,18 +3120,24 @@ pub fn compiled_loop<'s>(
     }
 }
 
-/// Counts `value` as referenced while `body` runs, so that a write to a variable bound to it
-/// copies it: the sequence of a `for` loop, whose elements still to come must not change.
+/// Counts `value`, when there is one, as referenced while `body` runs, so that a write to a
+/// variable bound to it copies it: the sequence of a `for` loop, whose elements still to come
+/// must not change.
+#[inline]
 pub fn referenced_while<'s, T>(
     context: &mut Cx<'s>,
-    value: Local<'s>,
+    value: Option<Local<'_>>,
     body: impl FnOnce(&mut Cx<'s>) -> R<T>,
 ) -> R<T> {
-    // SAFETY: the value is rooted, and the count is given back whatever the body does.
-    unsafe { value.raw().increment_refcount() };
+    if let Some(value) = value {
+        // SAFETY: the value is rooted, and the count is given back whatever the body does.
+        unsafe { value.raw().increment_refcount() };
+    }
     let result = body(context);
-    // SAFETY: as above.
-    unsafe { value.raw().decrement_refcount() };
+    if let Some(value) = value {
+        // SAFETY: as above.
+        unsafe { value.raw().decrement_refcount() };
+    }
     result
 }
 
@@ -3212,6 +3218,107 @@ pub fn loop_continues(result: R<()>, environment: Local<'_, Environment>) -> R<b
         Err(Unwind::Jump(Jump::Break { env: target })) if target == own => Ok(false),
         Err(Unwind::Jump(Jump::Next { env: target })) if target == own => Ok(true),
         Err(other) => Err(other),
+    }
+}
+
+/// The value a `return()` that `unwind` carries to the frame of `environment`, rooted, or
+/// `None` when `unwind` is no such return.
+#[inline]
+pub fn returned_value<'s>(
+    context: &Cx<'s>,
+    unwind: &Unwind,
+    environment: impl Pointer<Value>,
+) -> Option<Local<'s>> {
+    use crate::unwind::Jump;
+    match *unwind {
+        Unwind::Jump(Jump::Return { env, value }) if env == environment.raw() => {
+            // SAFETY: an unwind holds what it carries alive, and nothing allocates before the
+            // root.
+            Some(unsafe { rooted(context, value) })
+        }
+        _ => None,
+    }
+}
+
+/// `value`, the result of the call `call` of a typed closure, checked against the return type
+/// of `signature` (`annotations::check_return`).
+pub fn check_return<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    signature: Local<'_>,
+    value: Local<'_>,
+) -> R<Local<'s>> {
+    // SAFETY: the three are rooted, and a check may raise an error or convert the value, which
+    // `&mut Cx` permits. The result is rooted before anything else allocates.
+    unsafe {
+        let value = crate::annotations::check_return(call.raw(), signature.raw(), value.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// What keeps the environment of the returning slot frame at `index` alive past the frame as
+/// it returns `value` (`eval::outliving_cause`).
+pub fn outliving_cause(
+    context: &Cx<'_>,
+    index: usize,
+    value: Local<'_>,
+) -> Option<crate::eval::Site> {
+    let frame = &crate::interp().frames[index];
+    // The test reads the frame's slots, which only a slot frame with a pending environment has.
+    assert!(
+        frame.slots != crate::NO_SLOTS
+            && frame
+                .pending
+                .get(context)
+                .downcast::<Environment>()
+                .is_some_and(|pending| pending.has_flag(gp::SLOT_FRAME)),
+        "frame {index} is not a slot frame with a pending environment"
+    );
+    // SAFETY: the frame is live and holds its slots and environment, the value is rooted, and
+    // the test reads reference counts and cells without allocating.
+    unsafe { crate::eval::outliving_cause(index, value.raw()) }
+}
+
+/// Gives up what the environment of the returning frame at `index` holds when nothing else
+/// counts a reference to it (`Heap::release_frame`). It frees nothing at once, so `value`,
+/// which the frame returns, stays valid.
+pub fn release_frame(_context: &Cx<'_>, index: usize, value: Gc<'_>) {
+    let state = crate::interp();
+    let frame = &state.frames[index];
+    let environment = frame.env.raw();
+    if environment == values::nil() {
+        return;
+    }
+    let created = state
+        .frame_closures
+        .get(frame.closures as usize..)
+        .unwrap_or(&[]);
+    // SAFETY: the frame holds its environment, the interpreter traces the closures the frame
+    // made, and releasing references frees nothing by itself.
+    unsafe { crate::heap().release_frame(environment, value.raw(), created) }
+}
+
+/// What the pop of the frame at `index` owes a profile summary: the samples that waited, and
+/// the count of a call to a package's closure (`eval::count_package_call`).
+#[cold]
+pub fn count_frame_exit(_context: &Cx<'_>, index: usize) {
+    let state = crate::interp();
+    let frame = &state.frames[index];
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    let args = state
+        .frame_args
+        .get(frame.args as usize..end)
+        .unwrap_or(&[]);
+    // SAFETY: the frame holds its function and the interpreter traces its arguments, and
+    // filing samples and counting a call allocate nothing on the heap.
+    unsafe {
+        if heap::activity::sample_ticked() {
+            crate::profile_summary::resolve_samples(state.frames.len());
+        }
+        crate::eval::count_package_call(frame.function.raw(), Some(frame), args);
     }
 }
 
@@ -3702,18 +3809,18 @@ pub fn pending_frame<'c, 's>(
 
 impl<'c, 's> LiveFrame<'c, 's> {
     /// The frame's position on the frame stack.
-    #[inline]
+    #[inline(always)]
     pub fn index(self) -> usize {
         self.index
     }
 
-    #[inline]
+    #[inline(always)]
     fn fields(self) -> &'c crate::Frame {
         &crate::interp().frames[self.index]
     }
 
     /// The closure the frame runs.
-    #[inline]
+    #[inline(always)]
     pub fn function(self) -> Gc<'c, Closure> {
         match self
             .fields()
@@ -3727,13 +3834,13 @@ impl<'c, 's> LiveFrame<'c, 's> {
     }
 
     /// The call as written, which `sys.call` returns.
-    #[inline]
+    #[inline(always)]
     pub fn call(self) -> Gc<'c> {
         self.fields().call.get(self.context)
     }
 
     /// The environment the frame runs in, `None` for a slot frame that runs in its slots.
-    #[inline]
+    #[inline(always)]
     pub fn environment(self) -> Option<Gc<'c, Environment>> {
         self.fields()
             .env
@@ -3743,20 +3850,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
 
     /// The environment the frame's function was defined in, where a name its slots leave
     /// unbound is read.
-    #[inline]
+    #[inline(always)]
     pub fn enclosure(self) -> Gc<'c, Environment> {
         self.function().environment()
     }
 
     /// How the frame was entered.
-    #[inline]
+    #[inline(always)]
     pub fn role(self) -> crate::FrameRole {
         self.fields().role
     }
 
     /// What slot `slot` of a slot frame holds: a value, a promise, the empty argument, `...`,
     /// or nothing (`unbound`).
-    #[inline]
+    #[inline(always)]
     pub fn slot(self, slot: usize) -> Gc<'c> {
         let value = crate::interp().bytecode.registers[self.fields().slots as usize + 1 + slot];
         register_value(self.context, value)
@@ -3807,20 +3914,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
         self.header() + 1 + slot
     }
 
-    /// The arguments the frame was called with, as `sys.call` matched them: the frame's entries
-    /// of the interpreter's argument stack.
-    pub fn arguments(self) -> impl Iterator<Item = Gc<'c>> {
+    /// Argument `position` of those the frame was called with, as `sys.call` matched them: the
+    /// frame's entries of the interpreter's argument stack. `None` past the last.
+    #[inline]
+    pub fn argument(self, position: usize) -> Option<Gc<'c>> {
         let state = crate::interp();
         let start = self.fields().args as usize;
         let end = state
             .frames
             .get(self.index + 1)
             .map_or(state.frame_args.len(), |next| next.args as usize);
+        let argument = state.frame_args.get(start..end)?.get(position)?;
         // SAFETY: the interpreter traces the argument stack, and the borrow of the context lets
-        // nothing pop it before the last value is used.
-        state.frame_args[start..end]
-            .iter()
-            .map(|argument| unsafe { Gc::adopt(argument.value) })
+        // nothing pop it before the value is used.
+        Some(unsafe { Gc::adopt(argument.value) })
     }
 
     /// The register below a slot frame's slots, which holds its environment once it has one.
@@ -3911,16 +4018,21 @@ impl<'c, 's> LiveFrame<'c, 's> {
     /// none of them yet, each formal with its missing flag, and leaves the slots unbound. The
     /// cells take over the slots' counts. Returns how many variables moved. The caller has
     /// suspended collection.
+    #[inline(always)]
     pub fn move_slots_to_cells(self, slots: Range<usize>) -> R<usize> {
         let index = self.index;
         let Some(environment) = self.pending() else {
             panic!("frame {index} moved a variable before it had an environment");
         };
         let names = self.slot_names();
+        let fields = self.fields();
+        let missing = fields.missing;
+        let registers =
+            fields.slots as usize + 1 + slots.start..fields.slots as usize + 1 + slots.end;
         let mut formals = None;
         let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
-        for slot in slots.clone() {
-            let value = self.slot(slot);
+        for (slot, &value) in slots.zip(&crate::interp().bytecode.registers[registers.clone()]) {
+            let value = register_value(self.context, value);
             if is_unbound(value) {
                 continue;
             }
@@ -3930,7 +4042,8 @@ impl<'c, 's> LiveFrame<'c, 's> {
             bindings.push(LocalBinding {
                 symbol,
                 value,
-                missing: self.is_missing_formal(slot)
+                missing: slot < 64
+                    && missing & (1 << slot) != 0
                     && slot < *formals.get_or_insert_with(|| self.formals().count()),
             });
         }
@@ -3950,10 +4063,8 @@ impl<'c, 's> LiveFrame<'c, 's> {
         }
         self.context
             .define_locals_uncollected(environment, &bindings)?;
-        let start = self.header() + 1;
-        let registers = &mut crate::interp().bytecode.registers;
         let unbound = values::unbound();
-        for register in &mut registers[start + slots.start..start + slots.end] {
+        for register in &mut crate::interp().bytecode.registers[registers] {
             // SAFETY: each bound slot's variable has just been bound in a cell, which counts it
             // too, so giving up the slot's count frees nothing and needs no note of a zero count.
             unsafe { register.decrement_refcount() };
@@ -3962,15 +4073,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
         Ok(bindings.len())
     }
 
-    /// Makes `environment` the one that stands for the slot frame, which the frame then holds.
-    /// The environment records the frame's slot names, so a lookup of any other name passes it
-    /// without asking the frame, and the frame's dispatch variables.
+    /// Makes the environment that stands for the slot frame, which the frame then holds, without
+    /// a collection check: it follows a [`Cx::reserve`] that covers it. The environment records
+    /// the frame's slot names, so a lookup of any other name passes it without asking the frame,
+    /// and the frame's dispatch variables.
     #[inline]
-    pub fn stand_in(self, environment: Gc<'_, Environment>) {
+    pub fn make_pending(self) -> R<Gc<'c, Environment>> {
         let index = self.index;
-        let Some((names, _)) = compiled_slots(self.function()) else {
+        let function = self.function();
+        let Some((names, _)) = compiled_slots(function) else {
             panic!("slot frame {index} runs code without a slot table");
         };
+        let environment = self
+            .context
+            .new_pending_frame_uncollected(function.environment())?;
         // SAFETY: the frame's function holds its slot table, and so the names, for as long as
         // the environment stands for the frame.
         unsafe {
@@ -3982,6 +4098,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
         // SAFETY: the frame holds the environment from here on, and the interpreter traces its
         // fields.
         crate::interp().frames[index].pending = unsafe { Held::adopt(environment.raw()) };
+        Ok(environment)
     }
 
     /// Makes the environment that stands for the slot frame its environment, in its header
@@ -4020,6 +4137,52 @@ impl<'c, 's> LiveFrame<'c, 's> {
     pub fn reified_by(self) -> u32 {
         self.fields().reified_by
     }
+
+    /// Makes `expressions` the frame's `on.exit` code, which the frame roots from here on.
+    pub fn set_exit_code(self, expressions: &[Local<'_>]) {
+        // SAFETY: each expression is rooted, and the frame's `on.exit` list is marked with the
+        // frame from here on.
+        let expressions = expressions
+            .iter()
+            .map(|expression| unsafe { Held::adopt(expression.raw()) })
+            .collect();
+        crate::interp().frames[self.index].on_exit = expressions;
+    }
+
+    /// Forgets the environment of a returning slot frame that dies with it, so the frame's pop
+    /// releases nothing through it.
+    pub fn drop_environment(self) {
+        crate::interp().frames[self.index].env = Held::null(self.context);
+    }
+}
+
+/// A dispatch variable that a method's frame binds, such as `.Generic`.
+#[derive(Clone, Copy)]
+pub struct MethodVariable<'s> {
+    pub symbol: Local<'s, Symbol>,
+    pub value: Local<'s>,
+}
+
+/// The dispatch variables `variables`, symbols paired with their values, as handles of the
+/// caller's scope.
+///
+/// # Safety
+///
+/// Each first field is a symbol, and the caller holds every value until the scope ends.
+pub unsafe fn method_variables<'s>(
+    _context: &Cx<'s>,
+    variables: &[(Sexp, Sexp)],
+) -> SmallVec<[MethodVariable<'s>; 4]> {
+    variables
+        .iter()
+        // SAFETY: the caller's contract.
+        .map(|&(symbol, value)| unsafe {
+            MethodVariable {
+                symbol: Local::adopt(symbol),
+                value: Local::adopt(value),
+            }
+        })
+        .collect()
 }
 
 /// The live frame at position `index` of the frame stack, `None` past its top.
@@ -4044,21 +4207,25 @@ pub fn formal_slots<'c, const N: usize>(
     if frame.slots == crate::NO_SLOTS || frame.env.raw() != values::nil() {
         return None;
     }
-    let slots = state.bytecode.registers.get(frame.slots as usize + 1..)?;
     let mut cell = frame.function.get(context).downcast::<Closure>()?.formals();
-    let mut next = 0;
+    let mut position = 0;
     let mut found = [(null().read(context), false); N];
     for (entry, symbol) in found.iter_mut().zip(symbols) {
-        let position = loop {
+        loop {
             let pair = cell.downcast::<Pairlist>()?;
             cell = pair.rest();
-            next += 1;
             if pair.tag().is(symbol) {
-                break next - 1;
+                break;
             }
-        };
+            position += 1;
+        }
         let missing = position < 64 && frame.missing & (1 << position) != 0;
-        *entry = (register_value(context, *slots.get(position)?), missing);
+        let register = state
+            .bytecode
+            .registers
+            .get(frame.slots as usize + 1 + position)?;
+        *entry = (register_value(context, *register), missing);
+        position += 1;
     }
     Some(found)
 }
@@ -4078,15 +4245,11 @@ pub fn pooled_reference<'c>(
     _context: &'c Cx<'_>,
     index: usize,
 ) -> Option<(Gc<'c, Promise>, Gc<'c, Integer>)> {
-    let state = crate::interp();
-    let (&reference, &target) = state
-        .references
-        .get(index)
-        .zip(state.reference_targets.get(index))?;
+    let pooled = crate::interp().references.get(index)?;
     // SAFETY: the pool roots each reference and target it made, and makes each as a promise
     // and an integer vector. One replaced under `&Cx` is only noted at count zero, and the
     // borrow of the context lets nothing collect before its last use.
-    Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
+    Some(unsafe { (Gc::adopt(pooled.promise), Gc::adopt(pooled.target)) })
 }
 
 /// Puts a new argument reference naming `symbol` over `target` at position `index` of the pool,
@@ -4114,16 +4277,20 @@ pub fn replace_pooled_reference(
         reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
         reference.increment_refcount();
         target.increment_refcount();
-        let state = crate::interp();
-        if index == state.references.len() {
-            state.references.push(reference);
-            state.reference_targets.push(target);
+        let references = &mut crate::interp().references;
+        let replacement = PooledReference {
+            promise: reference,
+            target,
+        };
+        // The pool grows only at its end: `index` is the count of references in use.
+        debug_assert!(index <= references.len());
+        let Some(pooled) = references.get_mut(index) else {
+            references.push(replacement);
             return Ok(());
-        }
-        state.references[index].decrement_refcount();
-        state.references[index] = reference;
-        state.reference_targets[index].decrement_refcount();
-        state.reference_targets[index] = target;
+        };
+        pooled.promise.decrement_refcount();
+        pooled.target.decrement_refcount();
+        *pooled = replacement;
     }
     Ok(())
 }
@@ -4134,7 +4301,7 @@ pub fn replace_pooled_reference(
 /// holds it.
 #[inline]
 pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
-    let Some(&target) = crate::interp().reference_targets.get(index) else {
+    let Some(&PooledReference { target, .. }) = crate::interp().references.get(index) else {
         panic!("argument reference {index} left the pool");
     };
     // SAFETY: the pool roots the target while the promise allocates, which `&mut Cx` permits,
@@ -4149,37 +4316,22 @@ pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
         )?;
         reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
         reference.increment_refcount();
-        let state = crate::interp();
-        state.references[index].decrement_refcount();
-        state.references[index] = reference;
+        let pooled = &mut crate::interp().references[index];
+        pooled.promise.decrement_refcount();
+        pooled.promise = reference;
     }
     Ok(())
 }
 
-/// The pool's reference at `index`, its target pointed at slot `slot` of the frame at `owner`:
-/// the frame's position, the slot and the frame's header register. One read of the pool serves
-/// both, since every call into slots takes its references here.
+/// Points a pooled reference's `target` ([`pooled_reference`]) at slot `slot` of the frame at
+/// `owner`: the frame's position, the slot and the frame's header register.
 #[inline]
-pub fn aim_reference<'c>(
-    _context: &'c mut Cx<'_>,
-    index: usize,
-    owner: usize,
-    slot: u32,
-) -> Gc<'c, Promise> {
-    let state = crate::interp();
-    let header = state.frames[owner].slots;
-    let (Some(&reference), Some(&target)) = (
-        state.references.get(index),
-        state.reference_targets.get(index),
-    ) else {
-        panic!("argument reference {index} is not in the pool");
-    };
-    // SAFETY: the pool makes each target as a three-element integer vector of its own, and
-    // `&mut Cx` ends every slice read through the context. The pool holds the reference, and
-    // the answer borrows the context.
+pub fn aim_target(_context: &Cx<'_>, target: Gc<'_, Integer>, owner: usize, slot: u32) {
+    let header = crate::interp().frames[owner].slots;
+    // SAFETY: the pool makes each target as a three-element integer vector that only the pool
+    // writes, and no reader keeps a slice of it across a call that takes a reference.
     unsafe {
-        values::ints_mut(target).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
-        Gc::adopt(reference)
+        values::ints_mut(target.raw()).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
     }
 }
 
@@ -4218,7 +4370,7 @@ pub fn run_promise_code<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -
 
 /// What the promise code `code`, compiled against the slot table of `frame`'s function, gives
 /// when run on the frame's slots (`bytecode::run_promise_on_slots`).
-#[inline]
+#[inline(always)]
 pub fn run_on_slots<'s>(
     context: &mut Cx<'s>,
     code: Local<'_, Bytecode>,
@@ -4307,25 +4459,21 @@ pub fn tmp_variable<'a>(
 /// Binds `symbol` to `value` in the frame of `environment` itself, making the binding when
 /// the frame has none.
 pub fn define_binding(
-    _context: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     environment: Local<'_, Environment>,
     symbol: Local<'_, Symbol>,
     value: Local<'_>,
 ) -> R<()> {
-    // SAFETY: the three handles are rooted, and a new binding allocates, which `&mut Cx`
-    // permits.
-    unsafe { Ok(crate::heap().define(environment.raw(), symbol.raw(), value.raw())?) }
+    Ok(context.define(environment, symbol, value)?)
 }
 
 /// Stores `value` in `binding`.
 pub fn assign_binding(
-    _context: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     binding: Local<'_, Binding>,
     value: Local<'_>,
 ) -> R<()> {
-    // SAFETY: both are rooted, and the store's write barrier may allocate, which `&mut Cx`
-    // permits.
-    unsafe { Ok(crate::heap().set_binding_value(binding.raw(), value.raw())?) }
+    Ok(context.set_binding_value(binding, value)?)
 }
 
 /// Whether `value` is the marker of an unbound variable or an unforced promise's value.
@@ -4367,27 +4515,6 @@ pub fn assign_local(
     }
 }
 
-/// Whether `symbol` is a missing argument of the frame of `environment`, as `missing()` asks.
-pub fn is_missing_in(
-    _context: &mut Cx<'_>,
-    symbol: Local<'_, Symbol>,
-    environment: Local<'_, Environment>,
-) -> R<bool> {
-    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
-    unsafe { crate::eval::argument_is_missing(symbol.raw(), environment.raw()) }
-}
-
-/// Whether `symbol` is a missing argument in `environment`, counting a defaulted formal as
-/// missing in its own function, as `missing()` does.
-pub fn is_missing(
-    _context: &mut Cx<'_>,
-    symbol: Local<'_, Symbol>,
-    environment: Local<'_, Environment>,
-) -> R<bool> {
-    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
-    unsafe { crate::eval::is_missing(symbol.raw(), environment.raw()) }
-}
-
 /// The namespace registered as `name`, if it is loaded.
 pub fn registered_namespace<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
     let symbol = install_bytes(context, name.as_bytes())?;
@@ -4404,14 +4531,9 @@ pub fn force_holding<'s>(
     promise: Local<'s, Promise>,
     held: Local<'_>,
 ) -> R<Local<'s>> {
-    // SAFETY: both are rooted, the count is given back whatever the forcing does, and forcing
-    // runs R code, which `&mut Cx` permits.
-    unsafe {
-        held.raw().increment_refcount();
-        let value = crate::eval::force_promise(promise.raw());
-        held.raw().decrement_refcount();
-        Ok(rooted(context, value?))
-    }
+    referenced_while(context, Some(held), |context| {
+        crate::eval::promise_value(context, promise)
+    })
 }
 
 /// The definition of the builtin or special `function`.

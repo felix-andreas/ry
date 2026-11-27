@@ -17,7 +17,7 @@ use {
         handles::{
             self, AssignmentCall, AssignmentCopy, Binding, Bytecode, Cells, Chars, Closure, Cx,
             Environment, Expression, Gc, Held, Integer, Language, List, Local, LocalBinding, Owned,
-            Pairlist, Pointer, Promise, Real, Str, StringFill, Symbol, Tagged, safe,
+            Pairlist, Pointer, Promise, Real, Str, StringFill, Symbol, Tagged, Value, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -25,7 +25,7 @@ use {
         values::{self, alloc, length, missing_arg, nil, symbol_name, symbols, triple, unbound},
     },
     heap::{
-        ENVIRONMENT_BYTES, Formal, PendingAccess, TRIPLE_BYTES,
+        ENVIRONMENT_BYTES, PendingAccess, TRIPLE_BYTES,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
@@ -1388,6 +1388,7 @@ fn pending_of<'c>(context: &'c Cx<'_>, owner: usize) -> Gc<'c, Environment> {
 /// ([`detach_reference`]), since a cell can be read after the call that made the reference
 /// returns. A slot that binds nothing is skipped. The slots give up their references and read
 /// as unbound from here on. The caller has suspended collection.
+#[inline(always)]
 fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) -> R<()> {
     let frame = handles::live_frame(context, owner);
     // A variable the caller passed to a frame run without its body ([`run_inlined`]) sits in
@@ -1600,8 +1601,7 @@ pub fn slot_reference<'a>(
     slot: u32,
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
-    let index = take_reference(context, symbol)?;
-    Ok(handles::aim_reference(context, index, owner, slot))
+    Ok(take_reference(context, symbol, Some((owner, slot)))?.2)
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
@@ -1615,8 +1615,7 @@ pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
             handles::held(context, env),
             handles::held(context, expression),
         );
-        let index = take_reference(context, expression)?;
-        let reference = reference_at(context, index);
+        let (context, _, reference) = take_reference(context, expression, None)?;
         context.set_promise_environment(reference, environment);
         Ok(reference.raw())
     })
@@ -1630,8 +1629,7 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
         // The code holds its constant pool, and the caller holds the code.
         let source = handles::held(context, source_of(code.read(context)).raw());
-        let index = take_reference(context, source)?;
-        let reference = reference_at(context, index);
+        let (context, _, reference) = take_reference(context, source, None)?;
         context.set_promise_environment(reference, environment);
         context.set_promise_compiled(reference, code);
         Ok(reference.raw())
@@ -1646,14 +1644,23 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
 pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let code = handles::held(context, code);
-        // The code holds its constant pool, and the caller holds the code.
-        let source = handles::held(context, source_of(code.read(context)).raw());
-        let index = take_reference(context, source)?;
-        handles::aim_reference(context, index, owner, NO_REFERENCE_SLOT);
-        let reference = reference_at(context, index);
-        context.set_promise_environment(reference, code);
-        Ok(reference.raw())
+        Ok(compiled_reference(context, owner, code)?.1.raw())
     })
+}
+
+/// [`code_reference`] for code on the handle types: the position in the pool of the reference
+/// that runs `code`, and the reference.
+fn compiled_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
+    owner: usize,
+    code: Local<'_>,
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    // The code holds its constant pool, which holds the source.
+    let source = context.root(source_of(code.read(context)));
+    let (context, _, reference) =
+        take_reference(context, source, Some((owner, NO_REFERENCE_SLOT)))?;
+    context.set_promise_environment(reference, code);
+    Ok((context, reference))
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -1668,31 +1675,38 @@ fn source_of<'c>(code: Gc<'c>) -> Gc<'c> {
     }
 }
 
-/// The pool's reference at `index`, which [`take_reference`] handed out.
-fn reference_at<'c>(context: &'c Cx<'_>, index: usize) -> Gc<'c, Promise> {
-    match handles::pooled_reference(context, index) {
-        Some((reference, _)) => reference,
-        None => panic!("argument reference {index} is not in the pool"),
-    }
-}
-
-/// The position in [`Interp::references`] of the next free reference, now naming `symbol`,
-/// with its target left for the caller to fill in.
-#[inline]
-fn take_reference<'s>(context: &mut Cx<'s>, symbol: Local<'_>) -> R<usize> {
+/// The next free reference of [`Interp::references`], now naming `symbol`, with its position in
+/// the pool and the context, which nothing can collect through while the reference is used.
+/// `aim` gives the frame and the slot a slot frame's reference reads ([`handles::aim_target`]);
+/// without it the target is left for the caller to fill in.
+#[inline(always)]
+fn take_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
+    symbol: Local<'_>,
+    aim: Option<(usize, u32)>,
+) -> R<(&'c Cx<'s>, usize, Gc<'c, Promise>)> {
     let index = interp().references_used as usize;
-    match handles::pooled_reference(context, index) {
-        Some((reference, _)) if !reference.is_shared() => {
-            context.set_promise_code(reference, symbol);
-            // A call that failed while forcing the reference left it marked, and the mark
-            // belongs to that call's argument, not to the one that takes the reference next.
-            reference.set_flags(PROMISE_INTERRUPTED, false);
-        }
-        _ => renew_reference(context, index, symbol)?,
+    let free = handles::pooled_reference(context, index)
+        .is_some_and(|(reference, _)| !reference.is_shared());
+    if !free {
+        renew_reference(context, index, symbol)?;
+    }
+    let context = &*context;
+    let Some((reference, target)) = handles::pooled_reference(context, index) else {
+        panic!("argument reference {index} is not in the pool");
+    };
+    if free {
+        context.set_promise_code(reference, symbol);
+        // A call that failed while forcing the reference left it marked, and the mark belongs
+        // to that call's argument, not to the one that takes the reference next.
+        reference.set_flags(PROMISE_INTERRUPTED, false);
+    }
+    if let Some((owner, slot)) = aim {
+        handles::aim_target(context, target, owner, slot);
     }
     interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
-    Ok(index)
+    Ok((context, index, reference))
 }
 
 /// Puts a new reference naming `symbol` at position `index` of the pool, which ends the pool or
@@ -1801,12 +1815,17 @@ fn force_reference<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R
         let (symbol, environment) = (context.root(symbol), context.root(environment));
         return handles::evaluate(context, symbol.value(), environment);
     }
-    let value = (slot != NO_REFERENCE_SLOT)
-        .then(|| frame.slot(slot as usize))
-        .filter(|&value| !handles::is_unbound(value));
-    let Some(value) = value else {
-        let symbol = context.root(symbol);
-        return eval_enclosed_name(context, symbol, owner);
+    let value = if slot == NO_REFERENCE_SLOT {
+        None
+    } else {
+        Some(frame.slot(slot as usize))
+    };
+    let value = match value {
+        Some(value) if !handles::is_unbound(value) => value,
+        _ => {
+            let symbol = context.root(symbol);
+            return eval_enclosed_name(context, symbol, owner);
+        }
     };
     if let Some(promise) = value.downcast::<Promise>() {
         let promise = context.root(promise);
@@ -1944,34 +1963,35 @@ pub fn referenced_variable<'c>(context: &'c Cx<'_>, reference: Gc<'c, Promise>) 
 }
 
 /// Whether the variable an unforced argument reference names is a missing argument in its
-/// frame, as [`value_is_missing`] asks of a promise of a name.
-unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
-    let symbol = reference.cdr();
-    if reference.tag().kind() == SexpType::Bytecode || symbol.kind() != SexpType::Symbol {
+/// frame, as [`content_is_missing`] asks of a promise of a name.
+fn reference_is_missing(context: &Cx<'_>, reference: Gc<'_, Promise>) -> R<bool> {
+    let place = reference.environment();
+    let Some(symbol) = reference.code().downcast::<Symbol>() else {
+        return Ok(false);
+    };
+    if place.r_type() == SexpType::Bytecode {
         return Ok(false);
     }
-    let env = if reference.tag().kind() == SexpType::Environment {
-        reference.tag()
-    } else {
-        let (owner, _) = reference_target(Gc::adopt(reference));
-        interp().frames[owner].env.raw()
+    let in_environment = |environment| match handles::frame_binding(context, environment, symbol) {
+        Some(_) => symbol_is_missing(context, symbol, environment, false),
+        None => Ok(false),
     };
-    if env != nil() {
-        if crate::heap().frame_cell(env, symbol).is_none() {
-            return Ok(false);
-        }
-        return symbol_is_missing(symbol, env, false);
+    if let Some(environment) = place.downcast::<Environment>() {
+        return in_environment(environment);
     }
-    let (owner, slot) = reference_target(Gc::adopt(reference));
-    let frame = &interp().frames[owner];
+    let (owner, slot) = reference_target(reference);
+    let frame = handles::live_frame(context, owner);
+    if let Some(environment) = frame.environment() {
+        return in_environment(environment);
+    }
     if slot == NO_REFERENCE_SLOT {
         return Ok(false);
     }
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-    if value == unbound() {
+    let value = frame.slot(slot as usize);
+    if handles::is_unbound(value) {
         return Ok(false);
     }
-    value_is_missing(value)
+    content_is_missing(context, value)
 }
 
 /// Turns the argument references the frame at `index` was called with into ordinary promises
@@ -1993,15 +2013,16 @@ pub fn detach_frame_references(context: &mut Cx<'_>, index: usize) -> R<()> {
     if !frame.has_slots() {
         return Ok(());
     }
-    let references: SmallVec<[Local<'_, Promise>; 8]> = frame
-        .arguments()
-        .filter_map(|argument| argument.downcast::<Promise>())
-        .filter(|promise| promise.has_flag(gp::ARGUMENT_REFERENCE))
-        .map(|reference| context.root(reference))
-        .collect();
-    for reference in references {
-        // Forwarding `...` passes one reference as several arguments, and the first detaches it.
-        if reference.read(context).has_flag(gp::ARGUMENT_REFERENCE) {
+    // Detaching changes each promise in place and leaves the argument stack as it is, so each
+    // argument is read afresh and only the one being detached is rooted. Forwarding `...`
+    // passes one reference as several arguments, and the first detaches it.
+    let mut position = 0;
+    while let Some(argument) = handles::live_frame(context, index).argument(position) {
+        position += 1;
+        if let Some(reference) = argument.downcast::<Promise>()
+            && reference.has_flag(gp::ARGUMENT_REFERENCE)
+        {
+            let reference = context.root(reference);
             detach(context, reference)?;
         }
     }
@@ -2041,7 +2062,7 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     let state = interp();
     let Some(index) = state.references[..state.references_used as usize]
         .iter()
-        .position(|&pooled| pooled == reference.raw())
+        .position(|pooled| pooled.promise == reference.raw())
     else {
         panic!("an argument reference outlived the call it was made for");
     };
@@ -2135,10 +2156,7 @@ pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a
             // The frame holds its function while the environment is reserved.
             context.reserve(ENVIRONMENT_BYTES);
             let context: &Cx<'_> = context;
-            let frame = handles::live_frame(context, owner);
-            let function = frame.function();
-            let environment = context.new_pending_frame_uncollected(function.environment())?;
-            frame.stand_in(environment);
+            let environment = handles::live_frame(context, owner).make_pending()?;
             activity::count(Counter::FrameEnvironments);
             Ok(environment)
         },
@@ -2684,19 +2702,21 @@ unsafe fn run_builtin(
         },
         reusable,
     };
-    if checks.native != NativeArgs::Accepted
-        && args
-            .iter()
-            .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
-    {
-        let skip_numbers = match checks.native {
-            NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
-            NativeArgs::Refused => false,
-            NativeArgs::RefusedExceptArrayIndexes => {
-                args.first().is_some_and(|target| target.value.is_array())
+    if checks.native != NativeArgs::Accepted {
+        // A loop, where `Iterator::any` shares one out-of-line copy with other callers.
+        for arg in args {
+            if matches!(arg.value.kind(), SexpType::Record | SexpType::I64) {
+                let skip_numbers = match checks.native {
+                    NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
+                    NativeArgs::Refused => false,
+                    NativeArgs::RefusedExceptArrayIndexes => {
+                        args.first().is_some_and(|target| target.value.is_array())
+                    }
+                };
+                crate::records::check_native_args(call, args, skip_numbers)?;
+                break;
             }
-        };
-        crate::records::check_native_args(call, args, skip_numbers)?;
+        }
     }
     // An ALTREP method's error, parked by the element accessor the builtin went through, is
     // raised before the builtin's value goes anywhere, so `tryCatch` around the call sees it
@@ -2798,8 +2818,11 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     let Some(formals) = formals else {
         return Ok(());
     };
-    if formals.iter().any(|formal| formal == "...") {
-        return Ok(());
+    // A loop, where `Iterator::any` shares one out-of-line copy with other callers.
+    for formal in formals {
+        if formal == "..." {
+            return Ok(());
+        }
     }
     for arg in args.iter().filter(|arg| arg.tag != nil()) {
         let name = values::symbol_name(arg.tag);
@@ -3280,7 +3303,13 @@ unsafe fn try_native_typed(
     }
     // The native tier binds the arguments itself and may keep one, so it gets promises.
     detach_references(args)?;
-    force_typed_arguments(call, args, sys_parent)?;
+    // The caller's frame holds the call, its environment and the arguments.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let caller = handles::held(context, sys_parent);
+        let args = handles::tagged(context, args);
+        force_typed_arguments(context, call, args, caller)
+    })?;
     let Some(tier) = bytecode::tier() else {
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
@@ -3303,63 +3332,81 @@ unsafe fn try_native_typed(
 /// even when the interpreter forwards the caller's promise for a variable (an effect-free
 /// callee's eager arguments). An argument written in R code, including one a typed function
 /// passes on as `...`, stays lazy, and so does a missing one, as `missing()` reads it.
-unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R<()> {
-    let dots = symbols().dots;
-    let mut expressions = if is_typed_frame(sys_parent) {
-        call.cdr()
-    } else {
-        nil()
+fn force_typed_arguments(
+    context: &mut Cx<'_>,
+    call: Local<'_>,
+    args: &[Tagged<'_>],
+    caller: Local<'_>,
+) -> R<()> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let caller = caller.downcast::<Environment>();
+    let from_typed_caller =
+        caller.is_some_and(|caller| is_typed_frame(context, caller.read(context)));
+    let mut expressions = match call.read(context).downcast::<Language>() {
+        Some(call) if from_typed_caller => Some(context.root(call.rest())),
+        _ => None,
     };
     let mut from_dots = 0usize;
     for arg in args {
         while from_dots == 0
-            && expressions.kind() == SexpType::Pairlist
-            && expressions.car() == dots
+            && let Some(cell) =
+                expressions.and_then(|cells| cells.read(context).downcast::<Pairlist>())
+            && cell.head().is(dots)
+            && let Some(caller) = caller
         {
-            let mut cell = dots_binding(sys_parent)?;
-            while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
-                from_dots += 1;
-                cell = cell.cdr();
-            }
-            expressions = expressions.cdr();
+            let rest = context.root(cell.rest());
+            from_dots += handles::dots_cells(context, caller)?.len();
+            expressions = Some(rest);
         }
         let named_by_typed_caller = if from_dots > 0 {
             from_dots -= 1;
             false
-        } else if expressions.kind() == SexpType::Pairlist {
-            expressions = expressions.cdr();
+        } else if let Some(cell) =
+            expressions.and_then(|cells| cells.read(context).downcast::<Pairlist>())
+        {
+            expressions = Some(context.root(cell.rest()));
             true
         } else {
             false
         };
-        let promise = arg.value;
-        if promise.kind() == SexpType::Promise
-            && promise.car() == unbound()
+        let Some(promise) = arg.value.downcast::<Promise>() else {
+            continue;
+        };
+        let read = promise.read(context);
+        let environment = read.environment().downcast::<Environment>();
+        if handles::is_unbound(read.result())
             && (named_by_typed_caller
-                || (!promise.has_gp(gp::ARGUMENT_REFERENCE) && is_typed_frame(promise.tag())))
-            && !argument_is_missing(promise.cdr(), promise.tag())?
+                || (!read.has_flag(gp::ARGUMENT_REFERENCE)
+                    && environment.is_some_and(|environment| is_typed_frame(context, environment))))
+            && !match environment {
+                Some(environment) => expression_is_missing(context, read.code(), environment)?,
+                None => false,
+            }
         {
-            force_promise(promise)?;
+            promise_value(context, promise)?;
         }
     }
     Ok(())
 }
 
-/// Whether `env` is the frame of a live call of a typed function. A typed function never runs
-/// on slots, so a promise over a slot frame is R code's.
-unsafe fn is_typed_frame(env: Sexp) -> bool {
-    if env.has_gp(gp::SLOT_FRAME) {
+/// Whether `environment` is the frame of a live call of a typed function. A typed function
+/// never runs on slots, so a promise over a slot frame is R code's.
+fn is_typed_frame(context: &Cx<'_>, environment: Gc<'_, Environment>) -> bool {
+    if environment.has_flag(gp::SLOT_FRAME) {
         return false;
     }
     interp()
         .frames
         .iter()
         .rev()
-        .find(|frame| frame.env.raw() == env)
+        .find(|frame| frame.env.get(context).is(environment))
         .is_some_and(|frame| {
             // `eval` and other builtins push frames too, whose function has no formals to read.
-            frame.function.raw().kind() == SexpType::Closure
-                && crate::annotations::is_typed(frame.function.raw())
+            frame
+                .function
+                .get(context)
+                .downcast::<Closure>()
+                .is_some_and(crate::annotations::typed_closure)
         })
 }
 
@@ -3449,71 +3496,146 @@ pub unsafe fn apply_closure_entering(
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
-/// and bound, and rooted.
+/// and bound, and rooted in the caller's handle scope.
 pub unsafe fn bind_arguments(
     call: Sexp,
     function: Sexp,
     args: &[Arg],
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    // The caller holds the call, the closure, the arguments and the method variables until the
+    // call returns.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let args = handles::tagged(context, args);
+        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
+        let arguments = match &supplied {
+            Some(supplied) => Arguments::Matched(supplied),
+            None => Arguments::Unsupplied,
+        };
+        Ok(bind_environment(context, call, function, args, arguments)?.raw())
+    })
+}
+
+/// How [`bind_environment`] takes a call's arguments.
+enum Arguments<'a, 's> {
+    /// Matched to the formals, by position when that is all they need.
+    Unsupplied,
+    /// Matched to the formals, with the method variables of a dispatched call bound after.
+    Matched(&'a [handles::MethodVariable<'s>]),
+    /// By position alone: argument `i` binds formal `i` ([`apply_closure_moved`]).
+    Positional,
+}
+
+/// A fresh environment for a call of `function` that binds `args` to its formals, rooted.
+fn bind_environment<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'s>],
+    arguments: Arguments<'_, 's>,
+) -> R<Local<'s, Environment>> {
     let _activity = activity::enter(Activity::CallSetup, 0);
-    let formals = function.car();
     // Most calls pass every argument by position to a function without `...`, which needs no
     // matching table: argument `i` binds formal `i`, and the formals past the last argument are
     // missing.
-    let actuals = if supplied.is_none() && positional(formals, args) {
+    let by_position = match arguments {
+        Arguments::Positional => true,
+        Arguments::Unsupplied => positional(function.read(context), args),
+        Arguments::Matched(_) => false,
+    };
+    let matched: Option<Matched<'s>> = if by_position {
         None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        // The `...` lists matching builds stay rooted in the caller's handle scope while the
-        // frame binds them.
-        let matched = handles::in_caller_scope(|context| {
-            let call = handles::held(context, call);
-            let Some(function) = handles::held(context, function).downcast::<Closure>() else {
-                return Err(error(
-                    "internal error: a closure call's function is not a closure",
-                ));
-            };
-            let args = handles::tagged(context, args);
-            let matched = match_args_cached(context, function, args, call)?;
-            Ok(matched
-                .iter()
-                .map(|value| value.raw())
-                .collect::<SmallVec<[Sexp; 8]>>())
-        })?;
-        Some(matched)
+        Some(match_args_cached(context, function, args, call)?)
     };
-    let env = new_function_frame(function, formals)?;
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    let mut formal = formals;
+    let missing_value = handles::missing_argument();
+    let closure = function.read(context);
+    let mut count = 0;
+    let mut formal = closure.formals();
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        count += 1;
+        formal = cell.rest();
+    }
+    // One check covers the frame, a binding cell and a default promise per formal, so they are
+    // made without one. The function, the arguments and the matched values are rooted.
+    context.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count);
+    let reading: &Cx<'s> = context;
+    let closure = function.read(reading);
+    let environment = reading.new_function_frame_uncollected(closure.environment(), count)?;
+    let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
+    let mut formal = closure.formals();
     let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let actual = match &actuals {
-            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_arg()),
-            None => args.get(index).map_or(missing_arg(), |arg| arg.value),
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        let Some(symbol) = cell.tag().downcast::<Symbol>() else {
+            return Err(error("internal error: a formal has no name"));
         };
-        bindings.push(formal_binding(env, formal, actual)?);
-        formal = formal.cdr();
+        let actual = match &matched {
+            Some(matched) => matched.get(index).copied(),
+            None => args.get(index).map(|arg| arg.value),
+        };
+        let actual = actual.unwrap_or(missing_value);
+        let default = cell.head();
+        let bound = if actual.is(missing_value) && !default.is(missing_value) {
+            // A literal default evaluates to itself, so it is bound as is: the promise would
+            // cost an allocation and a force on every call that omits it, for the same value.
+            let value = if is_literal(default) {
+                default
+            } else {
+                reading
+                    .new_promise_uncollected(default, environment)?
+                    .value()
+            };
+            LocalBinding {
+                symbol,
+                value,
+                missing: true,
+            }
+        } else {
+            LocalBinding {
+                symbol,
+                value: actual.read(reading),
+                missing: false,
+            }
+        };
+        bindings.push(bound);
+        formal = cell.rest();
         index += 1;
     }
-    let heap = crate::heap();
-    heap.define_formals_uncollected(env, &bindings)?;
-    heap.mark_frame_formals(env);
-    if let Some(supplied) = supplied {
-        for &(symbol, value) in supplied {
-            if heap.frame_cell(env, symbol).is_none() {
-                // A deferred `.GenericCallEnv` (see `method_variable`): this frame's caller is
-                // the slot frame the running byte code reads.
-                let value = if value == unbound() && symbol == symbols().dot_generic_call_env {
-                    slot_owner_env(Reify::Site(Site::MethodDispatch))?
-                } else {
-                    value
-                };
-                heap.define(env, symbol, value)?;
+    reading.define_formals_uncollected(environment, &bindings)?;
+    drop(bindings);
+    let environment = reading.root(environment);
+    if let Arguments::Matched(supplied) = arguments {
+        let generic_call_env = handles::symbol(|symbols| symbols.dot_generic_call_env);
+        for variable in supplied {
+            if context.own_binding(environment, variable.symbol).is_some() {
+                continue;
             }
+            // A deferred `.GenericCallEnv` (see `method_variable`): this frame's caller is the
+            // slot frame the running byte code reads.
+            let value =
+                if variable.value.is(handles::unbound()) && variable.symbol.is(generic_call_env) {
+                    let owner = interp().slot_owner;
+                    if owner == crate::NO_SLOTS {
+                        panic!(
+                            "byte code handed out a slot frame's environment outside any slot frame"
+                        );
+                    }
+                    frame_environment(context, owner as usize, Reify::Site(Site::MethodDispatch))?
+                        .value()
+                } else {
+                    variable.value
+                };
+            context.define(environment, variable.symbol, value)?;
         }
     }
-    Ok(env)
+    Ok(environment)
 }
 
 /// The frame a closure call runs in: an environment, or a slot frame
@@ -4270,11 +4392,10 @@ pub unsafe fn run_inlined(
     let frame = &state.frames[depth - 1];
     let result =
         if frame.env.raw() != nil() || !frame.on_exit.is_empty() || frame.pending.raw() != nil() {
-            finish_frame(call, depth, None, result)
+            finish_raw_frame(call, depth, None, result)
         } else {
-            result
+            pop_raw_frame(depth, result)
         };
-    let result = pop_frame(function, depth, result);
     hooks.returned(&result);
     result
 }
@@ -4304,6 +4425,7 @@ pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Re
 }
 
 /// The environment that stands for the slot frame at `index`, which `cause` asked for.
+#[inline(always)]
 fn reified_environment<'a>(
     context: &'a mut Cx<'_>,
     index: usize,
@@ -4540,7 +4662,15 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
         return Ok(frame.sys_parent.raw());
     }
-    handles::in_caller_scope(|context| Ok(caller_environment(context, index, cause)?.raw()))
+    let caller = frame.caller as usize;
+    let fields = &interp().frames[caller];
+    if fields.env.raw() != nil() || fields.slots == crate::NO_SLOTS {
+        return Ok(fields.env.raw());
+    }
+    if fields.pending.raw() != nil() && !activity::enabled() {
+        return Ok(fields.pending.raw());
+    }
+    handles::in_caller_scope(|context| Ok(frame_environment_of(context, caller, cause)?.raw()))
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -4580,20 +4710,6 @@ pub fn pending_env_of(header: usize) -> Sexp {
         .map_or(nil(), |index| frames[index].pending.raw())
 }
 
-/// A fresh, rooted function frame for a call of `function`, after one collection check that
-/// covers the frame, a binding cell and a default promise per formal, so the caller builds them
-/// with the `_uncollected` allocators. The caller keeps the arguments alive, and the formals'
-/// defaults are reachable from `function`.
-unsafe fn new_function_frame(function: Sexp, formals: Sexp) -> R<Sexp> {
-    let heap = crate::heap();
-    let count = values::length(formals);
-    heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count, &[function]);
-    let env = heap.alloc_environment_uncollected(function.tag(), count)?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    Ok(env)
-}
-
 /// [`apply_closure`] for a call whose first argument is a value moved out of the caller's
 /// variable (see [`moves::call_moving`]): the frame's record of the arguments does not count as
 /// a reference to it, so the parameter holds the only one.
@@ -4603,63 +4719,32 @@ pub unsafe fn apply_closure_moved(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
-    let formals = function.car();
-    let env = new_function_frame(function, formals)?;
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    let mut formal = formals;
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-        bindings.push(formal_binding(env, formal, actual)?);
-        formal = formal.cdr();
-        index += 1;
-    }
-    let heap = crate::heap();
-    heap.define_formals_uncollected(env, &bindings)?;
-    heap.mark_frame_formals(env);
+    let env = handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let args = handles::tagged(context, args);
+        Ok(bind_environment(context, call, function, args, Arguments::Positional)?.raw())
+    })?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
-unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
+fn positional(closure: Gc<'_, Closure>, args: &[Tagged<'_>]) -> bool {
+    let dots = handles::symbol(|symbols| symbols.dots);
     let mut count = 0;
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        if formal.tag() == symbols().dots {
+    let mut formal = closure.formals();
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        if cell.tag().is(dots) {
             return false;
         }
         count += 1;
-        formal = formal.cdr();
+        formal = cell.rest();
     }
-    args.len() <= count && args.iter().all(|arg| arg.tag == nil())
-}
-
-/// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
-/// its default when the argument is missing. The promise comes from the budget that
-/// [`frame_environment`] reserved, so it needs no root before the frame holds it.
-unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
-    let missing = missing_arg();
-    let symbol = formal.tag();
-    if actual == missing && formal.car() != missing {
-        // A literal default evaluates to itself, so it is bound as is: the promise would cost
-        // an allocation and a force on every call that omits it, for the same value.
-        let default = formal.car();
-        let value = if default.kind().is_atomic() || default == nil() {
-            default
-        } else {
-            crate::heap().alloc_triple_uncollected(SexpType::Promise, unbound(), default, env)?
-        };
-        return Ok(Formal {
-            symbol,
-            value,
-            missing: true,
-        });
-    }
-    Ok(Formal {
-        symbol,
-        value: actual,
-        missing: false,
-    })
+    args.len() <= count && args.iter().all(|arg| arg.tag.is(handles::null()))
 }
 
 /// Runs a closure body in an environment whose arguments are already bound.
@@ -4724,7 +4809,7 @@ pub unsafe fn run_frame(
 /// Whether [`enter`] pushes a frame for every call [`bind_slots`] takes. A caller that pushes
 /// a frame to stand for a call, without running the callee's body, asks first, because under
 /// the recorder, the debugger or the object-system refusal `enter` runs the call whole.
-pub unsafe fn enters_slot_frames() -> bool {
+pub fn enters_slot_frames() -> bool {
     let hooks = activity::hooks();
     hooks & (activity::CAPTURE | activity::DEBUGGER | activity::MOVES) == 0
         && (hooks == 0 || interp().object_systems)
@@ -4859,7 +4944,7 @@ unsafe fn push_slot_frame(
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
-        _ => default_promises(depth - 1, function, header as usize, promised),
+        _ => default_promises(depth - 1, promised),
     });
     match defaults {
         Ok(()) => {
@@ -4959,8 +5044,7 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
         Err(unwind) => unwind.root(),
     }
     state.slot_owner = owner;
-    let result = finish_frame(call, depth, None, result);
-    let result = pop_frame(function, depth, result);
+    let result = finish_raw_frame(call, depth, None, result);
     release_window(header);
     release_frame_references(references);
     result
@@ -5040,7 +5124,7 @@ unsafe fn run_frame_general(
         true,
     );
     if let Err(unwind) = sampled {
-        return pop_frame(function, depth, Err(unwind));
+        return pop_raw_frame(depth, Err(unwind));
     }
     let state = interp();
     if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
@@ -5049,9 +5133,7 @@ unsafe fn run_frame_general(
     }
     let signature = match entry {
         // A slot frame's closure is never typed (`bind_slots`).
-        _ if slots != crate::NO_SLOTS => {
-            default_promises(depth - 1, function, slots as usize, promised).map(|()| None)
-        }
+        _ if slots != crate::NO_SLOTS => default_promises(depth - 1, promised).map(|()| None),
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
@@ -5102,8 +5184,7 @@ unsafe fn run_frame_general(
         }
         result => result,
     };
-    let result = finish_frame(call, depth, signature, result);
-    let result = pop_frame(function, depth, result);
+    let result = finish_raw_frame(call, depth, signature, result);
     hooks.returned(&result);
     result
 }
@@ -5111,80 +5192,99 @@ unsafe fn run_frame_general(
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
 /// return type check, and the `on.exit` expressions, before the frame pops.
 #[inline(always)]
-unsafe fn finish_frame(
-    call: Sexp,
+fn finish_frame<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
     depth: usize,
-    signature: Option<Sexp>,
-    result: R<Sexp>,
-) -> R<Sexp> {
-    // A slot frame may have made its environment while the body ran; until it does, only its
-    // pending environment, if it handed one out, can name the frame as a `return` target.
-    let frame = &interp().frames[depth - 1];
-    let env = if frame.env.raw() == nil() {
-        frame.pending.raw()
-    } else {
-        frame.env.raw()
-    };
-    let result = if env == nil() {
-        result
-    } else {
-        stray_loop_jump(call, env, catch_return(env, result))
+    signature: Option<Local<'_>>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
+    let result = match return_target(context, depth) {
+        None => result,
+        Some(target) => stray_loop_jump(call, target, catch_return(context, target, result)),
     };
     let result = match (signature, result) {
-        (Some(signature), Ok(value)) => crate::annotations::check_return(call, signature, value),
+        (Some(signature), Ok(value)) => handles::check_return(context, call, signature, value),
         (_, result) => result,
     };
     crate::annotations::leave(depth);
     // `return()` may also come from an `on.exit` expression, which runs in the same frame and
     // so returns from it too.
-    let state = interp();
-    let result = if state.frames[depth - 1].on_exit.is_empty() {
+    let result = if interp().frames[depth - 1].on_exit.is_empty() {
         result
     } else {
-        let result = run_on_exit(depth, result);
-        let frame = &interp().frames[depth - 1];
-        catch_return(
-            if frame.env.raw() == nil() {
-                frame.pending.raw()
-            } else {
-                frame.env.raw()
-            },
-            result,
-        )
+        let result = run_on_exit(context, depth, result);
+        match return_target(context, depth) {
+            None => result,
+            Some(target) => catch_return(context, target, result),
+        }
     };
-    let env = state.frames[depth - 1].pending.raw();
-    if env == nil() {
+    let Some(pending) = handles::live_frame(context, depth - 1).pending() else {
         return result;
-    }
-    if env.has_gp(gp::SLOT_FRAME) {
+    };
+    // Lifting the frame's variables allocates, and the flag is cleared after it.
+    let pending = context.root(pending);
+    if pending.read(context).has_flag(gp::SLOT_FRAME) {
         // An error return keeps the environment, since the unwind may carry it or anything
         // made over it.
-        let cause = match result {
-            Ok(value) => outliving_cause(depth - 1, value),
+        let cause = match &result {
+            Ok(value) => handles::outliving_cause(context, depth - 1, *value),
             Err(_) => Some(Site::PromiseOrEnvironmentOutlives),
         };
         match cause {
             Some(cause) => {
                 // The variables move while nothing else can run, as in a lookup's move.
                 crate::heap().inhibit_collection();
-                let lifted = lift_frame(depth - 1, Some(cause));
+                let lifted = lift(context, depth - 1, Some(cause));
                 crate::heap().allow_collection();
                 lifted?;
             }
             None => {
-                let state = interp();
-                crate::forget_pending_closures(state, depth - 1);
+                crate::forget_pending_closures(interp(), depth - 1);
                 // The environment dies here, so the frame has none left for the pop to release.
-                state.frames[depth - 1].env = Held::adopt(nil());
-                if let Ok(value) = result {
-                    crate::heap().discard_frame(env, value);
+                handles::live_frame(context, depth - 1).drop_environment();
+                if let Ok(value) = &result {
+                    context.discard_frame(pending, *value);
                 }
             }
         }
     }
     // The body has returned, so no register of compiled code holds a value of the frame.
-    env.set_gp_bits(gp::COMPILED_FRAME, false);
+    pending.read(context).clear_compiled_frame();
     result
+}
+
+/// The environment a `return()` aimed at the frame at `depth` (one-based) names: the frame's
+/// own, or for a slot frame that has not made one, the environment that stands for it once it
+/// has handed one out.
+fn return_target<'a>(context: &'a Cx<'_>, depth: usize) -> Option<Gc<'a>> {
+    let frame = handles::live_frame(context, depth - 1);
+    let environment = frame.recorded_environment();
+    if environment.r_type() != SexpType::Nil {
+        return Some(environment);
+    }
+    frame.pending().map(|pending| pending.value())
+}
+
+/// [`finish_frame`] then [`pop_frame`] for raw callers, with the frame's `call` and
+/// `signature` held by the frame. One scope serves both, so the result crosses into handles
+/// and back once.
+unsafe fn finish_raw_frame(
+    call: Sexp,
+    depth: usize,
+    signature: Option<Sexp>,
+    result: R<Sexp>,
+) -> R<Sexp> {
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let signature = signature.map(|signature| handles::held(context, signature));
+        let result = result.map(|value| handles::adopt(context, value));
+        let result = finish_frame(context, call, depth, signature, result);
+        let context: &Cx<'_> = context;
+        let value = result.as_ref().ok().map(|value| value.read(context));
+        pop_frame(context, depth, value);
+        result.map(Local::raw)
+    })
 }
 
 /// What keeps the environment of the slot frame at `index` alive past the frame as it returns
@@ -5375,36 +5475,27 @@ unsafe fn profiled_entry(function: Sexp, counted: bool) -> R<()> {
     }
 }
 
-/// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
-/// the condition stacks and srcref of the caller.
+/// Pops the frame at `depth` (one-based) once its call has finished, `value` the value it
+/// returned unless it unwound, restoring the condition stacks and srcref of the caller.
 #[inline(always)]
-unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
-    let state = interp();
+fn pop_frame(context: &Cx<'_>, depth: usize, value: Option<Gc<'_>>) {
     if activity::enabled() {
-        if activity::sample_ticked() {
-            crate::profile_summary::resolve_samples(state.frames.len());
-        }
-        let frame = &state.frames[depth - 1];
-        let end = state
-            .frames
-            .get(depth)
-            .map_or(state.frame_args.len(), |next| next.args as usize);
-        let args = state
-            .frame_args
-            .get(frame.args as usize..end)
-            .unwrap_or(&[]);
-        count_package_call(function, Some(frame), args);
+        handles::count_frame_exit(context, depth - 1);
     }
+    let state = interp();
     // An unwind that skipped frames above this one needs the general truncation; a call
     // returning normally does not.
     if state.frames.len() != depth {
         crate::truncate_frames(state, depth);
     }
     crate::forget_pending_closures(state, depth - 1);
+    if let Some(value) = value {
+        handles::release_frame(context, depth - 1, value);
+    }
     let Some(frame) = state.frames.last() else {
         panic!("a closure call's frame was popped while the call ran");
     };
-    let (env, closures, srcref) = (frame.env.raw(), frame.closures, frame.srcref.raw());
+    let (closures, srcref) = (frame.closures, frame.srcref.raw());
     let (args, method_vars) = (frame.args as usize, frame.method_vars as usize);
     let Some((handlers, restarts)) = state.frames.pop() else {
         panic!("a closure call's frame was popped while the call ran");
@@ -5415,13 +5506,16 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
     state.frame_args.truncate(args);
     state.method_vars.truncate(method_vars);
     state.srcref = srcref;
-    if let Ok(value) = result
-        && env != nil()
-    {
-        let created = state.frame_closures.get(closures as usize..).unwrap_or(&[]);
-        crate::heap().release_frame(env, value, created);
-    }
     state.frame_closures.truncate(closures as usize);
+}
+
+/// [`pop_frame`] for raw callers, which hold `result` until it returns.
+#[inline(always)]
+unsafe fn pop_raw_frame(depth: usize, result: R<Sexp>) -> R<Sexp> {
+    handles::reading(|context| {
+        let value = result.as_ref().ok().map(|&value| Gc::adopt(value));
+        pop_frame(context, depth, value);
+    });
     result
 }
 
@@ -5476,34 +5570,43 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// pool, so a default costs the call no promise and no environment, and the frame gives it
 /// back when it returns ([`release_frame_references`]). A frame that moves the formal into a
 /// cell makes it the promise it stands for ([`detach_reference`]).
-pub(crate) unsafe fn default_promises(
-    owner: usize,
-    function: Sexp,
-    header: usize,
-    promised: u64,
-) -> R<()> {
+pub(crate) unsafe fn default_promises(owner: usize, promised: u64) -> R<()> {
+    handles::in_caller_scope(|context| promise_defaults(context, owner, promised))
+}
+
+/// [`default_promises`] for code on the handle types.
+pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64) -> R<()> {
     if promised == 0 {
         return Ok(());
     }
-    let defaults = bytecode::slot_defaults(function)?;
+    if slot_defaults(context, handles::live_frame(context, owner).function()).is_none() {
+        let function = context.root(handles::live_frame(context, owner).function());
+        handles::build_slot_defaults(context, function)?;
+    }
+    let Some(defaults) = slot_defaults(context, handles::live_frame(context, owner).function())
+    else {
+        panic!("a slot frame's defaults were not kept for its formals");
+    };
+    // The frame holds its function, which holds the defaults, but a reference may allocate,
+    // so the defaults are rooted.
+    let defaults = context.root(defaults);
     let mut pending = promised;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let code = defaults.element(index);
-        let reference = if code.kind() == SexpType::Bytecode {
-            code_reference(owner, code)?
+        let code = context.root(defaults.read(context).get(index));
+        let (reading, reference) = if code.r_type() == SexpType::Bytecode {
+            compiled_reference(context, owner, code)?
         } else {
-            let slot = bytecode::frame_slot_names(function)
+            let slot = handles::live_frame(context, owner)
+                .slot_names()
                 .iter()
-                .position(|&name| name == code)
+                .position(|name| name.is(code))
                 .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            argument_reference(owner, slot, code)?
+            let (reading, _, reference) = take_reference(context, code, Some((owner, slot)))?;
+            (reading, reference)
         };
-        crate::heap().store_slot(
-            &mut *bytecode::register_address(header + 1 + index),
-            reference,
-        );
+        handles::live_frame(reading, owner).store_slot(index, reference.value());
     }
     Ok(())
 }
@@ -5637,12 +5740,16 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
 
 /// A `break` or `next` that leaves the closure frame of `env` had no loop to go to, which is an
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
-fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
+fn stray_loop_jump<'s>(
+    call: Local<'_>,
+    environment: impl Pointer<Value>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
     match result {
         Err(Unwind::Jump(Jump::Break { env: target } | Jump::Next { env: target }))
-            if target == env =>
+            if target == environment.raw() =>
         {
-            Err(error_in(
+            Err(handles::error_in(
                 call,
                 "no loop for break/next, jumping to top level",
             ))
@@ -5651,20 +5758,18 @@ fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
     }
 }
 
-/// The value of a `return()` that unwinds to the frame of `env`.
-unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
+/// The value of a `return()` that unwinds to the frame of `environment`.
+fn catch_return<'s>(
+    context: &Cx<'s>,
+    environment: impl Pointer<Value>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
     match result {
-        Err(unwind) if unwind.returns_to(env) => {
-            let Unwind::Jump(jump) = unwind else {
-                unreachable!()
-            };
-            let Jump::Return { value, .. } = jump else {
-                unreachable!()
-            };
-            crate::heap().root(value);
-            Ok(value)
-        }
-        other => other,
+        Err(unwind) => match handles::returned_value(context, &unwind, environment) {
+            Some(value) => Ok(value),
+            None => Err(unwind),
+        },
+        ok => ok,
     }
 }
 
@@ -5676,133 +5781,147 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 /// code adds to them or replaces them. GNU R runs that list only when the frame is entered
 /// again: when the expression left by a jump, or after the last expression of a frame that a
 /// jump is unwinding. A frame that returns drops it.
-unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
+fn run_on_exit<'s>(context: &mut Cx<'s>, depth: usize, result: R<Local<'s>>) -> R<Local<'s>> {
     if interp().frames[depth - 1].on_exit.is_empty() {
         return result;
     }
     let mut visible = interp().visible;
-    let mark = crate::heap().handle_mark();
-    let mut returned = None;
-    let mut outcome = result;
-    let mut first = true;
-    loop {
-        let frame = &mut interp().frames[depth - 1];
-        let expressions = std::mem::take(&mut frame.on_exit);
-        if expressions.is_empty() {
-            break;
-        }
-        // The code taken from the frame is held by nothing else, and making its environment
-        // allocates.
-        for expression in &expressions {
-            crate::heap().root(expression.raw());
-        }
-        // A slot frame keeps exit code compiled for its slots, which runs there without an
-        // environment; only an expression that did not compile needs one.
-        let (function, header) = (frame.function.raw(), frame.slots);
-        // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
-        // the frame's environment, which takes only the variables that code reads.
-        let env = if frame.env.raw() != nil()
-            || expressions
-                .iter()
-                .all(|expression| expression.raw().kind() == SexpType::Bytecode)
-        {
-            frame.env.raw()
-        } else {
-            match frame_env(depth - 1, Reify::Site(Site::OnExit)) {
-                Ok(env) => env,
-                Err(unwind) => {
-                    outcome = Err(unwind);
-                    break;
-                }
-            }
+    let outcome = context.scope(|context| {
+        let result = match result {
+            Ok(value) => Ok(context.root(value.read(context))),
+            Err(unwind) => Err(unwind),
         };
-        let returns_here =
-            |jump: &Jump| matches!(*jump, Jump::Return { env: target, .. } if target == env);
-        if first {
-            first = false;
-            // A `return(x)` unwinding to this frame is the value the function returns.
-            returned = match &outcome {
-                Ok(value) => Some(*value),
-                Err(Unwind::Jump(jump)) => match *jump {
-                    Jump::Return { value, .. } if returns_here(jump) => Some(value),
-                    _ => None,
-                },
-                Err(_) => None,
-            };
-            interp().returned_values.push(returned);
-            // The value is on its way to the caller and nothing counts it yet, so exit code that
-            // modifies a variable holding it would write into the value the caller receives.
-            // GNU R counts it for as long as the exit code runs.
-            if let Some(value) = returned {
-                value.increment_refcount();
-            }
-        }
+        let pass = match exit_code(context, depth) {
+            Ok(Some(pass)) => pass,
+            Ok(None) => return result,
+            Err(unwind) => return Err(unwind),
+        };
+        // A `return(x)` unwinding to this frame is the value the function returns.
+        let returned = match &result {
+            Ok(value) => Some(*value),
+            Err(unwind) => handles::returned_value(context, unwind, pass.environment),
+        };
+        interp()
+            .returned_values
+            .push(returned.map(|value| value.raw()));
+        // The value is on its way to the caller and nothing counts it yet, so exit code that
+        // modifies a variable holding it would write into the value the caller receives. GNU R
+        // counts it for as long as the exit code runs.
+        let outcome = handles::referenced_while(context, returned, |context| {
+            exit_passes(context, depth, pass, result, &mut visible)
+        });
+        interp().returned_values.pop();
+        outcome
+    });
+    interp().visible = visible;
+    outcome
+}
+
+/// The exit code a frame lists for one pass of [`run_on_exit`], taken from the frame, and the
+/// environment it runs in.
+struct ExitCode<'s> {
+    expressions: SmallVec<[Local<'s>; 2]>,
+    environment: Local<'s>,
+}
+
+/// Takes the `on.exit` expressions of frame `depth`, `None` when it lists none.
+fn exit_code<'s>(context: &mut Cx<'s>, depth: usize) -> R<Option<ExitCode<'s>>> {
+    let listed = std::mem::take(&mut interp().frames[depth - 1].on_exit);
+    if listed.is_empty() {
+        return Ok(None);
+    }
+    // The code taken from the frame is held by nothing else, and making its environment
+    // allocates.
+    let mut expressions: SmallVec<[Local<'s>; 2]> = SmallVec::new();
+    for expression in &listed {
+        expressions.push(context.root(expression.get(context)));
+    }
+    // A slot frame keeps exit code compiled for its slots, which runs there without an
+    // environment; only an expression that did not compile needs one. Other exit code, such
+    // as the call `withr::defer` registers through `do.call`, runs in the frame's environment,
+    // which takes only the variables that code reads.
+    let recorded = handles::live_frame(context, depth - 1).recorded_environment();
+    let environment = if recorded.r_type() != SexpType::Nil
+        || expressions
+            .iter()
+            .all(|expression| expression.r_type() == SexpType::Bytecode)
+    {
+        context.root(recorded)
+    } else {
+        frame_environment(context, depth - 1, Reify::Site(Site::OnExit))?.value()
+    };
+    Ok(Some(ExitCode {
+        expressions,
+        environment,
+    }))
+}
+
+/// Runs the passes of [`run_on_exit`] from `pass` on, with `result` the frame's outcome so far.
+fn exit_passes<'s>(
+    context: &mut Cx<'s>,
+    depth: usize,
+    mut pass: ExitCode<'s>,
+    result: R<Local<'s>>,
+    visible: &mut bool,
+) -> R<Local<'s>> {
+    let mut outcome = result;
+    loop {
+        let environment = pass.environment;
         let mut jumped = false;
-        for (position, expression) in expressions.iter().enumerate() {
-            let expression = expression.raw();
-            interp().frames[depth - 1].on_exit = expressions[position + 1..]
-                .iter()
-                .map(|expression| Held::adopt(expression.raw()))
-                .collect();
+        for (position, &expression) in pass.expressions.iter().enumerate() {
+            let rest = &pass.expressions[position + 1..];
+            // The pass took the frame's list, so it stays empty unless exit code added to it.
+            if !rest.is_empty() || !interp().frames[depth - 1].on_exit.is_empty() {
+                handles::live_frame(context, depth - 1).set_exit_code(rest);
+            }
             // A handler stack that a condition left in place must not run the exit code.
             let saved_handlers = interp().handlers.clone();
             let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
             interp().handlers = interp().frames[depth - 1].handlers.clone();
-            let exit = if expression.kind() == SexpType::Bytecode {
-                bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
-            } else {
-                eval(expression, env)
+            let exit = match (
+                expression.downcast::<Bytecode>(),
+                environment.downcast::<Environment>(),
+            ) {
+                (Some(code), _) => handles::run_on_slots(context, code, depth - 1),
+                (None, Some(environment)) => handles::evaluate(context, expression, environment),
+                (None, None) => panic!("exit code that did not compile ran without an environment"),
             };
             interp().handlers = saved_handlers;
-            match exit {
+            if let Err(unwind) = exit {
                 // `on.exit(return(x))` makes `x` the frame's value, even over an error
                 // unwinding through it, as in GNU R.
-                Err(Unwind::Jump(jump)) if returns_here(&jump) => {
-                    if let Jump::Return { value, .. } = jump {
+                match handles::returned_value(context, &unwind, environment) {
+                    Some(value) => {
                         outcome = Ok(value);
-                        visible = interp().visible;
+                        *visible = interp().visible;
                         if let Some(top) = interp().returned_values.last_mut() {
-                            *top = Some(value);
+                            *top = Some(value.raw());
                         }
                     }
-                    jumped = true;
-                    break;
+                    None => outcome = Err(unwind),
                 }
-                Err(unwind) => {
-                    outcome = Err(unwind);
-                    jumped = true;
-                    break;
-                }
-                Ok(_) => {}
+                jumped = true;
+                break;
             }
         }
-        let unwinding = match &outcome {
-            Ok(_) => false,
-            Err(Unwind::Jump(jump)) => !returns_here(jump),
-            Err(_) => true,
-        };
+        let unwinding = matches!(&outcome, Err(unwind) if !unwind.returns_to(environment.raw()));
         if !jumped && !unwinding {
             interp().frames[depth - 1].on_exit.clear();
             break;
         }
-        match &outcome {
-            Ok(value) => crate::heap().root(*value),
-            Err(unwind) => unwind.root(),
+        // The unwind waits while the next pass runs R code.
+        if let Err(unwind) = &outcome {
+            unwind.root();
         }
+        pass = match exit_code(context, depth) {
+            Ok(Some(next)) => next,
+            Ok(None) => break,
+            Err(unwind) => {
+                outcome = Err(unwind);
+                break;
+            }
+        };
     }
-    if let Some(value) = returned {
-        value.decrement_refcount();
-    }
-    // The first pass pushes the entry, and a pass that fails before that leaves none to pop.
-    if !first {
-        interp().returned_values.pop();
-    }
-    crate::heap().release_handles(mark);
-    match &outcome {
-        Ok(value) => crate::heap().root(*value),
-        Err(unwind) => unwind.root(),
-    }
-    interp().visible = visible;
     outcome
 }
 
@@ -6221,7 +6340,20 @@ fn match_positional_args<'s>(
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
-    symbol_is_missing(symbol, env, true)
+    // SAFETY: both are live, and the test allocates only with collection inhibited.
+    unsafe {
+        handles::reading(|context| formal_is_missing(context, Gc::adopt(symbol), Gc::adopt(env)))
+    }
+}
+
+/// [`is_missing`] for code on the handle types: `missing()` of `symbol` in `environment`,
+/// where a formal that got its default counts as missing.
+pub fn formal_is_missing(
+    context: &Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'_, Environment>,
+) -> R<bool> {
+    symbol_is_missing(context, symbol, environment, true)
 }
 
 /// Whether an argument expression is a symbol bound in `env`'s own frame to a missing argument,
@@ -6229,72 +6361,106 @@ pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
 /// as `f(m, )` passes an empty `i`, which selects everything. A defaulted formal is not missing,
 /// and an unbound symbol is left to evaluation to report.
 pub unsafe fn argument_is_missing(expression: Sexp, env: Sexp) -> R<bool> {
-    if expression.kind() != SexpType::Symbol || expression == symbols().dots {
+    // SAFETY: both are live, and the test allocates only with collection inhibited.
+    unsafe {
+        handles::reading(|context| {
+            expression_is_missing(context, Gc::adopt(expression), Gc::adopt(env))
+        })
+    }
+}
+
+/// [`argument_is_missing`] for code on the handle types.
+pub fn expression_is_missing(
+    context: &Cx<'_>,
+    expression: Gc<'_>,
+    environment: Gc<'_, Environment>,
+) -> R<bool> {
+    let Some(symbol) = expression.downcast::<Symbol>() else {
+        return Ok(false);
+    };
+    let dots = handles::symbol(|symbols| symbols.dots);
+    if symbol.is(dots) {
         return Ok(false);
     }
-    let symbol = if dot_dot_index(expression).is_some() {
-        symbols().dots
+    let bound = if dot_dot_position(symbol.name().bytes()).is_some() {
+        dots
     } else {
-        expression
+        symbol
     };
-    if env.has_gp(gp::SLOT_FRAME)
-        && let Some(answer) = slot_is_missing(env, expression, false)?
+    if environment.has_flag(gp::SLOT_FRAME)
+        && let Some(answer) = slot_is_missing(context, environment, symbol, false)?
     {
         return Ok(answer);
     }
-    if crate::heap().frame_cell(env, symbol).is_none() {
+    if handles::frame_binding(context, environment, bound).is_none() {
         return Ok(false);
     }
-    symbol_is_missing(expression, env, false)
+    symbol_is_missing(context, symbol, environment, false)
+}
+
+/// Whether what a binding or slot holds is a missing argument: the empty argument, or an
+/// unforced promise of a name that is missing where the promise reads it.
+pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+    // SAFETY: the value is live, and the test allocates only with collection inhibited.
+    unsafe { handles::reading(|context| content_is_missing(context, Gc::adopt(value))) }
 }
 
 /// `missing()` of `symbol` in `env`. `defaults_count` says whether a formal that got its default
 /// counts as missing: it does for the function asking, but not for a caller its argument came
 /// from, so `h(where)` with `where` defaulted passes a non-missing argument to `h`.
-unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<bool> {
+fn symbol_is_missing(
+    context: &Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'_, Environment>,
+    defaults_count: bool,
+) -> R<bool> {
     // `eval.parent(substitute(missing(x)))` with `x` bound to an empty argument asks about the
     // empty symbol itself, which GNU R reports as missing.
-    if symbol == missing_arg() {
+    if handles::is_missing_argument(symbol.value()) {
         return Ok(true);
     }
-    if env.has_gp(gp::SLOT_FRAME)
-        && let Some(answer) = slot_is_missing(env, symbol, defaults_count)?
+    if environment.has_flag(gp::SLOT_FRAME)
+        && let Some(answer) = slot_is_missing(context, environment, symbol, defaults_count)?
     {
         return Ok(answer);
     }
-    let heap = crate::heap();
-    let (symbol, index) = match dot_dot_index(symbol) {
-        Some(index) => (symbols().dots, Some(index)),
+    let (bound, index) = match dot_dot_position(symbol.name().bytes()) {
+        Some(index) => (handles::symbol(|symbols| symbols.dots), Some(index)),
         None => (symbol, None),
     };
-    let Some(cell) = heap.frame_cell(env, symbol) else {
+    let Some(binding) = handles::frame_binding(context, environment, bound) else {
         return Err(error(format!(
             "'missing({})' did not find an argument",
-            symbol_name(symbol)
+            handles::text(bound.name())
         )));
     };
     if let Some(index) = index {
-        return dots_element_is_missing(cell.cdr(), index);
+        return dots_element_is_missing(context, binding.content(), index);
     }
-    if cell.has_gp(gp::BINDING_ABSENT) || (defaults_count && cell.has_gp(gp::BINDING_MISSING)) {
+    if binding.has_flag(gp::BINDING_ABSENT)
+        || (defaults_count && binding.has_flag(gp::BINDING_MISSING))
+    {
         return Ok(true);
     }
-    value_is_missing(cell.cdr())
+    content_is_missing(context, binding.content())
 }
 
 /// [`symbol_is_missing`] of `..index` where `...` holds `dots`.
-unsafe fn dots_element_is_missing(dots: Sexp, index: usize) -> R<bool> {
-    if dots == missing_arg() || dots.kind() != SexpType::Dots {
+fn dots_element_is_missing(context: &Cx<'_>, dots: Gc<'_>, index: usize) -> R<bool> {
+    if handles::is_missing_argument(dots) || dots.r_type() != SexpType::Dots {
         return Ok(true);
     }
     let mut item = dots;
     for _ in 1..index {
-        item = item.cdr();
-        if item.kind() != SexpType::Dots {
-            return Ok(true);
-        }
+        item = match handles::cell_fields(item) {
+            Some((_, _, rest)) if rest.r_type() == SexpType::Dots => rest,
+            _ => return Ok(true),
+        };
     }
-    value_is_missing(item.car())
+    match handles::cell_fields(item) {
+        Some((head, _, _)) => content_is_missing(context, head),
+        None => Ok(true),
+    }
 }
 
 /// [`symbol_is_missing`] answered in the slot of the live slot frame that `env` stands for,
@@ -6302,82 +6468,85 @@ unsafe fn dots_element_is_missing(dots: Sexp, index: usize) -> R<bool> {
 /// not in a slot: the frame keeps none of that name, or the slot is unbound because the
 /// variable moved into a cell or is not bound yet. A formal that got its default is flagged in
 /// the frame's missing bits, where a cell carries the flag itself.
-unsafe fn slot_is_missing(env: Sexp, symbol: Sexp, defaults_count: bool) -> R<Option<bool>> {
-    let (symbol, index) = match dot_dot_index(symbol) {
-        Some(index) => (symbols().dots, Some(index)),
+fn slot_is_missing(
+    context: &Cx<'_>,
+    environment: Gc<'_, Environment>,
+    symbol: Gc<'_, Symbol>,
+    defaults_count: bool,
+) -> R<Option<bool>> {
+    let (bound, index) = match dot_dot_position(symbol.name().bytes()) {
+        Some(index) => (handles::symbol(|symbols| symbols.dots), Some(index)),
         None => (symbol, None),
     };
-    if !crate::heap().may_bind(env, symbol) {
+    if !environment.may_bind(bound) {
         return Ok(None);
     }
-    let frame = &interp().frames
-        [handles::reading(|context| handles::pending_frame(context, Gc::adopt(env)).index())];
-    let names = frame
-        .function
-        .raw()
-        .cdr()
-        .cdr()
-        .element(bytecode::SLOTS)
-        .element(1);
-    let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) else {
+    let frame = handles::pending_frame(context, environment);
+    let Some(slot) = frame.slot_names().iter().position(|name| name.is(bound)) else {
         return Ok(None);
     };
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
-    if value == unbound() {
+    let value = frame.slot(slot);
+    if handles::is_unbound(value) {
         return Ok(None);
     }
     if let Some(index) = index {
-        return dots_element_is_missing(value, index).map(Some);
+        return dots_element_is_missing(context, value, index).map(Some);
     }
-    let formals = values::length(frame.function.raw().car());
-    if defaults_count && slot < formals.min(64) && frame.missing & (1 << slot) != 0 {
+    if defaults_count && frame.is_missing_formal(slot) && slot < frame.formals().count() {
         return Ok(Some(true));
     }
-    value_is_missing(value).map(Some)
+    content_is_missing(context, value).map(Some)
 }
 
-pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
+/// [`value_is_missing`] for code on the handle types.
+pub fn content_is_missing(context: &Cx<'_>, value: Gc<'_>) -> R<bool> {
     // An argument check that may convert wraps its caller's promise in one of its own
     // (`annotations::check_argument`), so the root of the chain is asked, as GNU R's
     // `findRootPromise` finds it.
-    while value.kind() == SexpType::Promise
-        && value.car() == unbound()
-        && value.cdr().kind() == SexpType::Promise
+    let mut value = value;
+    while let Some(promise) = value.downcast::<Promise>()
+        && handles::is_unbound(promise.result())
+        && promise.code().r_type() == SexpType::Promise
     {
-        value = value.cdr();
+        value = promise.code();
     }
-    if value == missing_arg() {
+    if handles::is_missing_argument(value) {
         return Ok(true);
     }
-    if is_reference(value) && value.car() == unbound() {
-        return reference_is_missing(value);
+    let Some(promise) = value.downcast::<Promise>() else {
+        return Ok(false);
+    };
+    if !handles::is_unbound(promise.result()) {
+        return Ok(false);
     }
-    if value.kind() == SexpType::Promise
-        && value.car() == unbound()
-        && value.cdr().kind() == SexpType::Symbol
-        && value.tag().kind() == SexpType::Environment
+    if promise.has_flag(gp::ARGUMENT_REFERENCE) {
+        return reference_is_missing(context, promise);
+    }
+    let (Some(code), Some(caller)) = (
+        promise.code().downcast::<Symbol>(),
+        promise.environment().downcast::<Environment>(),
+    ) else {
+        return Ok(false);
+    };
+    let dot_dot = dot_dot_position(code.name().bytes()).is_some();
+    // A promise over a slot frame that has no environment yet reads the frame's slot, as
+    // reifying the frame and asking its binding would, without making the environment.
+    if caller.has_flag(gp::PENDING_FRAME) && !dot_dot {
+        return pending_slot_is_missing(context, caller, code);
+    }
+    if caller.has_flag(gp::PARTIAL_FRAME)
+        && let Some(answer) = slot_is_missing(context, caller, code, false)?
     {
-        let code = value.cdr();
-        // A promise over a slot frame that has no environment yet reads the frame's slot, as
-        // reifying the frame and asking its binding would, without making the environment.
-        if value.tag().has_gp(gp::PENDING_FRAME) && dot_dot_index(code).is_none() {
-            return pending_slot_is_missing(value.tag(), code);
-        }
-        if value.tag().has_gp(gp::PARTIAL_FRAME)
-            && let Some(answer) = slot_is_missing(value.tag(), code, false)?
-        {
-            return Ok(answer);
-        }
-        let caller = promise_env(value)?;
-        // A promise for `..1` asks about the caller's `...`, the binding that holds it.
-        let bound = if dot_dot_index(code).is_some() {
-            symbols().dots
-        } else {
-            code
-        };
-        if crate::heap().frame_cell(caller, bound).is_some() {
-            return symbol_is_missing(code, caller, false);
-        }
+        return Ok(answer);
+    }
+    // A promise for `..1` asks about the caller's `...`, the binding that holds it.
+    let bound = if dot_dot {
+        handles::symbol(|symbols| symbols.dots)
+    } else {
+        code
+    };
+    if handles::frame_binding(context, caller, bound).is_some() {
+        return symbol_is_missing(context, code, caller, false);
     }
     Ok(false)
 }
@@ -6386,32 +6555,22 @@ pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
 /// for a caller the argument came from, so a defaulted formal is not missing. A reified slot
 /// frame binds each slot to its content and the method variables after them, so reading them in
 /// that order asks what its environment would answer.
-unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
-    let state = interp();
-    let owner =
-        handles::reading(|context| handles::pending_frame(context, Gc::adopt(pending)).index());
-    let frame = &state.frames[owner];
-    let names = frame
-        .function
-        .raw()
-        .cdr()
-        .cdr()
-        .element(bytecode::SLOTS)
-        .element(1);
-    if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
-        let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
-        return if value == unbound() {
+fn pending_slot_is_missing(
+    context: &Cx<'_>,
+    pending: Gc<'_, Environment>,
+    symbol: Gc<'_, Symbol>,
+) -> R<bool> {
+    let frame = handles::pending_frame(context, pending);
+    if let Some(slot) = frame.slot_names().iter().position(|name| name.is(symbol)) {
+        let value = frame.slot(slot);
+        return if handles::is_unbound(value) {
             Ok(false)
         } else {
-            value_is_missing(value)
+            content_is_missing(context, value)
         };
     }
-    let bound = crate::method_vars(state, owner)
-        .iter()
-        .find(|(name, _)| *name == symbol)
-        .map(|&(_, value)| value);
-    match bound {
-        Some(value) => value_is_missing(value),
+    match frame.method_vars().find(|(name, _)| name.is(symbol)) {
+        Some((_, value)) => content_is_missing(context, value),
         None => Ok(false),
     }
 }
@@ -6828,7 +6987,7 @@ fn run_for<'s>(
     }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
-    handles::referenced_while(context, sequence, |context| {
+    handles::referenced_while(context, Some(sequence), |context| {
         for index in 0..count {
             // Each element is rooted when it is made, and the binding keeps it alive after
             // that, so releasing per iteration stops a long loop from holding every element it
@@ -7344,7 +7503,7 @@ fn do_missing<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
         return Err(arguments.error("invalid use of 'missing'"));
     };
     let environment = arguments.environment(context)?;
-    let missing = handles::is_missing(context, context.root(symbol), environment)?;
+    let missing = formal_is_missing(context, symbol, environment.read(context))?;
     handles::logical_constant(context, missing as i32)
 }
 
@@ -7557,7 +7716,11 @@ fn do_exec<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Loc
     let passed = match expression {
         Some(expression) if !handles::is_missing_argument(expression) => {
             let missing = match expression.downcast::<Symbol>() {
-                Some(symbol) => handles::is_missing_in(context, symbol, environment)?,
+                Some(symbol) => expression_is_missing(
+                    context,
+                    symbol.read(context).value(),
+                    environment.read(context),
+                )?,
                 None => false,
             };
             (!missing).then_some(expression)
@@ -7989,7 +8152,13 @@ pub(crate) unsafe fn eval_in_context(
     drop(recorded);
     // `return()` may come from the body or from an `on.exit` expression, which runs in the
     // same frame and so returns from it too.
-    let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));
+    let result = handles::in_caller_scope(|context| {
+        let env = handles::held(context, env);
+        let result = result.map(|value| handles::adopt(context, value));
+        let result = catch_return(context, env, result);
+        let result = run_on_exit(context, depth, result);
+        Ok(catch_return(context, env, result)?.raw())
+    });
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
@@ -9218,7 +9387,12 @@ fn replace_through_primitive<'s>(
                 _ if argument.r_type() == SexpType::Promise => handles::force(context, argument)?,
                 Some(_) if handles::is_missing_argument(argument) => argument,
                 Some(symbol)
-                    if keep_missing && handles::is_missing_in(context, symbol, environment)? =>
+                    if keep_missing
+                        && expression_is_missing(
+                            context,
+                            symbol.read(context).value(),
+                            environment.read(context),
+                        )? =>
                 {
                     handles::missing_argument()
                 }

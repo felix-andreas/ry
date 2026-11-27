@@ -473,7 +473,7 @@ pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
 }
 
 /// Keeps the first `depth` frames and drops the rest with their arguments.
-#[inline]
+#[inline(always)]
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if activity::sample_ticked() {
         resolve_samples_before_truncating(state);
@@ -644,11 +644,7 @@ pub struct Interp {
     pub method_vars: Vec<(Sexp, Sexp)>,
     /// The argument references calls have made and may reuse ([`eval::argument_reference`]):
     /// the first [`Interp::references_used`] are live, the rest wait for the next call.
-    pub references: Vec<Sexp>,
-    /// Each reference's frame target, the integer vector a reference to a slot frame's variable
-    /// keeps as its attribute. A reference to compiled code in an environment keeps the code
-    /// there instead until it is released ([`eval::release_references`]).
-    pub reference_targets: Vec<Sexp>,
+    pub references: Vec<PooledReference>,
     pub references_used: u32,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
@@ -833,6 +829,16 @@ pub struct Interp {
     pub extensions: extensions::Extensions,
 }
 
+/// An argument reference of the pool ([`Interp::references`]) and its frame target, the
+/// three-element integer vector a reference to a slot frame's variable keeps as its attribute.
+/// A reference to compiled code in an environment keeps the code there instead until it is
+/// released ([`eval::release_references`]).
+#[derive(Clone, Copy)]
+pub struct PooledReference {
+    pub promise: Sexp,
+    pub target: Sexp,
+}
+
 /// Where a condition is signalled. The optimizing tier runs a closure call without a frame
 /// while nothing can tell, and a signal can: the default error handler, the `error` option and
 /// the traceback read the stack. So while it runs one instruction of such a call, nothing is
@@ -943,7 +949,6 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
-        reference_targets: Vec::new(),
         references_used: 0,
         frame_closures: Vec::new(),
         pending_closures: Vec::new(),
@@ -1161,11 +1166,9 @@ impl RootSource for InterpRoots {
             for &(_, value) in &interp.method_vars {
                 marker.mark(value);
             }
-            for &reference in &interp.references {
-                marker.mark(reference);
-            }
-            for &target in &interp.reference_targets {
-                marker.mark(target);
+            for reference in &interp.references {
+                marker.mark(reference.promise);
+                marker.mark(reference.target);
             }
             for &closure in &interp.frame_closures {
                 marker.mark(closure);
