@@ -4523,10 +4523,8 @@ fn reified_environment<'a>(
             Reify::Site(site) => site as u32,
         };
         handles::live_frame(context, index).set_reified_by(reason);
-        return pending_environment(context, index);
     }
-    // Without a summary the caller found no environment that stands for the frame.
-    make_pending_environment(context, index)
+    pending_environment(context, index)
 }
 
 /// [`frame_environment_of`] for a frame that has an environment or runs on slots, rooted.
