@@ -1195,7 +1195,9 @@ impl Emitter<'_> {
                         let compared = self.logical(compared);
                         self.na_or(na, compared)
                     }
-                    Item::Record(_) | Item::Tag(_) if matches!(op, Compare::Eq | Compare::Ne) => {
+                    Item::Record(_) | Item::Tag(_) | Item::Array(_)
+                        if matches!(op, Compare::Eq | Compare::Ne) =>
+                    {
                         let (x, y) = (self.one(*a)?, self.one(*b)?);
                         let equal = self.call(Helper::BoxEqual, &[I64; 2], &[I32], &[x, y])[0];
                         match op {

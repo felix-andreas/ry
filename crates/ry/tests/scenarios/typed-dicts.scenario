@@ -1,7 +1,8 @@
 # Typed code builds a dictionary from `Dict.empty()` natively, including an R string key such as
 # `"z"`. The checker settles the key and value types, and the dictionary is laid out by them before
 # the first insert, so values may be `Bool`, records, tags or lists, and two `I64` keys that share
-# their low 32 bits (`1i64` and `4294967297i64`) stay two keys.
+# their low 32 bits (`1i64` and `4294967297i64`) stay two keys. `Dict.keep_shared` compares list
+# values whole, and `Dict.single` and `Dict.from_list` take `F64` keys.
 
 requires ry-runtime
 
@@ -65,11 +66,23 @@ file values.R
 |   d <- Dict.insert(d, a, 1i64)
 |   Dict.len(Dict.insert(d, b, 2i64))
 | }
+| shared_lists <- function() -> I64 {
+|   a <- Dict.from_list([("a", [1i64, 2i64]), ("b", [3i64]), ("c", [])])
+|   b <- Dict.insert(Dict.insert(a, "b", [4i64]), "d", [5i64])
+|   Dict.len(Dict.keep_shared(a, b))
+| }
+| float_keys <- function() -> F64 {
+|   d <- Dict.insert(Dict.single(1.5, 2i64), 2.5, 3i64)
+|   e <- Dict.from_list([(0.5, 1i64), (1.5, 9i64)])
+|   Num.to_f64(List.sum(Dict.values(d)) + List.sum(Dict.values(e)))
+| }
 | print(shapes(10i64))
 | print(moved(9i64))
 | print(pairs())
 | print(flags(["xa", "b", "xb", "c"]))
 | print(distinct(1i64, 4294967297i64))
+| print(shared_lists())
+| print(float_keys())
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry dicts.R
@@ -80,9 +93,10 @@ expect stderr "typed: compiled for [I64] -> Dbl"
 
 run ry run --runtime ry values.R
 expect exit 0
-expect stdout "[1] 25\n48i64\n6i64\n[\"b\", \"c\"]\n2i64"
+expect stdout "[1] 25\n48i64\n6i64\n[\"b\", \"c\"]\n2i64\n2i64\n[1] 15"
 expect stderr "typed: compiled for [I64] -> Dbl"
 expect stderr "typed: compiled for [] -> I64"
 expect stderr "typed: compiled for [I64] -> I64"
 expect stderr "typed: compiled for [Vector { item: Str, array: true }] -> Vector { item: Str, array: true }"
 expect stderr "typed: compiled for [I64, I64] -> I64"
+expect stderr "typed: compiled for [] -> Dbl"

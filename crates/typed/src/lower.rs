@@ -4437,9 +4437,10 @@ impl Lowering<'_> {
                 let key_item = match self.builder.ty(key) {
                     Type::Str => Item::Str,
                     Type::I64 => Item::I64,
+                    Type::Dbl => Item::Dbl,
                     _ => {
                         return Err(Refusal::new(
-                            "a `Dict.single` of a key that is not an `I64` or a `Str`",
+                            "a `Dict.single` of a key that is not an `I64`, an `F64` or a `Str`",
                         ));
                     }
                 };
@@ -6083,6 +6084,16 @@ impl Lowering<'_> {
 
     /// Whether `a` equals `b`, as a `Bool` to branch on, for the list function `name`.
     unsafe fn identical_items(&mut self, a: Local, b: Local, name: &str) -> Result<Local, Refusal> {
+        // Two lists are one item each here, where `compare` would pair their items.
+        let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+        if let (Some(item @ Item::Array(_)), Some(other)) = (ta.held_item(), tb.held_item()) {
+            if item != other {
+                return Err(Refusal(Cow::Owned(format!("a `{name}` of another type"))));
+            }
+            return Ok(self
+                .builder
+                .emit(Type::Bool, Op::Compare(Compare::Eq, item, a, b)));
+        }
         let equal = self.compare(Compare::Eq, a, b)?;
         match self.builder.ty(equal) {
             Type::Bool => Ok(equal),
@@ -9184,11 +9195,11 @@ impl Lowering<'_> {
             ));
         };
         let held_shape = shapes::shape(shape);
-        let (&[key @ (Item::Str | Item::I64), value], true) =
+        let (&[key @ (Item::Str | Item::I64 | Item::Dbl), value], true) =
             (&held_shape.fields[..], held_shape.layout == layout)
         else {
             return Err(Refusal::new(
-                "a `Dict.from_list` of something other than pairs with `I64` or `Str` keys",
+                "a `Dict.from_list` of something other than pairs with `I64`, `F64` or `Str` keys",
             ));
         };
         let dict_ty = Type::Dict { key, value };
@@ -10587,10 +10598,16 @@ unsafe fn spelled_item(text: &str) -> Option<Item> {
         "Bool" => return Some(Item::Lgl),
         _ => {}
     }
-    if let Some(inner) = text.strip_prefix("List<").and_then(|rest| rest.strip_suffix('>')) {
+    if let Some(inner) = text
+        .strip_prefix("List<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
         return Some(Item::Array(shapes::array_of(spelled_item(inner)?)));
     }
-    if let Some(inner) = text.strip_prefix("Tuple{").and_then(|rest| rest.strip_suffix('}')) {
+    if let Some(inner) = text
+        .strip_prefix("Tuple{")
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
         let items = top_level_parts(inner)
             .map(|part| spelled_item(part))
             .collect::<Option<SmallVec<[Item; 4]>>>()?;

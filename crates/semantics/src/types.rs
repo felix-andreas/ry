@@ -972,6 +972,79 @@ pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
     }
 }
 
+/// Appends to `out` the spelling of `ty` that a signature gives it, for a value typed code can
+/// hold in a dictionary: `I64`, `F64`, `Str`, `Bool`, a `List`, a `Record{..}` or `Tuple{..}` of
+/// such values, or a tag, spelled `:` alone because a box's tag field holds any tag. An R double
+/// or string spells as the `F64` or `Str` it converts to. `view` gives what a type stands for at
+/// its top (a variable's binding, a nominal's representation), so the checker and the native
+/// check spell alike. `None` for any other type, for a nominal that holds itself, whose spelling
+/// never ends, and for a field name the R string literal the spelling goes into could not hold
+/// as it is.
+pub fn stored_spelling<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    view: &dyn Fn(Ty<'db>) -> Ty<'db>,
+    out: &mut String,
+    depth: usize,
+) -> Option<()> {
+    const DEPTH_LIMIT: usize = 16;
+    if depth > DEPTH_LIMIT {
+        return None;
+    }
+    let ty = view(ty);
+    if is_tag_type(db, ty) {
+        out.push(':');
+        return Some(());
+    }
+    if let Some(item) = array_element(db, ty) {
+        out.push_str("List<");
+        stored_spelling(db, item, view, out, depth + 1)?;
+        out.push('>');
+        return Some(());
+    }
+    match ty.kind(db) {
+        TyKind::Native(scalar) => out.push_str(match scalar {
+            NativeScalar::I64 => "I64",
+            NativeScalar::F64 => "F64",
+            NativeScalar::Str => "Str",
+            NativeScalar::Bool => "Bool",
+        }),
+        TyKind::Scalar(Atomic::Double) => out.push_str("F64"),
+        TyKind::Scalar(Atomic::Character) => out.push_str("Str"),
+        TyKind::NativeRecord(fields, None) if !fields.is_empty() => {
+            out.push_str("Record{");
+            for (index, field) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let name = field.name.text(db);
+                if !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.')
+                {
+                    return None;
+                }
+                out.push_str(name);
+                out.push_str(": ");
+                stored_spelling(db, field.ty, view, out, depth + 1)?;
+            }
+            out.push('}');
+        }
+        TyKind::NativeTuple(items) if !items.is_empty() => {
+            out.push_str("Tuple{");
+            for (index, &item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                stored_spelling(db, item, view, out, depth + 1)?;
+            }
+            out.push('}');
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
 /// Whether every value of `ty` is one of ry's own values (a record, tuple, tag, or a standard
 /// library collection, or one of its scalars), the values a `List` holds.
 pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {

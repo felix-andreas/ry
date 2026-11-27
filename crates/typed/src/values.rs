@@ -1766,7 +1766,8 @@ pub unsafe extern "C" fn ry_list_equal(a: *mut List, b: *mut List) -> u32 {
     equal as u32
 }
 
-/// `a == b` on two boxed records, tuples or tags: 1 when they hold the same value, 0 otherwise.
+/// `a == b` on two boxed records, tuples or tags, or two ry lists: 1 when they hold the same
+/// value, 0 otherwise.
 pub unsafe extern "C" fn ry_box_equal(a: *const Boxed, b: *const Boxed) -> u32 {
     object_equal(a as *const u8, b as *const u8) as u32
 }
@@ -1784,7 +1785,10 @@ unsafe fn object_equal(a: *const u8, b: *const u8) -> bool {
         (BOX, BOX) => box_equal(a as *const Boxed, b as *const Boxed),
         (DICT, _) | (_, DICT) => false,
         (left, right) if left == right => items_equal(a as *const List, b as *const List),
-        _ => false,
+        // Both sides have one static type, and an empty list's storage kind depends on the tier
+        // that built it.
+        (BOX, _) | (_, BOX) => false,
+        _ => (*(a as *const List)).length == 0 && (*(b as *const List)).length == 0,
     }
 }
 

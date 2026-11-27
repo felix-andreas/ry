@@ -1346,7 +1346,13 @@ fn check_item_in<'db>(
             }
             if let Some((key, value)) = crate::types::dict_entries(db, ty) {
                 let mut value_spelling = String::new();
-                stored_spelling(db, &context.table, value, &mut value_spelling, 0)?;
+                crate::types::stored_spelling(
+                    db,
+                    value,
+                    &|ty| stored_view(db, &context.table, ty),
+                    &mut value_spelling,
+                    0,
+                )?;
                 return Some((
                     id,
                     CheckedType::Dict {
@@ -26154,82 +26160,32 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
     }
 }
 
-/// Appends to `out` the spelling of `ty` that a signature gives it, for a value typed code can
-/// hold in a dictionary: `I64`, `F64`, `Str`, `Bool`, a `List`, a `Record{..}` or `Tuple{..}` of
-/// such values, or a tag, spelled `:` alone because a box's tag field holds any tag. `None` for
-/// any other type, for a nominal that holds itself, whose spelling never ends, and for a field
-/// name the R string literal the spelling goes into could not hold as it is.
-fn stored_spelling<'db>(
-    db: &'db dyn Db,
-    table: &InferenceTable<'db>,
-    ty: Ty<'db>,
-    out: &mut String,
-    depth: usize,
-) -> Option<()> {
-    const DEPTH_LIMIT: usize = 16;
-    if depth > DEPTH_LIMIT {
-        return None;
-    }
-    let ty = table.resolve(db, ty);
-    // A slot annotated with a tag union leaves an empty collection's item a variable bounded by
-    // that union, and every tag shares one layout, so the bound alone fixes the storage.
-    let bounded_by_tags = ty
-        .as_var(db)
-        .and_then(|var| table.bound_of(var))
-        .is_some_and(|bound| crate::types::is_tag_type(db, table.resolve(db, bound)));
-    if bounded_by_tags || crate::types::is_tag_type(db, ty) {
-        out.push(':');
-        return Some(());
-    }
-    if let Some(item) = crate::types::array_element(db, ty) {
-        out.push_str("List<");
-        stored_spelling(db, table, item, out, depth + 1)?;
-        out.push('>');
-        return Some(());
-    }
-    match ty.kind(db) {
-        TyKind::Native(scalar) => out.push_str(match scalar {
-            NativeScalar::I64 => "I64",
-            NativeScalar::F64 => "F64",
-            NativeScalar::Str => "Str",
-            NativeScalar::Bool => "Bool",
-        }),
-        TyKind::NativeRecord(fields, None) => {
-            out.push_str("Record{");
-            for (index, field) in fields.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                let name = field.name.text(db);
-                if !name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.')
-                {
-                    return None;
-                }
-                out.push_str(name);
-                out.push_str(": ");
-                stored_spelling(db, table, field.ty, out, depth + 1)?;
-            }
-            out.push('}');
+/// What `ty` stands for at its top in this item's inference: a variable's binding, or for an
+/// unbound one the tag union it is bounded by (every tag shares one layout, so the bound alone
+/// fixes the storage), and a nominal's representation.
+fn stored_view<'db>(db: &'db dyn Db, table: &InferenceTable<'db>, ty: Ty<'db>) -> Ty<'db> {
+    let mut ty = table.resolve(db, ty);
+    for _ in 0..8 {
+        if let Some(bound) = ty.as_var(db).and_then(|var| table.bound_of(var)) {
+            let bound = table.resolve(db, bound);
+            return if crate::types::is_tag_type(db, bound) {
+                bound
+            } else {
+                ty
+            };
         }
-        TyKind::NativeTuple(items) => {
-            out.push_str("Tuple{");
-            for (index, &item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                stored_spelling(db, table, item, out, depth + 1)?;
-            }
-            out.push('}');
+        let TyKind::Named(name, arguments) = ty.kind(db) else {
+            return ty;
+        };
+        if crate::types::array_element(db, ty).is_some() {
+            return ty;
         }
-        TyKind::Named(name, arguments) => {
-            let representation = table.representation(db, *name, arguments)?;
-            stored_spelling(db, table, representation, out, depth + 1)?;
-        }
-        _ => return None,
+        let Some(representation) = table.representation(db, *name, arguments) else {
+            return ty;
+        };
+        ty = table.resolve(db, representation);
     }
-    Some(())
+    ty
 }
 
 /// The payload of the `:Ok` member of a `Result`, the item type of a `List.from_r_missing`.

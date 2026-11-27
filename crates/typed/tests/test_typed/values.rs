@@ -1392,7 +1392,11 @@ fn dicts_follow_their_models() {
     for iteration in 0..iterations {
         set_hash_seed(rng.next());
         let key_kind = [STR, INT, I64][iteration % 3];
-        let value_kind = if (iteration / 3) % 2 == 0 { STR } else { OBJECT };
+        let value_kind = if (iteration / 3) % 2 == 0 {
+            STR
+        } else {
+            OBJECT
+        };
         let mut dict = unsafe { ry_dict_new(key_kind as u32, value_kind as u32) };
         let mut model: HashMap<String, String> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -1489,7 +1493,11 @@ fn dicts_follow_their_models() {
             if key_kind == STR {
                 unsafe { ry_str_drop(key.lo, key.hi) };
             }
-            assert_eq!(read_dict(dict), entries(&model, &order), "after step {step}");
+            assert_eq!(
+                read_dict(dict),
+                entries(&model, &order),
+                "after step {step}"
+            );
         }
         for (snapshot, expected) in snapshots {
             assert_eq!(read_dict(snapshot), expected, "a shared dict changed");
