@@ -1684,9 +1684,10 @@ A ry type asks in three places:
   `Str.concat(s, pair[[1]])` makes `"a"` a `Str`, and with no such use `pair` is a
   `Tuple{character, double}`. In a function declared `-> Result<I64, Str>`, `found <- :Ok(1)`
   then `found` makes the `1` an `I64`.
-- **A top-level binding in a typed file.** In a strict file, or a file written with ry syntax (an
-  inline annotation, a record, tuple, tag, `List` or `match`), a literal bound outside any function
-  is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
+- **A top-level binding in a typed file.** In a strict file, a file that builds a ry value (a
+  record, tuple, tag, `List` or `match`), or a file with an inline annotation that names one of
+  ry's own types (a ry number, `Str`, `Bool`, `List`, `Dict`, `Set`, `Result`, a `Record{...}`, a
+  `Tuple{...}` or a tag), a literal bound outside any function is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
   `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
   or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
   literal, so `step <- 1 / 4` is an `F64`. The tuple items, record fields and tag payload items of
@@ -1695,7 +1696,8 @@ A ry type asks in three places:
   `Tuple{Str, I64}`. A literal inside a call keeps R's type, as `f(1)` does: `f((x = 1,))` passes
   a `Record{x: double}`. Each top-level
   statement is checked on its own, so nothing later in the file decides the type. In any other file
-  a top-level literal has R's type.
+  a top-level literal has R's type, so a file annotated in R's types alone
+  (`f <- function(x: double) -> double`, `p: list{name: character}`) runs like its erasure.
 
 A value written with literals alone is decided as one literal, wherever a lone literal would be:
 

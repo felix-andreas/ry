@@ -26,7 +26,7 @@ use {
         infer::InferenceTable,
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
-        types::{Ty, TyKind},
+        types::{NativeScalar, Ty, TyKind},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
@@ -659,6 +659,8 @@ pub enum SiteRole {
     InlineSite,
     /// An inline annotation itself, as [`syntax::is_inline_annotation_kind`].
     InlineAnnotation,
+    /// An inline annotation that names one of ry's own types, as [`names_ry_type`].
+    RyTypeAnnotation,
     /// The file or a brace body with a `#:` block among its statements.
     AnnotatedSequence,
     /// A call that attaches a namespace, as [`metadata::is_attach_call_ref`].
@@ -672,6 +674,7 @@ impl SiteRole {
             SiteRole::InlineAnnotation => 2,
             SiteRole::AnnotatedSequence => 4,
             SiteRole::AttachCall => 8,
+            SiteRole::RyTypeAnnotation => 16,
             SiteRole::Annotation
             | SiteRole::TypeDefinition
             | SiteRole::Declaration
@@ -690,6 +693,7 @@ impl SiteRole {
             SiteRole::RySyntax => is_ry_syntax(site.kind),
             SiteRole::InlineSite
             | SiteRole::InlineAnnotation
+            | SiteRole::RyTypeAnnotation
             | SiteRole::AnnotatedSequence
             | SiteRole::AttachCall => site.roles & self.bit() != 0,
         }
@@ -768,6 +772,9 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
+            if names_ry_type(db, node) {
+                roles |= SiteRole::RyTypeAnnotation.bit();
+            }
         }
         if (node == root || kind == SyntaxKind::BRACE_EXPR || kind == SyntaxKind::ARGUMENT_LIST)
             && node.has_child(SyntaxKind::ANNOTATION)
@@ -783,6 +790,23 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         }
     }
     SyntaxSites(sites)
+}
+
+/// Whether the inline annotation `node` names one of ry's own types: a ry number, `Str`, `Bool`,
+/// a standard library collection or `Result`, a `Record{...}` or `Tuple{...}`, or a tag. R's
+/// `list{...}` shares the record's syntax, so the head's name decides.
+fn names_ry_type(db: &dyn Db, node: NodeRef<'_>) -> bool {
+    node.any_element(|kind, token| match kind {
+        SyntaxKind::TYPE_TAG => true,
+        SyntaxKind::IDENT => token.is_some_and(|token| {
+            let name = token.text();
+            NativeScalar::from_name(name).is_some()
+                || matches!(name, "Record" | "Tuple")
+                || (matches!(name, "List" | "Dict" | "Set" | "Result")
+                    && stubs::is_ry_type(db, name))
+        }),
+        _ => false,
+    })
 }
 
 /// Every `#:` block of the file lowered once, in source order. The diagnostics, the type
@@ -1437,7 +1461,9 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
 }
 
 /// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
-/// or written with ry syntax (an inline annotation, a record, tuple, tag, `List` or `match`).
+/// builds a ry value (a record, tuple, tag, `List` or `match`), or has an inline annotation that
+/// names one of ry's own types. An annotation written in R's types alone leaves the file R code
+/// that behaves like its erasure.
 #[salsa::tracked]
 pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
@@ -1450,8 +1476,7 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     }
     let sites = file_syntax_sites(db, file);
     sites.any(SiteRole::RySyntax)
-        || sites.any(SiteRole::InlineSite)
-        || sites.any(SiteRole::InlineAnnotation)
+        || sites.any(SiteRole::RyTypeAnnotation)
         || session::holds_ry_values(db, file)
 }
 

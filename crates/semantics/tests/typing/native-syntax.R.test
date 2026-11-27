@@ -372,6 +372,34 @@ count: double
 name: character
 flag: logical
 
+#---- annotations_in_r_types_keep_top_level_literals_r_values
+# An annotated R file behaves like its erasure, and `list{...}` is R's list.
+side_effect <- function(x: double) -> double x + x
+person: list{name: character} <- list(name = "Ada")
+counter <- 0
+counter <- counter + 1
+side_effect(counter)
+#++++
+side_effect: fn(x: double) -> double
+person: list{name: character}
+counter: double
+counter: double
+double
+
+#---- an_annotation_naming_a_ry_type_makes_top_level_literals_ry_values
+area <- function(p: Record{w: F64, h: F64}) -> F64 p$w * p$h
+count <- 3
+#++++
+area: fn(p: Record{h: F64, w: F64}) -> F64
+count: I64
+
+#---- a_tag_type_in_an_annotation_makes_top_level_literals_ry_values
+describe <- function(c: :Red | :Green) -> character "colour"
+count <- 3
+#++++
+describe: fn(c: :Red | :Green) -> character
+count: I64
+
 #---- a_strict_file_makes_top_level_literals_ry_values
 # typing: strict
 count <- 3
