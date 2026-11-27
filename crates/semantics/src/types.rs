@@ -935,6 +935,20 @@ pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
     }
 }
 
+/// The element type of a ry `Set<T>`.
+pub fn set_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    match ty.kind(db) {
+        TyKind::Named(name, arguments)
+            if arguments.len() == 1
+                && name.text(db) == "Set"
+                && crate::stubs::is_ry_type(db, "Set") =>
+        {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
 /// The key and value types of a ry `Dict<K, V>`.
 pub fn dict_entries<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(Ty<'db>, Ty<'db>)> {
     match ty.kind(db) {

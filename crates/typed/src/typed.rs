@@ -2048,6 +2048,7 @@ unsafe fn drop_words(ty: Type, out: [u64; 2]) {
         Type::Str => values::ry_str_drop(out[0], out[1]),
         Type::Vector { .. }
         | Type::List(_)
+        | Type::Set(_)
         | Type::Dict { .. }
         | Type::Record(_)
         | Type::Tag(_) => values::ry_list_drop(out[0] as *mut List),

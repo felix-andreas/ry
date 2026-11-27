@@ -673,6 +673,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A function passed to a typed function lowers into its caller (settled)
 - Standard library functions that rebuild a dictionary or split a list compile to loops (settled)
 - `Result`-callback list functions leave their loop at the first `:Err` (settled)
+- A native set is a native dictionary with a placeholder value column (settled)
 
 ## DataFrame and the table engine
 

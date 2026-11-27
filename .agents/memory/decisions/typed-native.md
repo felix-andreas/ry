@@ -481,7 +481,6 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `Num.add_wrap`, `_saturated` and `_checked` (and `sub`, `mul`) are one `Op::Overflowing`, which Cranelift's `sadd_overflow` family lowers: a saturated result takes its bound from the first operand's sign, or for a product from the operands' signs combined. They compile only for `I64`s, because on R numbers the library works on 32 bits. `Num.div_ceil` is the truncated quotient plus one when a remainder is left and the operands have one sign.
 - `Num.count_one_bits`, `count_leading_zero_bits` and `count_trailing_zero_bits` of an `I64` count its 64 bits and give an `I64`, in the library and in native code (`Op::CountBits`, the SSA IR's `popcnt`, `clz` and `ctz`), because the checker types them `I64 -> I64`; an R integer, which only untyped code passes, counts its 32 bits.
 - `Str.trim` reads the string as UTF-8 and trims Unicode whitespace as Rust's `str::trim` does, like the interpreter. `Str.contains` with an empty part is true. An owned string with nothing to trim or drop is its own result.
-- Left out on purpose: the `Set` family, because the native set is a deduplicated list (`Op::Unique`) and a native `Set.contains` or `Set.insert` would be a linear scan, slower than the interpreter's hash set; it waits on a hashed native set.
 
 ## A `match` lowers as a chain of tests, one arm falling through to the next
 
@@ -522,3 +521,12 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - The capacity functions (`List.reserve`, `Dict.reserve`, both `release_excess_capacity`) give the collection itself. A `reserve` of an empty list (the interpreter answers a fresh logical array), a negative count, or room past 2^30 (the interpreter's error) fails the call; `Dict.clear` is a fresh dictionary of the same type. `Dict.with_capacity` and `Dict.capacity` are not compiled, because the interpreter's capacity is observable.
 - `Num.to_i64_checked` of an `F64` tests `NaN` first (`Op::IsNan`), because a comparison with `NaN` gives `NA`, which fails the call; then wholeness and the range from -2^63 up to 2^63.
 - `Str.split_first`, `split_last`, `replace_first` and `replace_last` are `Op::Find` (`str::find` or `rfind`, -1 when absent) and `Op::Substring` (`ry_str_piece` on the offsets `Find` gave), so an empty pattern splits at the start or the end and replaces nothing, as the interpreter does.
+
+## A native set is a native dictionary with a placeholder value column
+
+**Status:** settled.
+
+- `Type::Set(item)` is laid out as the native dictionary (`ry_dict_new`) whose value column holds one logical `TRUE` per element, so `Set.contains`, `insert` and `remove` are hashed (`Op::DictContains`, `DictInsert`, `DictRemove`) and the elements keep first-insertion order, as the interpreter's set does. The type stays distinct from `Dict<T, Bool>` so a set never meets a dictionary function; `Type::entry_items` gives the key and value items of both.
+- Every rebuilt set is a loop of the dictionary's: `union` is `Dict.insert_all`'s, `intersection` and `difference` are `keep_shared`'s and `remove_all`'s without the value compare, and `map`, `join_map`, `keep_if`, `drop_if`, `walk` and `walk_until` pass the callback the element alone. `Set.map` inserts each result, so equal results merge.
+- `Set.empty()` takes its element type from the checker (`CheckedType::Set`, `.ry_items(Set.empty(), "Set<Str>")`) or from a walk step's state annotation, as `Dict.empty()` does. Elements are `I64` or `Str`; `Set.with_capacity` and `Set.capacity` are not compiled, because the interpreter's capacity is observable.
+- A change to a type's layout bumps `file::VERSION`, so a typed file written for the old layout is rejected rather than misread.

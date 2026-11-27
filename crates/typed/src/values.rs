@@ -2627,74 +2627,6 @@ pub unsafe extern "C" fn ry_list_select(a: *mut List, mask: *mut List) -> *mut L
     result
 }
 
-/// `unique(x)` in first-occurrence order. Doubles compare with `0 == -0` and `NA` distinct from
-/// `NaN`.
-pub unsafe extern "C" fn ry_list_unique(a: *mut List, a_owned: u32) -> *mut List {
-    let kind = (*a).kind;
-    if kind == OBJECT {
-        consume(a, a_owned);
-        return null_mut();
-    }
-    let length = (*a).length as usize;
-    let in_place = a_owned != 0 && is_unique(a);
-    let target = if in_place {
-        a
-    } else {
-        list_alloc(kind, length, length)
-    };
-    let kept = match kind {
-        DBL => unique_into(
-            (*a).data as *const f64,
-            (*target).data as *mut f64,
-            length,
-            |value| hash_word(UNIQUE_SEED, double_key(*value)),
-            |x, y| double_key(*x) == double_key(*y),
-            |_| {},
-            |_| {},
-        ),
-        STR => unique_into(
-            (*a).data as *const Str,
-            (*target).data as *mut Str,
-            length,
-            |value| hash_bytes(UNIQUE_SEED, value.bytes()),
-            |x, y| str_equal(x, y),
-            |item| {
-                if in_place {
-                    str_drop(item);
-                }
-            },
-            |item| {
-                if !in_place {
-                    str_dup(*item);
-                }
-            },
-        ),
-        I64 => unique_into(
-            (*a).data as *const i64,
-            (*target).data as *mut i64,
-            length,
-            |value| hash_word(UNIQUE_SEED, *value as u64),
-            |x, y| x == y,
-            |_| {},
-            |_| {},
-        ),
-        _ => unique_into(
-            (*a).data as *const i32,
-            (*target).data as *mut i32,
-            length,
-            |value| hash_word(UNIQUE_SEED, *value as u32 as u64),
-            |x, y| x == y,
-            |_| {},
-            |_| {},
-        ),
-    };
-    (*target).length = kept as u64;
-    if !in_place {
-        consume(a, a_owned);
-    }
-    target
-}
-
 /// `count` items from the 0-based `start`. Null when the range is out of bounds.
 pub unsafe extern "C" fn ry_list_slice(
     a: *mut List,
@@ -2976,10 +2908,6 @@ const MAX_ENTRIES: usize = POSITION_MASK as usize;
 
 const HASH_K0: u64 = 0xa076_1d64_78bd_642f;
 const HASH_K1: u64 = 0xe703_7ed1_a0b4_28db;
-/// `unique` only groups equal items, and its output order is first occurrence, so its table
-/// needs no per-process seed.
-const UNIQUE_SEED: u64 = 0x2d35_8dcc_aa6c_78a5;
-
 static HASH_SEED: AtomicU64 = AtomicU64::new(0);
 static HASH_SEEDED: AtomicBool = AtomicBool::new(false);
 
@@ -3911,62 +3839,6 @@ fn double_key(value: f64) -> u64 {
     } else {
         value.to_bits()
     }
-}
-
-/// Writes the first occurrence of each distinct item of `source` to `target`, which may be
-/// `source` itself, since an item is only written at or before the position it is read from.
-/// Returns how many were kept. A small input is scanned directly; a larger one uses one
-/// open-addressing table of target positions for the whole call.
-#[allow(clippy::too_many_arguments)]
-unsafe fn unique_into<T: Copy>(
-    source: *const T,
-    target: *mut T,
-    length: usize,
-    hash: impl Fn(&T) -> u64,
-    equal: impl Fn(&T, &T) -> bool,
-    mut on_duplicate: impl FnMut(T),
-    mut on_keep: impl FnMut(&T),
-) -> usize {
-    let mut kept = 0usize;
-    if length <= 16 {
-        for read in 0..length {
-            let item = *source.add(read);
-            if (0..kept).any(|at| equal(&*target.add(at), &item)) {
-                on_duplicate(item);
-            } else {
-                on_keep(&item);
-                *target.add(kept) = item;
-                kept += 1;
-            }
-        }
-        return kept;
-    }
-    let slots = (length * 2).next_power_of_two();
-    let mask = slots - 1;
-    let mut table = vec![u32::MAX; slots];
-    for read in 0..length {
-        let item = *source.add(read);
-        let mut slot = hash(&item) as usize & mask;
-        let duplicate = loop {
-            let entry = table[slot];
-            if entry == u32::MAX {
-                break false;
-            }
-            if equal(&*target.add(entry as usize), &item) {
-                break true;
-            }
-            slot = (slot + 1) & mask;
-        };
-        if duplicate {
-            on_duplicate(item);
-        } else {
-            on_keep(&item);
-            *target.add(kept) = item;
-            table[slot] = kept as u32;
-            kept += 1;
-        }
-    }
-    kept
 }
 
 /// A heap string buffer for `length` bytes with count one, its spare block bytes as capacity.

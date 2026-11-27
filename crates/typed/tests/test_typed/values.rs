@@ -142,7 +142,6 @@ fn lists_follow_their_models() {
                             }
                         }
                     }
-                    6 => (ry_list_unique(list, flag), model.unique()),
                     7 => {
                         let start = rng.below(model.len() + 1);
                         let count = rng.below(model.len() - start + 1);
@@ -1630,39 +1629,6 @@ impl Model {
                 Some(Model::Dbl(values))
             }
             _ => panic!("sorting an unsortable kind"),
-        }
-    }
-
-    fn unique(&self) -> Model {
-        match self {
-            Model::Int(values) => {
-                let mut seen = Vec::new();
-                for &value in values {
-                    if !seen.contains(&value) {
-                        seen.push(value);
-                    }
-                }
-                Model::Int(seen)
-            }
-            Model::Dbl(values) => {
-                let mut seen: Vec<f64> = Vec::new();
-                for &value in values {
-                    if !seen.iter().any(|&kept| same_double_key(kept, value)) {
-                        seen.push(value);
-                    }
-                }
-                Model::Dbl(seen)
-            }
-            Model::Str(values) => {
-                let mut seen: Vec<String> = Vec::new();
-                for value in values {
-                    if !seen.contains(value) {
-                        seen.push(value.clone());
-                    }
-                }
-                Model::Str(seen)
-            }
-            Model::Lgl(_) => panic!("unique of a logical model"),
         }
     }
 
