@@ -370,6 +370,17 @@ pub fn awaited() -> Option<Awaited> {
     AWAITED.get()
 }
 
+/// Whether the definition `formals`/`body` may carry a signature, as
+/// `interp::annotations::is_typed` tests a closure's.
+unsafe fn typed_definition(formals: Sexp, body: Sexp) -> bool {
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else {
+        body
+    };
+    key.has_gp(heap::object::gp::TYPED_DEFINITION)
+}
+
 /// The index [`Op::CallTyped`] uses for the function calling itself.
 pub const SELF: usize = usize::MAX;
 
@@ -679,15 +690,17 @@ struct Inlined {
 }
 
 /// The parameter reads computing one argument of a local function made: those of
-/// [`Lowering::param_reads`] from `start` to `end`, lowered from block `entry` to block `exit`.
+/// [`Lowering::param_reads`] from `start` to `end`, lowered from block `entry` to block `exit`
+/// through the blocks from `first_block` on.
 #[derive(Clone, Copy)]
 struct ArgumentReads {
     start: usize,
     end: usize,
     entry: BlockId,
     exit: BlockId,
-    /// Whether R computes the argument where the callee reads it even under a strict call: a
-    /// default, or a bare name, whose promise the call passes on.
+    first_block: u32,
+    /// Whether R computes the argument where the callee reads it even under a strict call,
+    /// which holds for a default.
     lazy: bool,
 }
 
@@ -696,6 +709,7 @@ const NO_ARGUMENT_READS: ArgumentReads = ArgumentReads {
     end: 0,
     entry: BlockId(0),
     exit: BlockId(0),
+    first_block: 0,
     lazy: true,
 };
 
@@ -1303,11 +1317,22 @@ impl Lowering<'_> {
             if let Argument::Value(_) = value
                 && (span.lazy || !strict)
             {
+                let reads = self.param_reads.get(span.start..span.end).unwrap_or(&[]);
+                let mut everywhere: SmallVec<[u32; 2]> = SmallVec::new();
+                for read in reads {
+                    if read.into.is_none()
+                        && !everywhere.contains(&read.param)
+                        && self.on_every_path(span, read.block)
+                    {
+                        everywhere.push(read.param);
+                    }
+                }
+                let everywhere = |param: u32| everywhere.contains(&param);
                 for index in span.start..span.end {
                     if let Some(read) = self.param_reads.get(index)
                         && read.into.is_none()
                     {
-                        if read.block != span.entry && read.block != span.exit {
+                        if !everywhere(read.param) {
                             return Err(Refusal::new(
                                 "it reads a parameter on some paths of an argument of a local \
                                  function, which R computes where the function reads it: compute \
@@ -1334,14 +1359,51 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// The reads since `start`, from block `entry` on, of one argument of a local function.
-    fn argument_reads(&self, start: usize, entry: BlockId, lazy: bool) -> ArgumentReads {
+    /// Whether every path of the argument `span` from its entry to its exit runs `block`.
+    fn on_every_path(&self, span: &ArgumentReads, block: BlockId) -> bool {
+        if block == span.entry || block == span.exit {
+            return true;
+        }
+        let blocks = &self.builder.function.blocks;
+        let mut seen = vec![0u64; blocks.len().div_ceil(64)];
+        let mut stack: SmallVec<[BlockId; 8]> = SmallVec::from_slice(&[span.entry]);
+        while let Some(id) = stack.pop() {
+            if id == span.exit {
+                return false;
+            }
+            let index = id.0 as usize;
+            let inside = id == span.entry || id.0 >= span.first_block;
+            if id == block || !inside || seen[index / 64] & (1 << (index % 64)) != 0 {
+                continue;
+            }
+            seen[index / 64] |= 1 << (index % 64);
+            if let Some(next) = blocks.get(index) {
+                stack.extend(next.terminator.successors());
+            }
+        }
+        true
+    }
+
+    /// Where lowering stands before an argument of a local function, which
+    /// [`Lowering::argument_reads`] completes.
+    fn argument_start(&self) -> ArgumentReads {
         ArgumentReads {
-            start,
+            start: self.param_reads.len(),
             end: self.param_reads.len(),
-            entry,
+            entry: self.builder.current,
+            exit: self.builder.current,
+            first_block: self.builder.function.blocks.len() as u32,
+            lazy: false,
+        }
+    }
+
+    /// The reads of the argument lowered since `start`.
+    fn argument_reads(&self, start: ArgumentReads, lazy: bool) -> ArgumentReads {
+        ArgumentReads {
+            end: self.param_reads.len(),
             exit: self.builder.current,
             lazy,
+            ..start
         }
     }
 
@@ -1968,7 +2030,7 @@ impl Lowering<'_> {
                 callable
             {
                 let strict = self.inlined.last().is_none_or(|inlined| inlined.typed)
-                    && interp::annotations::is_typed_definition(formals, body);
+                    && typed_definition(formals, body);
                 self.attribute_reads(&values, &spans, strict)?;
             }
             return self.apply_arguments(callable, &values);
@@ -2449,13 +2511,13 @@ impl Lowering<'_> {
     ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
         let mut passed = SmallVec::new();
         for &(_, argument) in &arguments.items {
-            let (start, entry) = (self.param_reads.len(), self.builder.current);
+            let start = self.argument_start();
             passed.push(if self.passes_function(argument) {
                 Argument::Function(self.function_argument(argument)?)
             } else {
                 Argument::Value(self.value(argument)?)
             });
-            spans.push(self.argument_reads(start, entry, argument.kind() == SexpType::Symbol));
+            spans.push(self.argument_reads(start, false));
         }
         Ok(passed)
     }
@@ -2475,7 +2537,7 @@ impl Lowering<'_> {
         let supplied = match_formals(&formals, &arguments.items)?;
         let mut written: SmallVec<[(Option<Argument>, ArgumentReads); 4]> = SmallVec::new();
         for &(_, code) in &arguments.items {
-            let (start, entry) = (self.param_reads.len(), self.builder.current);
+            let start = self.argument_start();
             let argument = if code == rvalues::missing_arg() {
                 None
             } else if self.passes_function(code) {
@@ -2483,8 +2545,7 @@ impl Lowering<'_> {
             } else {
                 Some(Argument::Value(self.value(code)?))
             };
-            let lazy = code.kind() == SexpType::Symbol;
-            written.push((argument, self.argument_reads(start, entry, lazy)));
+            written.push((argument, self.argument_reads(start, false)));
         }
         let mut matched: SmallVec<[Option<Argument>; 4]> = SmallVec::new();
         spans.clear();
@@ -2586,11 +2647,11 @@ impl Lowering<'_> {
                     name()
                 ))));
             }
-            let (start, entry) = (self.param_reads.len(), self.builder.current);
+            let start = self.argument_start();
             let value = self.value(default)?;
             matched[index] = Some(Argument::Value(value));
             if let Some(span) = spans.get_mut(index) {
-                *span = self.argument_reads(start, entry, true);
+                *span = self.argument_reads(start, true);
             }
             self.bind(symbol, Binding::Value(value));
         }
@@ -3604,7 +3665,7 @@ impl Lowering<'_> {
             exit,
             returns_i64,
             early: SmallVec::new(),
-            typed: interp::annotations::is_typed_definition(definition, body),
+            typed: typed_definition(definition, body),
         });
         let value = match self.expression(body) {
             Ok(Some(value)) => self.usable(value).and_then(|()| {

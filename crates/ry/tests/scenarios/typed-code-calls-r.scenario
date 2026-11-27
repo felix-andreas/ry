@@ -585,6 +585,9 @@ file loose/helpers.R
 | strict_late <- function(x: F64) -> F64 { h <- function(a: F64) -> F64 { rebind(); a }; h(x * 2.0) }
 | branch_argument <- function(x: F64, flag: Bool) -> F64 { h <- function(a) { v <- a + 1.0; if (v > 0.5) stop("e"); v }; h(if (flag) x else 1.0) }
 | keep_branch <- function(z) { tryCatch(branch_argument(z, FALSE), error = function(e) 0); y <<- 100.0; z }
+| strict_bare <- function(x: F64) -> F64 { h <- function(a: F64) -> F64 { rebind(); a }; h(x) }
+| keep_bare <- function(z) { strict_bare(z) }
+| magnitude <- function(x: F64) -> F64 { g <- function(b) b + 1.0; g(if (x > 0.0) x else -x) }
 | y <- 1.0
 | print(keep_plus(y))
 | y <- 1.0
@@ -601,16 +604,22 @@ file loose/helpers.R
 | print(strict_late(y))
 | y <- 1.0
 | print(keep_branch(y))
+| y <- 1.0
+| print(keep_bare(y))
+| y <- -1.0
+| print(magnitude(y))
 
 run ry run --runtime ry loose/helpers.R
 expect exit 0
-expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100"
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100\n[1] 1\n[1] 2"
 expect stderr lacks "`checked` runs in the interpreter"
 expect stderr lacks "`square_after` runs in the interpreter"
 expect stderr lacks "`strict_late` runs in the interpreter"
+expect stderr lacks "`strict_bare` runs in the interpreter"
+expect stderr lacks "`magnitude` runs in the interpreter"
 
 env RY_JIT off
 run ry run --runtime ry loose/helpers.R
 expect exit 0
-expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100"
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100\n[1] 1\n[1] 2"
 unset RY_JIT
