@@ -1814,12 +1814,17 @@ fn force_reference<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R
         let (symbol, environment) = (context.root(symbol), context.root(environment));
         return handles::evaluate(context, symbol.value(), environment);
     }
-    let value = (slot != NO_REFERENCE_SLOT)
-        .then(|| frame.slot(slot as usize))
-        .filter(|&value| !handles::is_unbound(value));
-    let Some(value) = value else {
-        let symbol = context.root(symbol);
-        return eval_enclosed_name(context, symbol, owner);
+    let value = if slot == NO_REFERENCE_SLOT {
+        None
+    } else {
+        Some(frame.slot(slot as usize))
+    };
+    let value = match value {
+        Some(value) if !handles::is_unbound(value) => value,
+        _ => {
+            let symbol = context.root(symbol);
+            return eval_enclosed_name(context, symbol, owner);
+        }
     };
     if let Some(promise) = value.downcast::<Promise>() {
         let promise = context.root(promise);
@@ -2149,10 +2154,7 @@ pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a
             // The frame holds its function while the environment is reserved.
             context.reserve(ENVIRONMENT_BYTES);
             let context: &Cx<'_> = context;
-            let frame = handles::live_frame(context, owner);
-            let function = frame.function();
-            let environment = context.new_pending_frame_uncollected(function.environment())?;
-            frame.stand_in(environment);
+            let environment = handles::live_frame(context, owner).make_pending()?;
             activity::count(Counter::FrameEnvironments);
             Ok(environment)
         },

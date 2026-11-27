@@ -3803,18 +3803,18 @@ pub fn pending_frame<'c, 's>(
 
 impl<'c, 's> LiveFrame<'c, 's> {
     /// The frame's position on the frame stack.
-    #[inline]
+    #[inline(always)]
     pub fn index(self) -> usize {
         self.index
     }
 
-    #[inline]
+    #[inline(always)]
     fn fields(self) -> &'c crate::Frame {
         &crate::interp().frames[self.index]
     }
 
     /// The closure the frame runs.
-    #[inline]
+    #[inline(always)]
     pub fn function(self) -> Gc<'c, Closure> {
         match self
             .fields()
@@ -3828,13 +3828,13 @@ impl<'c, 's> LiveFrame<'c, 's> {
     }
 
     /// The call as written, which `sys.call` returns.
-    #[inline]
+    #[inline(always)]
     pub fn call(self) -> Gc<'c> {
         self.fields().call.get(self.context)
     }
 
     /// The environment the frame runs in, `None` for a slot frame that runs in its slots.
-    #[inline]
+    #[inline(always)]
     pub fn environment(self) -> Option<Gc<'c, Environment>> {
         self.fields()
             .env
@@ -3844,20 +3844,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
 
     /// The environment the frame's function was defined in, where a name its slots leave
     /// unbound is read.
-    #[inline]
+    #[inline(always)]
     pub fn enclosure(self) -> Gc<'c, Environment> {
         self.function().environment()
     }
 
     /// How the frame was entered.
-    #[inline]
+    #[inline(always)]
     pub fn role(self) -> crate::FrameRole {
         self.fields().role
     }
 
     /// What slot `slot` of a slot frame holds: a value, a promise, the empty argument, `...`,
     /// or nothing (`unbound`).
-    #[inline]
+    #[inline(always)]
     pub fn slot(self, slot: usize) -> Gc<'c> {
         let value = crate::interp().bytecode.registers[self.fields().slots as usize + 1 + slot];
         register_value(self.context, value)
@@ -4066,15 +4066,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
         Ok(bindings.len())
     }
 
-    /// Makes `environment` the one that stands for the slot frame, which the frame then holds.
-    /// The environment records the frame's slot names, so a lookup of any other name passes it
-    /// without asking the frame, and the frame's dispatch variables.
+    /// Makes the environment that stands for the slot frame, which the frame then holds, without
+    /// a collection check: it follows a [`Cx::reserve`] that covers it. The environment records
+    /// the frame's slot names, so a lookup of any other name passes it without asking the frame,
+    /// and the frame's dispatch variables.
     #[inline]
-    pub fn stand_in(self, environment: Gc<'_, Environment>) {
+    pub fn make_pending(self) -> R<Gc<'c, Environment>> {
         let index = self.index;
-        let Some((names, _)) = compiled_slots(self.function()) else {
+        let function = self.function();
+        let Some((names, _)) = compiled_slots(function) else {
             panic!("slot frame {index} runs code without a slot table");
         };
+        let environment = self
+            .context
+            .new_pending_frame_uncollected(function.environment())?;
         // SAFETY: the frame's function holds its slot table, and so the names, for as long as
         // the environment stands for the frame.
         unsafe {
@@ -4086,6 +4091,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
         // SAFETY: the frame holds the environment from here on, and the interpreter traces its
         // fields.
         crate::interp().frames[index].pending = unsafe { Held::adopt(environment.raw()) };
+        Ok(environment)
     }
 
     /// Makes the environment that stands for the slot frame its environment, in its header
