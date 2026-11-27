@@ -556,8 +556,16 @@ fn cases_survive(
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let torture = torture(seed);
-    let stressable = cases()
+    // The slowest cases take about seven minutes a pass under seeded stress with the heap
+    // checked, in a debug build on four busy cores.
+    let timeout = Duration::from_secs(900);
+    let ry = ProcessEngine::ry().with_timeout(timeout);
+    let torture = torture(seed).with_timeout(timeout);
+    // Both engines are ry, so a case runs when ry's library holds the packages it requires.
+    // Without them it fails in a way that names a random temporary path, which two processes
+    // never share.
+    let (runnable, _) = runnable_cases(find_cases(&case_directory()), || engine_packages(&ry));
+    let stressable = runnable
         .into_iter()
         .filter(|case| !sets_collection_stress(case));
     let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = stressable.partition(|case| {
@@ -579,11 +587,6 @@ fn cases_survive(
     for _ in 0..fuzz_iterations(sampled).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
-    // The slowest cases take about seven minutes a pass under seeded stress with the heap
-    // checked, in a debug build on four busy cores.
-    let timeout = Duration::from_secs(900);
-    let ry = ProcessEngine::ry().with_timeout(timeout);
-    let torture = torture.with_timeout(timeout);
     let started = Instant::now();
     // Each case is two independent processes, so the cases run in parallel; the failures are
     // reported in the order the seed chose the cases.
