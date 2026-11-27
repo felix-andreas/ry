@@ -554,6 +554,10 @@ pub struct Hooks {
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: for<'s> fn(&mut Cx<'s>, Local<'s>) -> R<Option<Local<'s>>>,
+    /// A character vector of usable strings (UTF-8, no `NA`) as one over a typed-core list of
+    /// them, which typed code takes without converting, or `None` where sharing gains nothing,
+    /// such as for a short vector, or when the host has no such class.
+    pub share_strings: for<'s> fn(&mut Cx<'s>, Local<'s>) -> R<Option<Local<'s>>>,
     /// GNU R's `R_tryWrap` for an integer, logical, double, complex, raw or character vector:
     /// a wrapper that shares the data until something writes, or a copy when the host has no
     /// wrapper classes.
@@ -1052,6 +1056,7 @@ pub fn default_hooks() -> Hooks {
         altrep_summary: |_, _, _, _| Ok(None),
         altrep_sortedness: |_, _| Ok((NA_INTEGER, false)),
         defer_strings: |_, _| Ok(None),
+        share_strings: |_, _| Ok(None),
         altrep_wrap: |context, object| Ok(handles::shallow_copy(context, object)?.finish()),
         altrep_unwrap: |_, object| object.value(),
         run_finalizers: |_| {},

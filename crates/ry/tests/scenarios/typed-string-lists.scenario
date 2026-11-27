@@ -1,0 +1,51 @@
+# A long `List<Str>` crosses between R and typed code without copying its strings: R reads a
+# typed result one element at a time, and typed code takes back a list it made, or one
+# `List.from_r` read, as it is. R sees an ordinary character vector either way, a write from R
+# makes a new value that typed code reads as R wrote it, and strings that are not UTF-8 keep
+# their encoding.
+
+requires ry-runtime
+
+file strings.R
+| tag <- function(words: List<Str>) -> List<Str> List.map(words, \(w) Str.concat(w, "!"))
+| count <- function(words: List<Str>, word: Str) -> I64 {
+|   List.walk(words, 0i64, \(n, w) if (w == word) n + 1i64 else n)
+| }
+| words <- List.from_r(rep(c("north", "south", "a string of more than fifteen bytes"), 40))
+| tagged <- tag(words)
+| print(c(typeof(tagged), length(tagged)))
+| print(tagged[c(1, 3)])
+| print(count(tagged, "south!"))
+| print(count(tag(tagged), "north!!"))
+| print(table(unclass(tagged))[["north!"]])
+| print(identical(tagged, List.from_r(paste0(unclass(words), "!"))))
+| changed <- tagged
+| changed[[2]] <- "west"
+| print(c(changed[[2]], tagged[[2]]))
+| print(Num.to_r(count(changed, "south!")) - Num.to_r(count(tagged, "south!")))
+| changed[5] <- NA
+| print(c(anyNA(changed), anyNA(tagged)))
+| gctorture(TRUE)
+| joined <- paste(tagged[1:4], collapse = "|")
+| gctorture(FALSE)
+| print(joined)
+| for (i in 1:20) last <- tag(tag(words))
+| invisible(gc())
+| print(count(last, "south!!"))
+| latin <- rep(iconv("caf\u00e9", "UTF-8", "latin1"), 64)
+| print(c(Encoding(List.from_r(latin)[[1]]), nchar(tag(List.from_r(latin))[[1]])))
+| named <- function() { x <- tag(words); names(x) <- paste0("n", seq_along(x)); x }
+| kept <- named()
+| invisible(gc())
+| for (i in 1:5) other <- tag(List.from_r(paste0("z", 1:200)))
+| invisible(gc())
+| print(paste(unname(kept[c(1, 120)]), collapse = "|"))
+| plain <- tag(words)
+| alias <- plain
+| names(alias) <- paste0("n", seq_along(alias))
+| invisible(paste(alias, collapse = ""))
+| print(substr(paste(plain, collapse = ","), 1, 20))
+
+run ry run --runtime ry strings.R
+expect exit 0
+expect stdout "[1] \"character\" \"120\"      \n[\"north!\", \"a string of more than fifteen bytes!\"]\n40i64\n40i64\n[1] 40\n[1] TRUE\n[1] \"west\"   \"south!\"\n[1] -1\n[1]  TRUE FALSE\n[1] \"north!|south!|a string of more than fifteen bytes!|north!\"\n40i64\n[1] \"latin1\" \"5\"     \n[1] \"north!|a string of more than fifteen bytes!\"\n[1] \"north!,south!,a stri\"\n"
