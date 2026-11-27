@@ -949,13 +949,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
 /// its caller pays only for the test of a forced promise.
 #[inline(never)]
 unsafe fn force_unforced_raw(promise: Sexp) -> R<Sexp> {
+    // The caller holds the promise, and `force_unforced` roots it before anything can collect.
     handles::in_caller_scope(|context| {
-        context
-            .scope(|context| {
-                let promise = context.root(Gc::<Promise>::adopt(promise));
-                force_rooted(context, promise)
-            })
-            .map(Local::raw)
+        force_unforced(context, Local::<Promise>::adopt(promise)).map(Local::raw)
     })
 }
 
@@ -980,37 +976,30 @@ pub fn forced_value<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>>
 /// the promise (a loader placeholder replaces itself), and the promise's environment must
 /// outlive its code, so the promise is rooted while it runs, as GNU R's pending-promise stack
 /// keeps it.
-#[inline(never)]
 fn force_unforced<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Local<'s>> {
     context.scope(|context| {
         let promise = context.root(promise);
-        force_rooted(context, promise)
+        if promise.read(context).has_flag(PROMISE_SEEN) {
+            return Err(error(
+                "promise already under evaluation: recursive default argument reference or earlier problems?",
+            ));
+        }
+        handles::forcing(context, promise)?;
+        activity::count(Counter::PromisesForced);
+        promise.read(context).set_flags(PROMISE_SEEN, true);
+        if promise.read(context).has_flag(PROMISE_INTERRUPTED) {
+            promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
+            // A handler that jumps out of this warning leaves the promise marked as under
+            // evaluation, as in GNU R, where the next force reports the recursive reference.
+            handles::warning(context, "restarting interrupted promise evaluation")?;
+        }
+        let result = promise_result(context, promise);
+        promise.read(context).set_flags(PROMISE_SEEN, false);
+        promise
+            .read(context)
+            .set_flags(PROMISE_INTERRUPTED, result.is_err());
+        settle(context, promise, result?)
     })
-}
-
-/// [`force_unforced`] in the scope that roots `promise` while its code runs.
-#[inline(always)]
-fn force_rooted<'s>(context: &mut Cx<'s>, promise: Local<'s, Promise>) -> R<Local<'s>> {
-    if promise.read(context).has_flag(PROMISE_SEEN) {
-        return Err(error(
-            "promise already under evaluation: recursive default argument reference or earlier problems?",
-        ));
-    }
-    handles::forcing(context, promise)?;
-    activity::count(Counter::PromisesForced);
-    promise.read(context).set_flags(PROMISE_SEEN, true);
-    if promise.read(context).has_flag(PROMISE_INTERRUPTED) {
-        promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
-        // A handler that jumps out of this warning leaves the promise marked as under
-        // evaluation, as in GNU R, where the next force reports the recursive reference.
-        handles::warning(context, "restarting interrupted promise evaluation")?;
-    }
-    let result = promise_result(context, promise);
-    promise.read(context).set_flags(PROMISE_SEEN, false);
-    promise
-        .read(context)
-        .set_flags(PROMISE_INTERRUPTED, result.is_err());
-    settle(context, promise, result?)
 }
 
 /// What running the code of the unforced `promise` gives, before an annotation checks it.
@@ -1211,6 +1200,8 @@ fn slot_content<'c>(frame: handles::LiveFrame<'c, '_>, symbol: Gc<'_, Symbol>) -
 /// The variable `symbol` a replacement in the running slot frame changes, read from `enclosure`
 /// because the frame's own slots do not bind it. GNU R evaluates the name in the enclosure, so
 /// an unbound one is reported against the call that made the enclosure, if a call did.
+#[cold]
+#[inline(never)]
 pub(crate) fn enclosed_value<'s>(
     context: &mut Cx<'s>,
     symbol: Local<'_, Symbol>,
