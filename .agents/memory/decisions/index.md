@@ -695,6 +695,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A long `List<Str>` crosses to R as a string list over the native list (settled)
 - `print` writes a closure's annotations; `deparse` writes the erasure
 - `source()` runs a typed file as the checker elaborated it
+- A recursion that takes a function compiles once per passed function (settled)
 
 ## DataFrame and the table engine
 

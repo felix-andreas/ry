@@ -877,7 +877,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(17) {
+        let mut lines = match rng.below(18) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -1077,6 +1077,26 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                 }
                 definitions.push(format!("print(Num.to_f64(walk_a_{index}({n}, 0)))"));
                 definitions.push(format!("print(Num.to_f64(walk_b_{index}({n}, 1)))"));
+                definitions
+            }
+            16 => {
+                // A recursion that takes a function compiles once per passed function, with the
+                // value the literal reads from its caller passed along.
+                let mut definitions = vec![
+                    format!(
+                        "fold_{index} <- function(n: I64, f: fn(k: I64) -> I64) -> I64 if (n <= \
+                         0) 0 else f(n) + fold_{index}(n - 1, f)"
+                    ),
+                    format!(
+                        "times_{index} <- function(n: I64, by: I64) -> I64 fold_{index}(n, \\(k) \
+                         k * by)"
+                    ),
+                ];
+                if rng.chance(1, 2) {
+                    definitions.reverse();
+                }
+                definitions.push(format!("print(Num.to_f64(times_{index}({n}, 3)))"));
+                definitions.push(format!("print(Num.to_f64(times_{index}({n} + 1, 2)))"));
                 definitions
             }
             _ => vec![

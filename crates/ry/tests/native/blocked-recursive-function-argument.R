@@ -1,3 +1,5 @@
-# blocked: count_down
-count_down <- function(n: I64, f: fn(I64) -> I64) -> I64 if (n <= 0) 0 else f(n) + count_down(n - 1, f)
-cat(Num.to_r(count_down(3, \(k: I64) -> I64 k * 2)), "\n")
+# blocked: nest
+# A function literal passed to a recursive call that calls the caller's function parameter.
+nest <- function(n: I64, f: fn(k: I64) -> I64) -> I64 if (n == 0i64) f(0i64) else nest(n - 1i64, \(k) f(k) + 1i64)
+top <- function(n: I64) -> I64 nest(n, \(k) k)
+print(top(3i64))

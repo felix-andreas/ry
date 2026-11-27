@@ -335,9 +335,9 @@ impl Uncompiled {
                  `List`"
             ),
             Uncompiled::RecursiveFunctionArgument(name) => format!(
-                "a function passed to a recursive call of `{name}` {YET}: native code lowers a \
-                 function that takes a function into each of its callers, which a recursion \
-                 cannot end. Loop instead, or define the function inside `{name}`"
+                "a function passed to a recursive call of `{name}` that reads a local function, \
+                 a function parameter or a name set on some paths only {YET}. Loop instead, or \
+                 define the function inside `{name}`"
             ),
             Uncompiled::InvisibleResult => format!(
                 "the function ends in an expression whose value R returns invisibly, which {YET}. \
@@ -2723,12 +2723,13 @@ impl<'a, 'db> Judge<'a, 'db> {
             // The type check matches the arguments to the formals, and native code matches them
             // as R does, left-out formals taking their defaults.
             Callee::Native(name) => {
-                let mut passes_function = false;
                 for &(_, value) in arguments {
-                    passes_function |= self.function_argument(value);
-                }
-                if passes_function && self.own == Some(name) {
-                    self.uncompiled(id, Uncompiled::RecursiveFunctionArgument(name));
+                    if self.function_argument(value)
+                        && self.own == Some(name)
+                        && self.reads_caller_function(value)
+                    {
+                        self.uncompiled(value, Uncompiled::RecursiveFunctionArgument(name));
+                    }
                 }
             }
             Callee::R(name, origin) => self.r_call(id, name, origin, arguments, usage),
@@ -2781,6 +2782,39 @@ impl<'a, 'db> Judge<'a, 'db> {
                 false
             }
         }
+    }
+
+    /// Whether a function passed to a recursive call reads a local function, a function
+    /// parameter or a name set on some paths only. Native code specializes the recursion for
+    /// the function it passes and hands the values the function reads in as arguments, which
+    /// a function or a possibly unset name cannot be.
+    fn reads_caller_function(&self, value: ExprId) -> bool {
+        let module = self.judged.module;
+        let function = match *module.kind(value) {
+            ExpressionKind::NameRef(name) => match self.lookup(name) {
+                Some(Slot::Function(function)) => function,
+                _ => return false,
+            },
+            _ => value,
+        };
+        let ExpressionKind::Function { parameters, body } = *module.kind(function) else {
+            return false;
+        };
+        let own = &module[parameters];
+        let mut pending: SmallVec<[ExprId; 16]> = SmallVec::from_slice(&[body]);
+        while let Some(id) = pending.pop() {
+            if let ExpressionKind::NameRef(name) = *module.kind(id)
+                && !own.iter().any(|parameter| parameter.name == name)
+                && matches!(
+                    self.lookup(name),
+                    Some(Slot::Function(_) | Slot::FunctionParameter | Slot::Maybe(_))
+                )
+            {
+                return true;
+            }
+            module.for_each_child(id, |child| pending.push(child));
+        }
+        false
     }
 
     fn r_call(
