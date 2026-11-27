@@ -399,19 +399,24 @@ fn plan(root: &str, full: bool, conditions: &NamespaceConditions) -> RValue {
         Ok(plan) => plan,
         Err(failure) => return failure_value(&failure),
     };
-    if plan.typed
-        && !plan.is_noop()
+    if !plan.typed {
+        // A package that dropped its typed code keeps no elaborated text.
+        session.loader.set_elaborated(&plan.root, Vec::new());
+    } else if (plan.read_sources || !plan.is_noop())
         && let Some(elaborate) = ELABORATE.get()
     {
+        let Ok(elaborated_root) = CString::new(plan.root.to_string_lossy().into_owned()) else {
+            return error_value(&format!("{} has a NUL byte in its path", plan.package));
+        };
         let mut files: Vec<ElaboratedFile> = Vec::new();
         let status = elaborate(
-            path.as_ptr(),
+            elaborated_root.as_ptr(),
             receive_elaborated,
             (&raw mut files).cast::<c_void>(),
         );
         if status != 0 {
             return error_value(&format!(
-                "{} was not loaded, because its type check failed",
+                "{} was not loaded, because ry could not elaborate its typed code",
                 plan.package
             ));
         }

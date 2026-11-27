@@ -299,7 +299,6 @@ pub struct PackageIndex {
     /// Some file holds typed code: it is strict, or written with ry syntax or `#:`
     /// annotations. ry's runtime then runs the package as the checker elaborates it, because a
     /// literal or an empty list can run with a type only the checker knows.
-    #[serde(default)]
     pub typed: bool,
 }
 

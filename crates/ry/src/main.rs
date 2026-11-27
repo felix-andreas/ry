@@ -1297,7 +1297,7 @@ fn run_load(
                 .name("ry-strict-check".to_owned())
                 .spawn(move || {
                     lower_priority();
-                    preflight::check_package(&check_root, &config)
+                    preflight::check_package(&check_root, &config, true)
                 });
             match check {
                 Ok(check) => {
@@ -1324,7 +1324,7 @@ fn run_load(
             }
         }
         Runtime::GnuR => {
-            match preflight::check_package(&root, preflight.config()) {
+            match preflight::check_package(&root, preflight.config(), false) {
                 Ok(Verdict::Run) => {}
                 Ok(Verdict::Refuse) => return ExitCode::from(1),
                 Err(CommandError) => return ExitCode::from(2),

@@ -323,10 +323,15 @@ fn on_analysis_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 /// asked about `R/` alone, so its verdict is the one `ry check` reaches for those files, and
 /// the two share the check cache: a package that `ry check` or the editor last checked loads
 /// without a second analysis. A reload in the same process keeps the analysis it builds in
-/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated. A package that turns
-/// strict mode on nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips
-/// analysis entirely.
-pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
+/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated, and so does the first
+/// check when the runtime `elaborates` the package, because [`elaborate_loaded_package`] then
+/// reads the same analysis. A package that turns strict mode on nowhere, neither in `ry.toml`
+/// nor in a file's `# typing: strict`, skips analysis entirely.
+pub fn check_package(
+    root: &Path,
+    config: &Config,
+    elaborates: bool,
+) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
     // The directive is ASCII, so the bytes answer for a file in any encoding.
     let mentions_strict = |path: &Path| {
@@ -352,7 +357,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     // The first check in a process reads the shared record, which makes a cold load after
     // `ry check` or the editor cheap, but its database replays findings it never derived. A
     // reload builds a database kept for edits instead, so every reload after it is incremental.
-    let first = !checks.contains_key(&key);
+    let first = !elaborates && !checks.contains_key(&key);
     let previous = checks.remove(&key).flatten();
     let check = on_analysis_stack(|| {
         if first {
@@ -517,7 +522,10 @@ pub fn elaborate_loaded_package(
             let Some(path) = package_path(root, &key, &file.path) else {
                 continue;
             };
-            files.push((path, xxh3_64(source.as_bytes()), program));
+            // The loader reads a file with its line endings made `\n`, so the hash and the
+            // text it takes are of that form.
+            let lines = |text: &str| text.replace("\r\n", "\n").replace('\r', "\n");
+            files.push((path, xxh3_64(lines(source).as_bytes()), lines(&program)));
         }
         Ok((check, files))
     });

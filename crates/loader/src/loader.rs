@@ -239,6 +239,10 @@ pub struct Plan {
     /// The package holds typed code, which ry's runtime runs as the checker elaborates it
     /// ([`Loader::set_elaborated`]).
     pub typed: bool,
+    /// The read took new text for some `R/` file. A host that elaborates typed code elaborates
+    /// again even when the plan writes nothing, because an edit of a `#:` annotation alone
+    /// changes only the elaborated text.
+    pub read_sources: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
 }
@@ -564,7 +568,15 @@ impl Loader {
         // Taken from the stamps the read takes before it reads each file, so an edit made
         // while the plan is read shows as a change later.
         let (fingerprint, planned) = match self.read(&root, Some(conditions)) {
-            Ok((inputs, fingerprint)) => (fingerprint, self.plan_inputs(&root, inputs, full)),
+            Ok((inputs, fingerprint)) => {
+                let read_sources = inputs.files.iter().any(|(_, text)| text.is_some());
+                let planned = self.plan_inputs(&root, inputs, full);
+                let planned = planned.map(|plan| Plan {
+                    read_sources,
+                    ..plan
+                });
+                (fingerprint, planned)
+            }
             // The read stopped before it took any stamp, so the package is as it was.
             Err(LoadError::Conditionals(conditionals)) => {
                 return Err(LoadError::Conditionals(conditionals));
@@ -1918,6 +1930,7 @@ pub fn diff<'text>(
         keeps_names,
         strict: index.strict,
         typed: index.typed,
+        read_sources: false,
         namespace: index.namespace.clone(),
         warnings,
     }
@@ -2387,6 +2400,7 @@ impl Plan {
             run_on_load: false,
             strict: state.index.strict,
             typed: state.index.typed,
+            read_sources: false,
             warnings: Vec::new(),
         }
     }
