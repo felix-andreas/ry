@@ -2868,6 +2868,17 @@ follows the left one alone, so `cmp(1L, 1:3)` is a `logical` rather than a `logi
 `I64` beside an R `integer` scalar (`cmp(1i64, x)` for `x: integer`) is a type error, although the
 runtime compares them.
 
+A callback whose family result must have its operand's type, as a fold's accumulator must, takes
+a type the family keeps: R's outcome (`double` or `logical`) when it fits, else a ry number (or
+`Bool`). So `Reduce(function(acc, x) acc * 2, 1:3, 1L)` is a `double`, and so is a callback that
+returns the accumulator unchanged in one branch (`if (x > 1L) acc * 2 else acc`).
+`List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an `I64`. A fold's result is its
+init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. Two
+gaps remain: an accumulator that admits both families takes R's `double`, so `function(ys, init)
+List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`, and the outcome is a
+scalar, so a vector init (`Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))`) is a
+type error.
+
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
 `f(TRUE)` and `f(c(1, 2))` alike. When the other operand is a union, the unannotated operand is pinned
