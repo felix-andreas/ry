@@ -566,3 +566,42 @@ run ry run --runtime ry loose/forwarded.R
 expect exit 0
 expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
 unset RY_JIT
+
+# A local function's argument is forced where the function first reads its formal, so the
+# parameters it reads count there, and not at all once the formal is overwritten.
+file loose/helpers.R
+| rebind <- function() y <<- 100.0
+| id_na <- function() NA_real_
+| plus_one <- function(x: F64) -> F64 { h <- function(a) a + 1.0; h(x * 2.0) }
+| overwritten <- function(x: F64) -> F64 { h <- function(a) { a <- 2.0; a }; h(x) }
+| square_after <- function(x: F64) -> F64 { h <- function(a) { v <- a * a; cat("r\n"); v }; h(x + 1.0) }
+| late_double <- function(x: F64) -> F64 { h <- function(a) { rebind(); a }; h(x * 2.0) }
+| checked <- function(x: F64) -> F64 { if (x > 5.0) stop("bad: ", x); x }
+| chosen <- function(x: F64, flag: Bool) -> F64 { v <- List.sum(List.from_r_or(id_na(), if (flag) x else 0.0)); rebind(); v }
+| keep_plus <- function(z) { plus_one(z); y <<- 100.0; z }
+| keep_overwritten <- function(z) { overwritten(z); y <<- 100.0; z }
+| keep_chosen <- function(z) { chosen(z, FALSE); z }
+| y <- 1.0
+| print(keep_plus(y))
+| y <- 1.0
+| print(keep_overwritten(y))
+| y <- 2.0
+| print(square_after(y))
+| y <- 1.0
+| print(late_double(y))
+| y <- 2.0
+| print(checked(y))
+| y <- 1.0
+| print(keep_chosen(y))
+
+run ry run --runtime ry loose/helpers.R
+expect exit 0
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100"
+expect stderr lacks "`checked` runs in the interpreter"
+expect stderr lacks "`square_after` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/helpers.R
+expect exit 0
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100"
+unset RY_JIT
