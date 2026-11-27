@@ -282,7 +282,6 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
   - the first call of a function that calls a not-yet-loaded R function or converts a value of unknown type, which waits on the interpreter once.
 
   Report these as `interpreted` at the call.
-- **Records and tuples from R compile only at the first call.** `ahead::annotated_type` gives no type for a record or tuple parameter, because its value at the call gives the type, so `--aot` leaves such a closure to its first call. The annotation names the type (after `canonical_annotation`), so the ahead-of-time signature could take it from the text.
 - **Two lists are mirrored by hand.** `native::COMPILED_STD` against `Lowerer::builtin`, and `native::gives_table_value` against `gives_table_value` in `crates/typed/src/lower.rs`. The agreement test holds every `COMPILED_STD` name to a corpus function that runs natively, but it cannot see a function the typed core compiles and the list leaves out, which shows as a needless `interpreted` warning. A crate both sides can read (the names with native code as one table) would remove the mirror.
 
 ### Gaps the typed public ports found
