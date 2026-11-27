@@ -7,7 +7,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode,
         eval::{self, define, find_var, find_var_in_frame, value_of},
-        interp,
+        handles, interp,
         sort::collation_order,
         unwind::{ArgumentReader, R, error, missing_argument},
         values::{
@@ -2569,7 +2569,15 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
         supplied.push(Arg { tag, value });
     }
     let formals = definition.car();
-    let matched = eval::match_args(formals, &supplied, target)?;
+    // The `...` lists matching builds stay rooted in the caller's handle scope until the call
+    // is built.
+    let matched: SmallVec<[Sexp; 8]> = handles::in_caller_scope(|context| {
+        let formals = handles::held(context, formals);
+        let target = handles::held(context, target);
+        let supplied = handles::tagged(context, &supplied);
+        let matched = eval::match_args(context, formals, supplied, target)?;
+        Ok(matched.iter().map(|value| value.raw()).collect())
+    })?;
     let formal_symbols: Vec<Sexp> = values::pairlist_items(formals)
         .into_iter()
         .map(|(tag, _)| tag)

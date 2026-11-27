@@ -15,9 +15,9 @@ use {
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch,
         handles::{
-            self, AssignmentCall, AssignmentCopy, Cells, Chars, Cx, Environment, Expression, Gc,
-            Integer, Language, List, Local, Owned, Pairlist, Promise, Real, Str, StringFill,
-            Symbol, Tagged, safe,
+            self, AssignmentCall, AssignmentCopy, Bytecode, Cells, Chars, Closure, Cx, Environment,
+            Expression, Gc, Integer, Language, List, Local, Owned, Pairlist, Promise, Real, Str,
+            StringFill, Symbol, Tagged, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -30,7 +30,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::{borrow::Cow, cell::Cell, mem::MaybeUninit},
+    std::{cell::Cell, mem::MaybeUninit},
     thin_vec::ThinVec,
 };
 
@@ -39,7 +39,7 @@ use {
 pub type Args = SmallVec<[Arg; 10]>;
 
 /// What [`match_args`] returns: one value per formal.
-pub type Matched = SmallVec<[Sexp; 8]>;
+pub type Matched<'s> = SmallVec<[Local<'s>; 8]>;
 
 /// The promise bit set while its code runs, to report recursive default references.
 pub const PROMISE_SEEN: u16 = 1 << 0;
@@ -144,7 +144,11 @@ pub unsafe fn eval_symbol_reporting(
 
 /// `..N`'s position, for the symbols that name one.
 pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
-    let name = symbol.car().bytes();
+    dot_dot_position(symbol.car().bytes())
+}
+
+/// `..N`'s position, for the names that name one.
+pub fn dot_dot_position(name: &[u8]) -> Option<usize> {
     let digits = name.strip_prefix(b"..")?;
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
@@ -2779,7 +2783,23 @@ pub unsafe fn bind_arguments(
         None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        Some(match_args_cached(function, formals, args, call)?)
+        // The `...` lists matching builds stay rooted in the caller's handle scope while the
+        // frame binds them.
+        let matched = handles::in_caller_scope(|context| {
+            let call = handles::held(context, call);
+            let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+                return Err(error(
+                    "internal error: a closure call's function is not a closure",
+                ));
+            };
+            let args = handles::tagged(context, args);
+            let matched = match_args_cached(context, function, args, call)?;
+            Ok(matched
+                .iter()
+                .map(|value| value.raw())
+                .collect::<SmallVec<[Sexp; 8]>>())
+        })?;
+        Some(matched)
     };
     let env = frame_environment(function, formals)?;
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
@@ -2834,100 +2854,167 @@ pub enum CallFrame {
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
 pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
-    let state = interp();
     if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
-        || function == state.namespace_loader
+        || function == interp().namespace_loader
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
         || crate::annotations::is_typed(function)
     {
         return Ok(None);
     }
-    let mut body = function.cdr();
-    if body.kind() != SexpType::Bytecode {
-        body = bytecode::compile_before_call(function)?;
-        if body.kind() != SexpType::Bytecode {
-            return Ok(None);
-        }
-    }
-    let constants = body.cdr();
-    let table = constants.element(bytecode::SLOTS);
-    if table == nil() {
+    if function.cdr().kind() != SexpType::Bytecode
+        && bytecode::compile_before_call(function)?.kind() != SexpType::Bytecode
+    {
         return Ok(None);
     }
+    // The caller holds the call, the closure and the arguments until the call returns, and
+    // releases the handle stack after it.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Ok(None);
+        };
+        let args = handles::tagged(context, args);
+        bind_formals(context, call, function, args)
+    })
+}
+
+fn bind_formals<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'s>],
+) -> R<Option<CallFrame>> {
+    let closure = function.read(context);
+    let Some((names, registers)) = slot_layout(context, closure) else {
+        return Ok(None);
+    };
+    let slot_count = names.len();
     let _activity = activity::enter(Activity::CallSetup, 0);
-    let names: &[Sexp] = table.element(1).slice();
     // One walk settles what binding by position needs: every formal has the slot the body's
     // code reads it from, none is `...`, and there is a formal for each argument. A closure
     // whose formals were replaced keeps the body's code, whose table names the formals it was
     // compiled with.
-    let dots = symbols().dots;
+    let dots = handles::symbol(|symbols| symbols.dots);
     let mut formal_count = 0;
     let mut by_position = true;
-    let mut formal = function.car();
-    while formal.kind() == SexpType::Pairlist {
-        let name = formal.tag();
-        if names.get(formal_count) != Some(&name) {
+    let mut formal = closure.formals();
+    while let Some((_, name, rest)) = handles::cell_fields(formal) {
+        if formal_count >= slot_count || !names.get(formal_count).is(name) {
             return Ok(None);
         }
-        by_position &= name != dots;
+        by_position &= !name.is(dots);
         formal_count += 1;
-        formal = formal.cdr();
+        formal = rest;
     }
-    let actuals =
-        if by_position && args.len() <= formal_count && args.iter().all(|arg| arg.tag == nil()) {
-            None
-        } else {
-            activity::count(Counter::FormalsMatchedByName);
-            Some(match_args_cached(function, function.car(), args, call)?)
+    let actuals = if by_position
+        && args.len() <= formal_count
+        && args.iter().all(|arg| arg.tag.is(handles::null()))
+    {
+        None
+    } else {
+        activity::count(Counter::FormalsMatchedByName);
+        Some(match_args_cached(context, function, args, call)?)
+    };
+    let missing_value = handles::missing_argument();
+    let actual = |index: usize| match &actuals {
+        Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
+        None => args.get(index).map_or(missing_value, |arg| arg.value),
+    };
+    // A left-out formal whose default is code needs the defaults compiled to run on the slots,
+    // which allocates, so that happens before the window opens.
+    let mut formal = function.read(context).formals();
+    let needs_defaults = (0..formal_count).any(|index| {
+        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+            return false;
         };
-    let header = state.bytecode.registers.len();
-    // The body's own registers follow the slots, so one reservation covers the whole window.
-    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
-    bytecode::reserve_registers(header + 1 + names.len() + register_count)?;
-    let registers = bytecode::register_address(header);
-    let missing_value = missing_arg();
+        formal = rest;
+        handles::is_missing_argument(actual(index))
+            && !default.is(missing_value)
+            && !is_literal(default)
+    });
+    if needs_defaults {
+        handles::build_slot_defaults(context, function)?;
+    }
+    let closure = function.read(context);
+    let defaults = slot_defaults(context, closure, needs_defaults);
+    let mut window = handles::Window::open(context, slot_count, registers)?;
     let (mut missing, mut promised) = (0u64, 0u64);
-    let mut defaults = None;
-    let mut formal = function.car();
+    let mut formal = closure.formals();
     for index in 0..formal_count {
-        let actual = match &actuals {
-            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
-            None => args.get(index).map_or(missing_value, |arg| arg.value),
+        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+            break;
         };
-        let default = formal.car();
-        let value = if actual == missing_value && default != missing_value {
-            // On either way out the slots written so far give their counts back. The values
-            // are the caller's arguments, which the call goes on to bind in a heap frame, so
-            // nothing is released with a count: `release_slots` would empty a promise.
-            let fits = slot_default_fits(function, default, index, &mut defaults);
-            if !matches!(fits, Ok(true)) {
-                for written in 0..index {
-                    (*registers.add(1 + written)).decrement_refcount();
+        let actual = actual(index).read(context);
+        let value = if actual.is(missing_value) && !default.is(missing_value) {
+            if !is_literal(default) {
+                if !default_fits(defaults, index) {
+                    window.abandon();
+                    return Ok(None);
                 }
-                bytecode::release_registers(header);
-                return fits.map(|_| None);
-            }
-            missing |= 1 << index;
-            if !(default.kind().is_atomic() || default == nil()) {
                 promised |= 1 << index;
             }
+            missing |= 1 << index;
             default
         } else {
             actual
         };
-        value.increment_refcount();
-        *registers.add(1 + index) = value;
-        formal = formal.cdr();
-    }
-    let unbound = unbound();
-    for index in formal_count..names.len() {
-        *registers.add(1 + index) = unbound;
+        window.push(value);
+        formal = rest;
     }
     Ok(Some(CallFrame::Slots {
-        header: header as u32,
+        header: window.close() as u32,
         missing,
         promised,
     }))
+}
+
+/// The slot names of `function`'s compiled body, the formals first, and how many registers its
+/// code uses after them, when the body is compiled with a slot table.
+fn slot_layout<'a>(
+    context: &'a Cx<'_>,
+    function: Gc<'a, Closure>,
+) -> Option<(Gc<'a, List>, usize)> {
+    let table = handles::slot_table(context, function)?;
+    let names = (table.len() > 1)
+        .then(|| table.get(1))?
+        .standard::<List>()?;
+    let code = function.body().downcast::<Bytecode>()?;
+    let registers = handles::constant(code, bytecode::REGISTERS)?.standard::<Integer>()?;
+    let registers = usize::try_from(*registers.as_slice().first()?).ok()?;
+    Some((names, registers))
+}
+
+/// Whether a default goes into a slot as it is: a constant, not code to run.
+fn is_literal(default: Gc<'_>) -> bool {
+    default.r_type().is_atomic() || default.r_type() == SexpType::Nil
+}
+
+/// The defaults of `function`'s formals that run on its slot frame, as
+/// [`handles::build_slot_defaults`] keeps them in its slot table, when `built` says they were
+/// built for this call and they are for its formals.
+fn slot_defaults<'a>(
+    context: &'a Cx<'_>,
+    function: Gc<'a, Closure>,
+    built: bool,
+) -> Option<Gc<'a, List>> {
+    if !built {
+        return None;
+    }
+    let table = handles::slot_table(context, function)?;
+    let kept = (table.len() > 2).then(|| table.get(2))?;
+    let (formals, _, defaults) = handles::cell_fields(kept)?;
+    if !formals.is(function.formals()) {
+        return None;
+    }
+    defaults.standard::<List>()
+}
+
+/// Whether a slot frame can hold the default of the formal at `index` that is code: as a
+/// promise of its code compiled to run over the slots, which [`run_frame`] makes once the
+/// frame is on the stack.
+fn default_fits(defaults: Option<Gc<'_, List>>, index: usize) -> bool {
+    defaults
+        .is_some_and(|defaults| index < defaults.len() && !defaults.get(index).is(handles::null()))
 }
 
 /// Starts the call of the S4 method `method` that the generic running on the slot frame at
@@ -2960,84 +3047,35 @@ pub unsafe fn enter_method(
     {
         return Ok(None);
     }
-    let mut body = method.cdr();
-    if body.kind() != SexpType::Bytecode {
-        body = bytecode::compile_before_call(method)?;
-        if body.kind() != SexpType::Bytecode {
-            return Ok(None);
-        }
-    }
-    let constants = body.cdr();
-    let table = constants.element(bytecode::SLOTS);
-    if table == nil() {
+    if method.cdr().kind() != SexpType::Bytecode
+        && bytecode::compile_before_call(method)?.kind() != SexpType::Bytecode
+    {
         return Ok(None);
     }
-    let _activity = activity::enter(Activity::CallSetup, 0);
-    let names: &[Sexp] = table.element(1).slice();
     let state = interp();
-    let frame = &state.frames[position];
+    let Some(frame) = state.frames.get(position) else {
+        return Ok(None);
+    };
     let (call, sys_parent, caller) = (frame.call, frame.sys_parent, frame.caller);
     let (source, source_missing) = (frame.slots as usize, frame.missing);
     let generic_vars = frame.method_vars as usize;
     if (sys_parent == nil() && caller == crate::NO_SLOTS) || position + 1 != state.frames.len() {
         return Ok(None);
     }
-    let header = state.bytecode.registers.len();
-    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
-    bytecode::reserve_registers(header + 1 + names.len() + register_count)?;
-    let registers = bytecode::register_address(header);
-    let sources = bytecode::register_address(source);
-    let (mut missing, mut promised) = (0u64, 0u64);
-    let mut defaults = None;
-    let mut formal = method.car();
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let held = *sources.add(1 + index);
-        let left_out = index < 64 && source_missing & (1 << index) != 0;
-        let default = formal.car();
-        // A default the generic's body forced is the promise GNU R hands on. One it left alone
-        // gives way to the method's.
-        let read = left_out && held.kind() == SexpType::Promise && held.car() != unbound();
-        let fits = if names.get(index) != Some(&formal.tag()) {
-            Ok(false)
-        } else if !left_out || read {
-            Ok(true)
-        } else if default == missing_arg() || !standard {
-            Ok(false)
-        } else {
-            slot_default_fits(method, default, index, &mut defaults)
+    // The caller holds the method until the call returns, and the generic's frame holds what
+    // its slots do.
+    let bound = handles::in_caller_scope(|context| {
+        let Some(method) = handles::held(context, method).downcast::<Closure>() else {
+            return Ok(None);
         };
-        if !matches!(fits, Ok(true)) {
-            // The slots written so far give their counts back without `release_slots`, which
-            // would empty a promise the generic's frame holds too.
-            for written in 0..index {
-                (*registers.add(1 + written)).decrement_refcount();
-            }
-            bytecode::release_registers(header);
-            return fits.map(|_| None);
-        }
-        let value = if left_out && !read {
-            if !(default.kind().is_atomic() || default == nil()) {
-                promised |= 1 << index;
-            }
-            default
-        } else {
-            held
-        };
-        if left_out {
-            missing |= 1 << index;
-        }
-        value.increment_refcount();
-        *registers.add(1 + index) = value;
-        formal = formal.cdr();
-        index += 1;
-    }
-    let unbound = unbound();
-    for index in index..names.len() {
-        *registers.add(1 + index) = unbound;
-    }
+        bind_method_formals(context, method, source, source_missing, standard)
+    })?;
+    let Some((header, missing, promised)) = bound else {
+        return Ok(None);
+    };
     // GNU R's `R_loadMethod` binds the method and its classes in the generic's frame, where a
     // later dispatch from the same frame replaces them.
+    let state = interp();
     let (shared, _) = vars.split_at(vars.len().saturating_sub(1));
     if state.method_vars.len() == generic_vars {
         state.method_vars.extend_from_slice(shared);
@@ -3058,18 +3096,90 @@ pub unsafe fn enter_method(
     // The frame's arguments are the generic's. Pushing a frame grows the list they are in.
     let args = Args::from_slice(crate::frame_args(state, position));
     push_slot_frame(
-        call,
-        method,
-        sys_parent,
-        caller,
-        &args,
-        vars,
-        header as u32,
-        missing,
-        promised,
-        true,
+        call, method, sys_parent, caller, &args, vars, header, missing, promised, true,
     )
     .map(Some)
+}
+
+/// The slot window of [`enter_method`]: its header register, and its formals' missing and
+/// promised bits, from the slots of the generic's frame at `source` whose missing bits are
+/// `source_missing`.
+fn bind_method_formals(
+    context: &mut Cx<'_>,
+    method: Local<'_, Closure>,
+    source: usize,
+    source_missing: u64,
+    standard: bool,
+) -> R<Option<(u32, u64, u64)>> {
+    let closure = method.read(context);
+    let Some((names, registers)) = slot_layout(context, closure) else {
+        return Ok(None);
+    };
+    let slot_count = names.len();
+    let _activity = activity::enter(Activity::CallSetup, 0);
+    let missing_value = handles::missing_argument();
+    // What each formal takes, settled before anything is stored: the generic's value, or, for
+    // one the call left out, the method's default when the generic's is unread.
+    let mut takes_default: u64 = 0;
+    let mut needs_defaults = false;
+    let mut formal = closure.formals();
+    let mut index = 0;
+    while let Some((default, name, rest)) = handles::cell_fields(formal) {
+        let Some(held) = handles::slot(context, source, index) else {
+            return Ok(None);
+        };
+        if index >= slot_count || index >= 64 || !names.get(index).is(name) {
+            return Ok(None);
+        }
+        let left_out = source_missing & (1 << index) != 0;
+        // A default the generic's body forced is the promise GNU R hands on. One it left alone
+        // gives way to the method's.
+        let read = left_out
+            && held
+                .downcast::<Promise>()
+                .is_some_and(|promise| promise.result().raw() != unbound());
+        if left_out && !read {
+            if default.is(missing_value) || !standard {
+                return Ok(None);
+            }
+            takes_default |= 1 << index;
+            needs_defaults |= !is_literal(default);
+        }
+        formal = rest;
+        index += 1;
+    }
+    if needs_defaults {
+        handles::build_slot_defaults(context, method)?;
+    }
+    let closure = method.read(context);
+    let defaults = slot_defaults(context, closure, needs_defaults);
+    let mut window = handles::Window::open(context, slot_count, registers)?;
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let mut formal = closure.formals();
+    let mut index = 0;
+    while let Some((default, _, rest)) = handles::cell_fields(formal) {
+        let Some(held) = handles::slot(context, source, index) else {
+            window.abandon();
+            return Ok(None);
+        };
+        let value = if takes_default & (1 << index) != 0 {
+            if !is_literal(default) {
+                if !default_fits(defaults, index) {
+                    window.abandon();
+                    return Ok(None);
+                }
+                promised |= 1 << index;
+            }
+            default
+        } else {
+            held
+        };
+        missing |= source_missing & (1 << index);
+        window.push(value);
+        formal = rest;
+        index += 1;
+    }
+    Ok(Some((window.close() as u32, missing, promised)))
 }
 
 /// The source [`direct_sources`] gives a `...` formal, whose arguments follow the formals'.
@@ -3097,41 +3207,66 @@ pub const PROMISED_DEFAULT: i32 = -5;
 /// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
 /// leaves out has a default whose promise would capture the frame.
 pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> {
-    let Some((shape, dots_index)) = plannable(function) else {
+    // The caller holds the closure and the call while it plans.
+    handles::with(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Ok(None);
+        };
+        site_sources(context, function, call)
+    })
+}
+
+fn site_sources(
+    context: &mut Cx<'_>,
+    function: Local<'_, Closure>,
+    call: Local<'_>,
+) -> R<Option<CallPlan>> {
+    let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
         return Ok(None);
     };
-    let mut args = Args::new();
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut args: SmallVec<[Tagged<'_>; 8]> = SmallVec::new();
     let mut forwards_dots = false;
-    let mut cell = call.cdr();
-    while cell.kind() == SexpType::Pairlist {
-        let expression = cell.car();
-        if expression.kind() == SexpType::Symbol {
-            if expression == symbols().dots {
+    let Some((_, _, mut cell)) = handles::cell_fields(call.read(context)) else {
+        return Ok(None);
+    };
+    while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
+        if let Some(symbol) = expression.downcast::<Symbol>() {
+            if symbol.is(dots) {
                 forwards_dots = true;
-            } else if dot_dot_index(expression).is_some() {
+            } else if dot_dot_position(symbol.name().bytes()).is_some() {
                 return Ok(None);
             }
         }
-        args.push(Arg {
-            tag: cell.tag(),
-            value: expression,
+        args.push(Tagged {
+            tag: context.root(tag),
+            value: context.root(expression),
         });
-        cell = cell.cdr();
+        cell = rest;
     }
     if forwards_dots {
         return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
     }
-    plan_sources(function, shape, dots_index, &args, call)
+    plan_sources(context, function, shape, dots_index, &args, call)
 }
 
 /// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the
 /// arguments it collected with `...` spread out. `None` when they do not match, which the
 /// generic path then reports, or a default does not fit a slot.
 pub unsafe fn matched_sources(function: Sexp, args: &[Arg], call: Sexp) -> R<Option<CallPlan>> {
-    let Some((shape, dots_index)) = plannable(function) else {
-        return Ok(None);
-    };
-    plan_sources(function, shape, dots_index, args, call)
+    // The caller holds the closure, the call and the arguments while it plans.
+    handles::with(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Ok(None);
+        };
+        let args = handles::tagged(context, args);
+        let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
+            return Ok(None);
+        };
+        plan_sources(context, function, shape, dots_index, args, call)
+    })
 }
 
 /// A call's plan: the [`CallShape`] of the closures it is for, and its sources
@@ -3141,59 +3276,49 @@ pub type CallPlan = (CallShape, SmallVec<[i32; 8]>);
 /// The [`CallShape`] of `function` and which formal is `...`, when calls of it can take their
 /// arguments straight into slots: its body is compiled with a slot table whose first names
 /// are its formals.
-unsafe fn plannable(function: Sexp) -> Option<(CallShape, Option<usize>)> {
-    let body = function.cdr();
-    if body.kind() != SexpType::Bytecode
-        || function == interp().namespace_loader
-        || crate::annotations::is_typed(function)
-    {
+fn plannable(context: &Cx<'_>, function: Gc<'_, Closure>) -> Option<(CallShape, Option<usize>)> {
+    if function.raw() == interp().namespace_loader || crate::annotations::typed_closure(function) {
         return None;
     }
-    let table = body.cdr().element(bytecode::SLOTS);
-    if table == nil() {
-        return None;
-    }
-    let names = table.element(1);
-    let slots = values::length(names);
-    let registers = values::ints(body.cdr().element(bytecode::REGISTERS))[0];
+    let (names, registers) = slot_layout(context, function)?;
     let mut shape = CallShape {
         formals: 0,
-        slots: u16::try_from(slots).ok()?,
+        slots: u16::try_from(names.len()).ok()?,
         registers: u16::try_from(registers).ok()?,
     };
+    let dots = handles::symbol(|symbols| symbols.dots);
     let mut dots_index = None;
-    let mut formal = function.car();
-    while formal.kind() == SexpType::Pairlist {
+    let mut formal = function.formals();
+    while let Some((_, name, rest)) = handles::cell_fields(formal) {
         let index = shape.formals as usize;
-        if index >= slots
-            || index >= bytecode::MAX_SLOT_FORMALS
-            || names.element(index) != formal.tag()
+        if index >= names.len() || index >= bytecode::MAX_SLOT_FORMALS || !names.get(index).is(name)
         {
             return None;
         }
-        if formal.tag() == symbols().dots {
+        if name.is(dots) {
             dots_index = Some(index);
         }
         shape.formals += 1;
-        formal = formal.cdr();
+        formal = rest;
     }
     Some((shape, dots_index))
 }
 
 /// The sources of [`direct_sources`] for `args` matched to `function`'s formals.
-unsafe fn plan_sources(
-    function: Sexp,
+fn plan_sources(
+    context: &mut Cx<'_>,
+    function: Local<'_, Closure>,
     shape: CallShape,
     dots_index: Option<usize>,
-    args: &[Arg],
-    call: Sexp,
+    args: &[Tagged<'_>],
+    call: Local<'_>,
 ) -> R<Option<CallPlan>> {
     let formal_count = shape.formals as usize;
-    let formals = function.car();
-    let Ok(plan) = match_plan(formals, args, call) else {
+    // A call whose arguments do not match plans nothing: the generic path reports the error
+    // when the call runs.
+    let Ok(plan) = match_plan(context, Formals::Closure(function), args, call) else {
         return Ok(None);
     };
-    let missing_value = missing_arg();
     let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
     if let Some(index) = dots_index {
         sources[index] = DOTS_SOURCE;
@@ -3201,47 +3326,43 @@ unsafe fn plan_sources(
     for (position, &target) in plan.iter().enumerate() {
         if Some(target as usize) == dots_index {
             sources.push(position as i32);
-        } else if args[position].value != missing_value {
-            sources[target as usize] = position as i32;
+        } else if !handles::is_missing_argument(args[position].value)
+            && let Some(source) = sources.get_mut(target as usize)
+        {
+            *source = position as i32;
         }
     }
-    let mut defaults = None;
-    let mut formal = formals;
+    let missing_value = handles::missing_argument();
+    let mut formal = function.read(context).formals();
+    let needs_defaults = sources[..formal_count].iter().any(|&source| {
+        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+            return false;
+        };
+        formal = rest;
+        source == -1 && !default.is(missing_value) && !is_literal(default)
+    });
+    if needs_defaults {
+        handles::build_slot_defaults(context, function)?;
+    }
+    let closure = function.read(context);
+    let defaults = slot_defaults(context, closure, needs_defaults);
+    let mut formal = closure.formals();
     for (index, source) in sources[..formal_count].iter_mut().enumerate() {
-        let default = formal.car();
-        if *source == -1 && default != missing_value {
-            if !slot_default_fits(function, default, index, &mut defaults)? {
-                return Ok(None);
-            }
-            *source = if default.kind().is_atomic() || default == nil() {
+        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+            break;
+        };
+        if *source == -1 && !default.is(missing_value) {
+            *source = if is_literal(default) {
                 LITERAL_DEFAULT
-            } else {
+            } else if default_fits(defaults, index) {
                 PROMISED_DEFAULT
+            } else {
+                return Ok(None);
             };
         }
-        formal = formal.cdr();
+        formal = rest;
     }
     Ok(Some((shape, sources)))
-}
-
-/// Whether a slot frame of `function` can hold the default of the formal at `index` for a call
-/// that leaves it out: a literal goes in the slot as it is, and anything else as a promise of
-/// its code over the slots ([`bytecode::slot_defaults`], which `defaults` keeps once read), which
-/// [`run_frame`] makes once the frame is on the stack.
-unsafe fn slot_default_fits(
-    function: Sexp,
-    default: Sexp,
-    index: usize,
-    defaults: &mut Option<Sexp>,
-) -> R<bool> {
-    if default.kind().is_atomic() || default == nil() {
-        return Ok(true);
-    }
-    let defaults = match *defaults {
-        Some(defaults) => defaults,
-        None => *defaults.insert(bytecode::slot_defaults(function)?),
-    };
-    Ok(defaults != nil() && defaults.element(index) != nil())
 }
 
 /// Calls `function` for a call whose site plans per call ([`MATCH_PER_CALL`]): in a slot frame
@@ -3301,7 +3422,6 @@ pub unsafe fn bind_plan(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Entered> {
-    let state = interp();
     if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
@@ -3312,62 +3432,81 @@ pub unsafe fn bind_plan(
             depth: 0,
         });
     }
-    let count = shape.slots as usize;
-    let header = state.bytecode.registers.len();
-    bytecode::reserve_registers(header + 1 + count + shape.registers as usize)?;
-    let registers = bytecode::register_address(header);
-    let missing_value = missing_arg();
-    let (sources, dots_sources) = sources.split_at((shape.formals as usize).min(sources.len()));
-    let mut dots = missing_value;
-    for &source in dots_sources.iter().rev() {
-        if let Some(arg) = args.get(source as usize) {
-            dots = values::triple(
-                SexpType::Dots,
-                arg.value,
-                if dots == missing_value { nil() } else { dots },
-                arg.tag,
-            )?;
-        }
-    }
-    let (mut missing, mut promised) = (0u64, 0u64);
-    // Only a formal the call leaves out reads its default, so the walk over the formals goes
-    // no further than the last of them.
-    let (mut formal, mut formal_index) = (function.car(), 0);
-    for (index, &source) in sources.iter().enumerate() {
-        let value = match args.get(source as usize) {
-            Some(arg) if source >= 0 => arg.value,
-            _ if source == DOTS_SOURCE => dots,
-            _ if source <= LITERAL_DEFAULT => {
-                while formal_index < index {
-                    formal = formal.cdr();
-                    formal_index += 1;
-                }
-                missing |= 1 << index;
-                if source == PROMISED_DEFAULT {
-                    promised |= 1 << index;
-                }
-                formal.car()
-            }
-            _ => missing_value,
+    // The caller holds the closure and the arguments until the call returns, and releases the
+    // handle stack after it.
+    let (header, missing, promised) = handles::in_caller_scope(|context| {
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a planned call's function is not a closure",
+            ));
         };
-        value.increment_refcount();
-        *registers.add(1 + index) = value;
-    }
-    let unbound = unbound();
-    for index in sources.len()..count {
-        *registers.add(1 + index) = unbound;
-    }
+        let args = handles::tagged(context, args);
+        bind_planned(context, function, shape, sources, args)
+    })?;
     enter(
         call,
         function,
         sys_parent,
         args,
         &[],
-        header as u32,
+        header,
         missing,
         promised,
         Entering::Start,
     )
+}
+
+/// The slot window of [`bind_plan`]: its header register, and its formals' missing and
+/// promised bits.
+#[inline(always)]
+fn bind_planned<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    shape: CallShape,
+    sources: &[i32],
+    args: &[Tagged<'s>],
+) -> R<(u32, u64, u64)> {
+    let missing_value = handles::missing_argument();
+    let (sources, dots_sources) = sources.split_at((shape.formals as usize).min(sources.len()));
+    let mut dots = missing_value;
+    if !dots_sources.is_empty() {
+        let collected: SmallVec<[Tagged<'s>; 8]> = dots_sources
+            .iter()
+            .filter_map(|&source| args.get(source as usize).copied())
+            .collect();
+        if !collected.is_empty() {
+            dots = handles::dots(context, &collected)?;
+        }
+    }
+    let mut window =
+        handles::Window::open(context, shape.slots as usize, shape.registers as usize)?;
+    let (mut missing, mut promised) = (0u64, 0u64);
+    // Only a formal the call leaves out reads its default, so the walk over the formals goes
+    // no further than the last of them.
+    let (mut formal, mut formal_index) = (function.read(context).formals(), 0);
+    for (index, &source) in sources.iter().enumerate() {
+        let value = match args.get(source as usize) {
+            Some(arg) if source >= 0 => arg.value.read(context),
+            _ if source == DOTS_SOURCE => dots.read(context),
+            _ if source <= LITERAL_DEFAULT => {
+                while formal_index < index
+                    && let Some((_, _, rest)) = handles::cell_fields(formal)
+                {
+                    formal = rest;
+                    formal_index += 1;
+                }
+                missing |= 1 << index;
+                if source == PROMISED_DEFAULT {
+                    promised |= 1 << index;
+                }
+                handles::cell_fields(formal)
+                    .map_or(missing_value.read(context), |(default, ..)| default)
+            }
+            _ => missing_value.read(context),
+        };
+        window.push(value);
+    }
+    Ok((window.close() as u32, missing, promised))
 }
 
 /// Runs a call of `function` without running its body: `run` does what the body would, from a
@@ -4917,12 +5056,71 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 /// GNU R's argument matching: exact names, then partial names for the formals before `...`, then
 /// positions. Returns one value per formal: the supplied value or promise, `R_MissingArg`, or
 /// for `...` a `DOTSXP` of what it collects.
-pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
-    if let Some(matched) = match_positional_args(formals, args, missing_arg(), symbols().dots)? {
+pub fn match_args<'s>(
+    context: &mut Cx<'s>,
+    formals: Local<'_>,
+    args: &[Tagged<'s>],
+    call: Local<'_>,
+) -> R<Matched<'s>> {
+    matched(context, Formals::List(formals), args, call)
+}
+
+/// The formals a call matches its arguments to: a closure's, read through the closure so that
+/// they need no root of their own, or a list the caller holds.
+#[derive(Clone, Copy)]
+enum Formals<'f> {
+    Closure(Local<'f, Closure>),
+    List(Local<'f>),
+}
+
+impl<'f> Formals<'f> {
+    fn read<'a>(self, context: &'a Cx<'_>) -> Gc<'a>
+    where
+        'f: 'a,
+    {
+        match self {
+            Formals::Closure(function) => function.read(context).formals(),
+            Formals::List(formals) => formals.read(context),
+        }
+    }
+}
+
+/// How many formals there are and which one is `...`, the first if several are.
+#[derive(Clone, Copy)]
+struct FormalShape {
+    count: usize,
+    dots: Option<usize>,
+}
+
+fn formal_shape(formals: Gc<'_>) -> FormalShape {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut shape = FormalShape {
+        count: 0,
+        dots: None,
+    };
+    let mut cell = formals;
+    while let Some((_, tag, rest)) = handles::cell_fields(cell) {
+        if shape.dots.is_none() && tag.is(dots) {
+            shape.dots = Some(shape.count);
+        }
+        shape.count += 1;
+        cell = rest;
+    }
+    shape
+}
+
+fn matched<'s>(
+    context: &mut Cx<'s>,
+    formals: Formals<'_>,
+    args: &[Tagged<'s>],
+    call: Local<'_>,
+) -> R<Matched<'s>> {
+    let shape = formal_shape(formals.read(context));
+    if let Some(matched) = match_positional_args(context, shape, args)? {
         return Ok(matched);
     }
-    let plan = match_plan(formals, args, call)?;
-    matched_from_plan(formals, args, &plan)
+    let plan = match_plan(context, formals, args, call)?;
+    matched_from_plan(context, shape, args, &plan)
 }
 
 /// Which formal each argument binds to: an argument that `...` collects maps to the position of
@@ -4937,111 +5135,177 @@ type Plan = SmallVec<[u32; 8]>;
 /// a formal matched by name from its value, and an empty argument leaves none.
 const BINDS_NOTHING: u32 = u32::MAX;
 
-/// [`match_args`] for a call of the compiled closure `function`, reusing the plan of the last
-/// call of its body when it had the same formals and argument names. The cache holds one entry
-/// in the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
-unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
-    let code = function.cdr();
-    let missing = missing_arg();
-    if code.kind() != SexpType::Bytecode
-        || !args.iter().any(is_named)
-        || args.iter().any(|arg| arg.value == missing)
+/// [`match_args`] for a call of the closure `function`, reusing the plan of the last call of its
+/// compiled body when it had the same formals and argument names. The cache holds one entry in
+/// the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
+fn match_args_cached<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'s>],
+    call: Local<'_>,
+) -> R<Matched<'s>> {
+    let formals = Formals::Closure(function);
+    if function
+        .read(context)
+        .body()
+        .downcast::<Bytecode>()
+        .is_none()
+        || !args.iter().any(|arg| is_named(context, arg))
+        || args
+            .iter()
+            .any(|arg| handles::is_missing_argument(arg.value))
     {
-        return match_args(formals, args, call);
+        return matched(context, formals, args, call);
     }
-    let constants = code.cdr();
-    let entry = constants.element(bytecode::MATCHES);
-    if entry != nil()
-        && entry.element(0) == formals
-        && length(entry) == args.len() + 2
+    let shape = formal_shape(formals.read(context));
+    if let Some(plan) = cached_plan(context, function, args) {
+        return matched_from_plan(context, shape, args, &plan);
+    }
+    let plan = match_plan(context, formals, args, call)?;
+    let mut stored = context.alloc::<Integer>(plan.len())?;
+    for (slot, &formal) in stored.as_mut_slice().iter_mut().zip(&plan) {
+        *slot = formal as i32;
+    }
+    let stored = stored.finish();
+    let mut entry = context.alloc::<List>(args.len() + 2)?;
+    entry.set(context, 0, function.read(context).formals());
+    entry.set(context, 1, stored.value());
+    for (index, arg) in args.iter().enumerate() {
+        entry.set(context, index + 2, arg.tag);
+    }
+    let entry = entry.finish();
+    handles::set_body_constant(context, function, bytecode::MATCHES, entry.value());
+    matched_from_plan(context, shape, args, &plan)
+}
+
+/// The plan `function`'s compiled body keeps ([`match_args_cached`]), when it was made for the
+/// closure's formals and the tags of `args`.
+fn cached_plan(
+    context: &Cx<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'_>],
+) -> Option<Plan> {
+    let closure = function.read(context);
+    let code = closure.body().downcast::<Bytecode>()?;
+    let entry = handles::constant(code, bytecode::MATCHES)?.standard::<List>()?;
+    let fits = entry.len() == args.len() + 2
+        && entry.get(0).is(closure.formals())
         && args
             .iter()
             .enumerate()
-            .all(|(index, arg)| entry.element(index + 2) == arg.tag)
-    {
-        let plan: Plan = entry
-            .element(1)
-            .slice::<i32>()
+            .all(|(index, arg)| entry.get(index + 2).is(arg.tag));
+    if !fits {
+        return None;
+    }
+    let plan = entry.get(1).standard::<Integer>()?;
+    Some(
+        plan.as_slice()
             .iter()
             .map(|&formal| formal as u32)
-            .collect();
-        return matched_from_plan(formals, args, &plan);
-    }
-    let plan = match_plan(formals, args, call)?;
-    let stored: SmallVec<[i32; 8]> = plan.iter().map(|&formal| formal as i32).collect();
-    let stored = values::integer_vector(&stored)?;
-    let entry = alloc(SexpType::List, args.len() + 2)?;
-    let heap = crate::heap();
-    heap.set_element(entry, 0, formals);
-    heap.set_element(entry, 1, stored);
-    for (index, arg) in args.iter().enumerate() {
-        heap.set_element(entry, index + 2, arg.tag);
-    }
-    heap.set_element(constants, bytecode::MATCHES, entry);
-    matched_from_plan(formals, args, &plan)
+            .collect(),
+    )
 }
 
-fn is_named(arg: &Arg) -> bool {
-    unsafe { arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty() }
+/// The name an argument is passed by, or `None` for a positional one.
+fn argument_name<'a, 's: 'a>(context: &'a Cx<'_>, arg: &Tagged<'s>) -> Option<&'a [u8]> {
+    let name = arg.tag.read(context).downcast::<Symbol>()?.name().bytes();
+    (!name.is_empty()).then_some(name)
 }
 
-unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
-    let dots_symbol = symbols().dots;
+fn is_named(context: &Cx<'_>, arg: &Tagged<'_>) -> bool {
+    argument_name(context, arg).is_some()
+}
+
+fn match_plan(
+    context: &mut Cx<'_>,
+    formals: Formals<'_>,
+    args: &[Tagged<'_>],
+    call: Local<'_>,
+) -> R<Plan> {
+    let unused = match plan_or_unused(context, formals, args, call)? {
+        Ok(plan) => return Ok(plan),
+        Err(unused) => unused,
+    };
+    let names: SmallVec<[Option<String>; 4]> = unused
+        .iter()
+        .map(|&index| {
+            argument_name(context, &args[index]).map(|name| String::from_utf8_lossy(name).into())
+        })
+        .collect();
+    let arguments: SmallVec<[(Option<&str>, Local<'_>); 4]> = unused
+        .iter()
+        .zip(&names)
+        .map(|(&index, name)| (name.as_deref(), args[index].value))
+        .collect();
+    Err(handles::error_in(
+        call,
+        format!(
+            "unused argument{} {}",
+            if unused.len() == 1 { "" } else { "s" },
+            handles::unused_arguments(context, &arguments)
+        ),
+    ))
+}
+
+fn formal_name(formal: Gc<'_>) -> &[u8] {
+    formal
+        .downcast::<Symbol>()
+        .map_or(&[][..], |symbol| symbol.name().bytes())
+}
+
+/// The plan of `args` for `formals`, or the positions of the arguments that match no formal.
+fn plan_or_unused(
+    context: &Cx<'_>,
+    formals: Formals<'_>,
+    args: &[Tagged<'_>],
+    call: Local<'_>,
+) -> R<Result<Plan, SmallVec<[usize; 4]>>> {
+    let dots_symbol = handles::symbol(|symbols| symbols.dots);
     // Every closure call matches its arguments, so the working state stays off the heap for the
     // usual handful of formals and arguments.
-    let mut formal_symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
-    let mut cell = formals;
-    while matches!(
-        cell.kind(),
-        SexpType::Pairlist | SexpType::Language | SexpType::Dots
-    ) {
-        formal_symbols.push(cell.tag());
-        cell = cell.cdr();
+    let mut formal_symbols: SmallVec<[Gc<'_>; 8]> = SmallVec::new();
+    let mut cell = formals.read(context);
+    while let Some((_, tag, rest)) = handles::cell_fields(cell) {
+        formal_symbols.push(tag);
+        cell = rest;
     }
+    let multiply_matched = |formal: Gc<'_>| {
+        handles::error_in(
+            call,
+            format!(
+                "formal argument \"{}\" matched by multiple actual arguments",
+                String::from_utf8_lossy(formal_name(formal))
+            ),
+        )
+    };
     let count = formal_symbols.len();
     let mut matched: SmallVec<[bool; 8]> = smallvec![false; count];
     // The empty argument that matched each formal by name, which a positional argument replaces.
     let mut empty_match: SmallVec<[Option<usize>; 8]> = smallvec![None; count];
-    let missing = missing_arg();
     let mut plan: Plan = smallvec![0; args.len()];
     let mut used: SmallVec<[bool; 8]> = smallvec![false; args.len()];
     let dots_position = formal_symbols
         .iter()
-        .position(|&symbol| symbol == dots_symbol);
-    let arg_names: SmallVec<[Option<&[u8]>; 8]> = args
-        .iter()
-        .map(|arg| {
-            if arg.tag.kind() == SexpType::Symbol {
-                let name = arg.tag.car().bytes();
-                (!name.is_empty()).then_some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
+        .position(|symbol| symbol.is(dots_symbol));
+    let arg_names: SmallVec<[Option<&[u8]>; 8]> =
+        args.iter().map(|arg| argument_name(context, arg)).collect();
     // Exact matches.
     for (formal_index, &formal) in formal_symbols.iter().enumerate() {
-        if formal == dots_symbol {
+        if formal.is(dots_symbol) {
             continue;
         }
-        let formal_name = formal.car().bytes();
+        let formal_name = formal_name(formal);
         for (arg_index, name) in arg_names.iter().enumerate() {
             if let Some(name) = name
                 && *name == formal_name
             {
                 if matched[formal_index] {
-                    return Err(error_in(
-                        call,
-                        format!(
-                            "formal argument \"{}\" matched by multiple actual arguments",
-                            symbol_name(formal)
-                        ),
-                    ));
+                    return Err(multiply_matched(formal));
                 }
                 matched[formal_index] = true;
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
-                if args[arg_index].value == missing {
+                if handles::is_missing_argument(args[arg_index].value) {
                     empty_match[formal_index] = Some(arg_index);
                 }
             }
@@ -5054,7 +5318,7 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
         if matched[formal_index] {
             continue;
         }
-        let formal_name = formal.car().bytes();
+        let formal_name = formal_name(formal);
         for (arg_index, name) in arg_names.iter().enumerate() {
             if used[arg_index] && partial_owner[arg_index].is_none() {
                 continue;
@@ -5065,7 +5329,7 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 if let Some(owner) = partial_owner[arg_index]
                     && owner != formal_index
                 {
-                    return Err(error_in(
+                    return Err(handles::error_in(
                         call,
                         format!(
                             "argument {} matches multiple formal arguments",
@@ -5074,19 +5338,13 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                     ));
                 }
                 if matched[formal_index] {
-                    return Err(error_in(
-                        call,
-                        format!(
-                            "formal argument \"{}\" matched by multiple actual arguments",
-                            symbol_name(formal)
-                        ),
-                    ));
+                    return Err(multiply_matched(formal));
                 }
                 matched[formal_index] = true;
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
                 partial_owner[arg_index] = Some(formal_index);
-                if args[arg_index].value == missing {
+                if handles::is_missing_argument(args[arg_index].value) {
                     empty_match[formal_index] = Some(arg_index);
                 }
             }
@@ -5108,13 +5366,13 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
             continue;
         }
         while formal_index < count
-            && formal_symbols[formal_index] != dots_symbol
+            && !formal_symbols[formal_index].is(dots_symbol)
             && matched[formal_index]
             && empty_match[formal_index].is_none()
         {
             formal_index += 1;
         }
-        if formal_index < count && formal_symbols[formal_index] != dots_symbol {
+        if formal_index < count && !formal_symbols[formal_index].is(dots_symbol) {
             if let Some(empty) = empty_match[formal_index] {
                 plan[empty] = BINDS_NOTHING;
             }
@@ -5127,75 +5385,38 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
             unused.push(arg_index);
         }
     }
-    if !unused.is_empty() {
-        let names: Vec<Option<Cow<'_, str>>> = unused
-            .iter()
-            .map(|&index| arg_names[index].map(String::from_utf8_lossy))
-            .collect();
-        let arguments: Vec<(Option<&str>, Sexp)> = unused
-            .iter()
-            .zip(&names)
-            .map(|(&index, name)| {
-                let value = args[index].value;
-                let code = if value.kind() == SexpType::Promise {
-                    value.cdr()
-                } else {
-                    value
-                };
-                (name.as_deref(), code)
-            })
-            .collect();
-        return Err(error_in(
-            call,
-            format!(
-                "unused argument{} {}",
-                if unused.len() == 1 { "" } else { "s" },
-                deparse::unused_arguments(&arguments)
-            ),
-        ));
-    }
-    Ok(plan)
+    Ok(if unused.is_empty() {
+        Ok(plan)
+    } else {
+        Err(unused)
+    })
 }
 
 /// One value per formal from a plan: the argument mapped to it, the arguments mapped to `...`
 /// in order as a `DOTSXP`, or `R_MissingArg`.
-unsafe fn matched_from_plan(formals: Sexp, args: &[Arg], plan: &[u32]) -> R<Matched> {
-    let missing = missing_arg();
-    let dots_symbol = symbols().dots;
-    let mut result = Matched::new();
-    let mut dots_position = None;
-    let mut cell = formals;
-    while matches!(
-        cell.kind(),
-        SexpType::Pairlist | SexpType::Language | SexpType::Dots
-    ) {
-        if cell.tag() == dots_symbol {
-            dots_position = Some(result.len() as u32);
-        }
-        result.push(missing);
-        cell = cell.cdr();
-    }
+fn matched_from_plan<'s>(
+    context: &mut Cx<'s>,
+    shape: FormalShape,
+    args: &[Tagged<'s>],
+    plan: &[u32],
+) -> R<Matched<'s>> {
+    let mut result: Matched<'s> = smallvec![handles::missing_argument(); shape.count];
     for (arg, &formal) in args.iter().zip(plan) {
-        if Some(formal) != dots_position
+        if Some(formal as usize) != shape.dots
             && let Some(slot) = result.get_mut(formal as usize)
         {
             *slot = arg.value;
         }
     }
-    if let Some(position) = dots_position {
-        let mut list = nil();
-        for (arg, _) in args
+    if let Some(position) = shape.dots {
+        let collected: SmallVec<[Tagged<'s>; 8]> = args
             .iter()
             .zip(plan)
-            .rev()
-            .filter(|(_, formal)| **formal == position)
-        {
-            list = triple(SexpType::Dots, arg.value, list, arg.tag)?;
-        }
-        if list != nil()
-            && let Some(slot) = result.get_mut(position as usize)
-        {
-            *slot = list;
+            .filter(|(_, formal)| **formal as usize == position)
+            .map(|(arg, _)| *arg)
+            .collect();
+        if !collected.is_empty() {
+            result[position] = handles::dots(context, &collected)?;
         }
     }
     Ok(result)
@@ -5204,33 +5425,31 @@ unsafe fn matched_from_plan(formals: Sexp, args: &[Arg], plan: &[u32]) -> R<Matc
 /// The common case of `match_args` without its bookkeeping: no argument is named, so they fill
 /// the formals in order up to `...`, which collects the rest. Returns `None` when an argument is
 /// named or one is left over, which the full matcher handles and reports.
-unsafe fn match_positional_args(
-    formals: Sexp,
-    args: &[Arg],
-    missing: Sexp,
-    dots_symbol: Sexp,
-) -> R<Option<Matched>> {
-    if args.iter().any(is_named) {
+fn match_positional_args<'s>(
+    context: &mut Cx<'s>,
+    shape: FormalShape,
+    args: &[Tagged<'s>],
+) -> R<Option<Matched<'s>>> {
+    if args.iter().any(|arg| is_named(context, arg))
+        || (shape.dots.is_none() && args.len() > shape.count)
+    {
         return Ok(None);
     }
-    let mut result = Matched::new();
-    let mut remaining = args.iter();
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        if formal.tag() == dots_symbol {
-            let rest = remaining.as_slice();
-            let mut list = nil();
-            for arg in rest.iter().rev() {
-                list = triple(SexpType::Dots, arg.value, list, arg.tag)?;
-            }
-            result.push(if rest.is_empty() { missing } else { list });
-            remaining = [].iter();
+    let missing = handles::missing_argument();
+    let positional = shape.dots.unwrap_or(shape.count);
+    let mut result: Matched<'s> = (0..positional)
+        .map(|index| args.get(index).map_or(missing, |arg| arg.value))
+        .collect();
+    if let Some(position) = shape.dots {
+        let rest = args.get(position..).unwrap_or_default();
+        result.push(if rest.is_empty() {
+            missing
         } else {
-            result.push(remaining.next().map_or(missing, |arg| arg.value));
-        }
-        formal = formal.cdr();
+            handles::dots(context, rest)?
+        });
+        result.resize(shape.count, missing);
     }
-    Ok(remaining.as_slice().is_empty().then_some(result))
+    Ok(Some(result))
 }
 
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
