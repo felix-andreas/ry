@@ -4963,7 +4963,6 @@ fn atomic_name(atomic: Atomic) -> &'static str {
     }
 }
 
-/// The conversion that turns an R value into the ry value it meets.
 /// The conversion that turns the R value `r_side` into the ry type `ry_side`, when one does.
 fn r_conversion(db: &dyn Db, r_side: Ty<'_>, ry_side: Ty<'_>) -> Option<&'static str> {
     let native = match ry_side.kind(db) {

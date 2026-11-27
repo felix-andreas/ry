@@ -168,7 +168,8 @@ blamed: Unknown
 # statement order; a side settled to an R value admits only R values. The argument that
 # passed a side is found by its parameter, so another parameter of the same type is never
 # blamed. A literal default adapts as a passed literal does, and any other default keeps
-# its type. An annotated function keeps the check, and an R pair stays R.
+# its type. An annotated function keeps the check, a declared binder is as open as an
+# inferred one, and an R pair stays R.
 cmp <- function(a, b) a < b
 same <- function(a, b) a == b
 need_i <- function(v: I64) -> I64 v
@@ -203,6 +204,21 @@ rv <- function(p, q) { r <- p < q; need_i(p); need_s(q); r }
 dd <- as.Date("2020-01-01")
 okd <- cmp(dd, "2019-01-01")
 okr <- h(1L, 2)
+#: <T: ordered> fn(a: T) -> Bool
+rp <- function(a, b) a < b
+rk <- rp(k, k)
+rs <- rp(k, "s")
+#: <T: number> fn(v: T) -> T
+idn <- function(v) v
+nb <- function(a) { r <- a < sqrt(2); idn(a); r }
+#: <T: ordered, U: ordered> fn(a: T, b: U) -> Bool
+gen2 <- function(a, b) a < b
+q2 <- gen2(k, "s")
+q3 <- gen2(k, 2)
+bb: Bool <- TRUE
+dfl <- function(a, flag = TRUE) a == flag
+w1 <- dfl(bb)
+w2 <- dfl(1L)
 #++++
 cmp: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
 same: <T: eq, U: eq> fn(a: T, b: U) -> Compared<T>
@@ -238,16 +254,31 @@ rv: Unknown
 dd: Date
 okd: logical
 okr: logical
-818..819 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
-838..839 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
-1008..1010 error[type-mismatch] this call compares `double` with `I64`, and a ry value compares only with its own type. Convert the R value with `Num.from_r()`
-1020..1022 error[type-mismatch] this call compares `double` with `I64`, and a ry value compares only with its own type. Convert the R value with `Num.from_r()`
-1086..1089 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
-1142..1145 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
-1189..1190 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
-1247..1248 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
-1278..1284 error[type-mismatch] `==` is not defined between `Str` and `character`. A ry value meets an R value only through a conversion: convert the R side with `Str.from_r()`
-1340..1345 error[type-mismatch] `<` is not defined between `I64` and `Str`
+rp: <T: ordered, U: comparable or ordered> fn(a: T, b: U) -> Bool
+rk: Bool
+rs: Unknown
+idn: <T: number> fn(v: T) -> T
+nb: Unknown
+gen2: <T: ordered, U: ordered> fn(a: T, b: U) -> Bool
+q2: Unknown
+q3: Bool
+bb: Bool
+dfl: <T: eq, U: eq> fn(a: T, [flag]: U) -> Compared<T>
+w1: Bool
+w2: logical
+869..870 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
+889..890 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
+1059..1061 error[type-mismatch] this call compares `double` with `I64`, and a ry value compares only with its own type. Convert the R value with `Num.from_r()`
+1071..1073 error[type-mismatch] this call compares `double` with `I64`, and a ry value compares only with its own type. Convert the R value with `Num.from_r()`
+1137..1140 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
+1193..1196 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
+1240..1241 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
+1298..1299 error[type-mismatch] expected a comparable R value (a numeric, `character` or `logical` value, or a class), found `I64`
+1329..1335 error[type-mismatch] `==` is not defined between `Str` and `character`. A ry value meets an R value only through a conversion: convert the R side with `Str.from_r()`
+1391..1396 error[type-mismatch] `<` is not defined between `I64` and `Str`
+1584..1587 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
+1664..1675 error[type-mismatch] `<` is not defined between `T` and `double`. A ry value meets an R value only through a conversion such as `Num.from_r()`
+1783..1786 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type
 
 #---- an_open_value_tested_for_equality_admits_complex
 # R tests `complex` values for equality but has no order for them.

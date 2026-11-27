@@ -111,12 +111,12 @@ the call leaves open passes to the caller's signature. The pending pairs live in
 table, so a rollback drops them. A pair the body settles is checked at the item's end (at the
 comparison, after default literals settle); a pair with a var of an enclosing function moves to it,
 so curried functions and local closures carry it. The pair is part of the function type's identity:
-unifying two function types and passing a function value check both sides' pairs. A settled side
-from a default literal passes beside a ry number of its family. A side settled on a ry value
+unifying two function types and passing a function value check both sides' pairs. A side settled on a ry value
 binds the other side's open type (any statement order); a side settled on an R value constrains the
-other to the R half of its constraint (`comparable` under an order). The call finds an argument by
+other to the R half of its constraint (`comparable` under an order), so a ry-only constraint
+reports. A declared binder counts as open, so an annotated `<T: ordered, U: ordered>` keeps its pair. The call finds an argument by
 its parameter's type identity, never by type equality, so another parameter of that type is never
-blamed. A left-out default adapts only when it is a literal (`ComparedPair::left_literal`), and an
+blamed. A left-out default adapts only when it is a number, string or logical literal (`ComparedPair::left_literal`), and an
 annotated function keeps its pairs too. An overload set or a third binder spelling
 the relation was rejected as heavier than a side fact the annotation syntax need not express.
 
