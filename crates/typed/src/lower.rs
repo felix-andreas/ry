@@ -10992,7 +10992,6 @@ enum Step {
     Inclusive(Local),
 }
 
-/// The item a `vapply` template such as `numeric(1)` declares.
 /// The mapping calls whose empty result the native code builds when a `.ry_items` wraps them,
 /// with their arities: the checker wraps each whose result items only a callback gives.
 const SETTLED_EMPTY: [(&str, usize); 6] = [
@@ -11004,6 +11003,7 @@ const SETTLED_EMPTY: [(&str, usize); 6] = [
     ("List.join_map", 2),
 ];
 
+/// The item a `vapply` template such as `numeric(1)` declares.
 unsafe fn template_item(template: Sexp) -> Option<Item> {
     if template.kind() != SexpType::Language || template.car().kind() != SexpType::Symbol {
         return None;

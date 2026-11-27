@@ -68,8 +68,8 @@ pub const FAILED: i64 = 1;
 /// keeps its closure rooted, so no other closure can take the closure's address as a key.
 #[derive(Debug)]
 pub struct Native {
-    /// The machine code. It takes the number of calls that may still nest and then each
-    /// argument (`i32` for an integer or a logical, `f64` for a double), and returns a status
+    /// The machine code. It takes the number of calls that may still nest, the lowest frame
+    /// address its stack allows ([`typed::native_stack_limit`]) and then each argument (`i32` for an integer or a logical, `f64` for a double), and returns a status
     /// ([`OK`] or [`FAILED`]) and the value.
     pub address: usize,
     pub params: SmallVec<[Ty; 4]>,
