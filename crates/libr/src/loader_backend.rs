@@ -347,8 +347,8 @@ pub fn set_check(
 }
 
 /// The host's [`ElaborateSource`] as interp's `SourceElaborator`. A file whose parse holds no
-/// ry syntax runs as R reads it without asking the host, so plain R code pays one scan of its
-/// parse and reads no configuration. The elaborated text is taken only when the host elaborated
+/// ry syntax runs as R reads it without asking the host, so plain R code pays a scan of its
+/// tree's kinds and tokens and reads no configuration. The elaborated text is taken only when the host elaborated
 /// the text the parse reads, so a file that changed on disk after R read it parses as R read it.
 fn elaborated_source(name: &str, text: &str, root: &SyntaxNode) -> Result<Option<String>, ()> {
     let Some(elaborate) = ELABORATE_SOURCE.get() else {
