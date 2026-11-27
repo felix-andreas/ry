@@ -4089,74 +4089,71 @@ pub fn pooled_reference<'c>(
     Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
 }
 
-/// Puts a new argument reference naming `symbol` at position `index` of the pool, with
-/// `target` as its target when given and else over the position's, and gives up the pool's
-/// counts on what the position held ([`place_reference`]).
+/// Puts a new argument reference naming `symbol` over `target` at position `index` of the pool,
+/// which ends the pool or holds a reference something else counts, and gives up the pool's
+/// counts on what the position held.
 #[inline]
 pub fn replace_pooled_reference(
-    context: &mut Cx<'_>,
+    _context: &mut Cx<'_>,
     index: usize,
     symbol: impl Pointer<Value>,
-    target: Option<Local<'_, Integer>>,
+    target: Local<'_, Integer>,
 ) -> R<()> {
-    let target_raw = match target {
-        Some(target) => target.raw(),
-        None => match crate::interp().reference_targets.get(index) {
-            Some(&target) => target,
-            None => panic!("argument reference {index} left the pool"),
-        },
-    };
-    // SAFETY: the symbol is rooted or permanent and the pool or the caller roots the target
-    // while the promise allocates, which `&mut Cx` permits, and the pool holds the new promise
-    // before anything else allocates.
+    let target = target.raw();
+    // SAFETY: the symbol and the target are rooted while the promise allocates, which
+    // `&mut Cx` permits, and the pool holds the new promise before anything else allocates.
+    // The counts pair with the ones given up here or when the pool next places a reference at
+    // the position.
     unsafe {
         let reference = crate::heap().alloc_compiled_promise(
             values::unbound(),
             symbol.raw(),
             values::nil(),
-            target_raw,
+            target,
         )?;
         reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-        place_reference(context, index, Gc::<Promise>::adopt(reference), target);
+        reference.increment_refcount();
+        target.increment_refcount();
+        let state = crate::interp();
+        if index == state.references.len() {
+            state.references.push(reference);
+            state.reference_targets.push(target);
+            return Ok(());
+        }
+        state.references[index].decrement_refcount();
+        state.references[index] = reference;
+        state.reference_targets[index].decrement_refcount();
+        state.reference_targets[index] = target;
     }
     Ok(())
 }
 
-/// Puts `reference` at position `index` of the pool, with `target` as its target when given
-/// and else keeping the one there. The pool counts a reference to what it puts there and gives
-/// up the ones it counted on what the position held; at the end of the pool it grows by one,
-/// which needs a target. Counting frees nothing, so what the context reads stays valid.
+/// Gives position `index` of the pool, whose reference is being detached, a new reference over
+/// the position's target, which the detached promise no longer needs once it names its
+/// frame's environment. The detached promise gives up the pool's count, so its frame alone
+/// holds it.
 #[inline]
-fn place_reference(
-    _context: &Cx<'_>,
-    index: usize,
-    reference: impl Pointer<Promise>,
-    target: Option<Local<'_, Integer>>,
-) {
-    let state = crate::interp();
-    let (reference, target) = (reference.raw(), target.map(Local::raw));
-    // SAFETY: both are live, and the counts pair with the ones given up here or when the pool
-    // places the next reference at the position.
+pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
+    let Some(&target) = crate::interp().reference_targets.get(index) else {
+        panic!("argument reference {index} left the pool");
+    };
+    // SAFETY: the pool roots the target while the promise allocates, which `&mut Cx` permits,
+    // and holds the new promise before anything else allocates. The count given up pairs with
+    // the one the pool counted when it placed the detached reference.
     unsafe {
+        let reference = crate::heap().alloc_compiled_promise(
+            values::unbound(),
+            values::nil(),
+            values::nil(),
+            target,
+        )?;
+        reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
         reference.increment_refcount();
-        if let Some(target) = target {
-            target.increment_refcount();
-        }
-        if index == state.references.len() {
-            let Some(target) = target else {
-                panic!("an argument reference joined the pool without a target");
-            };
-            state.references.push(reference);
-            state.reference_targets.push(target);
-            return;
-        }
+        let state = crate::interp();
         state.references[index].decrement_refcount();
         state.references[index] = reference;
-        if let Some(target) = target {
-            state.reference_targets[index].decrement_refcount();
-            state.reference_targets[index] = target;
-        }
     }
+    Ok(())
 }
 
 /// The pool's reference at `index`, its target pointed at slot `slot` of the frame at `owner`:

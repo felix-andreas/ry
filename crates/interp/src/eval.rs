@@ -1707,7 +1707,7 @@ fn renew_reference(context: &mut Cx<'_>, index: usize, symbol: Local<'_>) -> R<(
     let mut target = context.alloc::<Integer>(3)?;
     target.as_mut_slice().fill(0);
     let target = target.finish();
-    handles::replace_pooled_reference(context, index, symbol, Some(target))
+    handles::replace_pooled_reference(context, index, symbol, target)
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -2038,8 +2038,8 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
 
 /// [`detach_reference`] for code on the handle types.
 pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> {
-    let used = interp().references_used as usize;
-    let Some(index) = interp().references[..used]
+    let state = interp();
+    let Some(index) = state.references[..state.references_used as usize]
         .iter()
         .position(|&pooled| pooled == reference.raw())
     else {
@@ -2059,7 +2059,7 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     // The pool's count goes with the pool's place: a promise that kept it would never count as
     // held by its frame alone, so the frame's release would leave it forced, and the value it
     // holds would look shared for the rest of its life.
-    handles::replace_pooled_reference(context, index, handles::null(), None)?;
+    handles::refill_detached_place(context, index)?;
     let context: &Cx<'s> = context;
     let [value, code, environment, compiled] = reference_promise(context, reference.read(context));
     context.set_promise_value(reference, value);
