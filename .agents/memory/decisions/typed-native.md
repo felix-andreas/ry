@@ -567,3 +567,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 
 - The checker wraps a `List.map` family call whose items come only from its callback in `.ry_items(call, hint)` (`builds_fresh_items`, `crates/semantics/src/check.rs`), and the interpreter's `.ry_items` gives an empty list the hint's storage. Native code builds the empty list from the same item type, so the two tiers agree without the stop that sent an empty result to the interpreter.
 - The lowering of `.ry_items` sets `settled_empty` for its operand when the operand is one of `SETTLED_EMPTY` (`crates/typed/src/lower.rs`), and `map`, `join_map` and `map_many` drop their empty-result stop only then. An unwrapped call keeps the stop, because the interpreter would give `logical(0)`.
+
+## A field read moves a list out of a record no one else holds
+
+**Status:** settled.
+
+- **Problem.** `(..acc, values = List.append(acc$values, x), label = acc$label)` reads `values` with a dup and reads `acc` again afterwards, so the old box still holds the list at `Op::Push`, which copies it: a loop of such updates whose record escapes to a call (and so is not unboxed) was quadratic (20,000, 40,000 and 80,000 appends: 0.056, 0.18 and 0.71 s in a debug build; with the fix 0.013, 0.009 and 0.017 s, `typed-record-list-updates.scenario`).
+- **Mechanism.** `ownership::take_unread_fields` turns `Op::Field` of a counted pointer into `Op::Take` when the rest of the block reads the box only for other fields until it overwrites the box, or ends with the box dead. At run time a box with a count of one gives the field up and keeps a null in its slot, which `box_free` and the drop already skip; a shared box counts the field again as `Field` does. The list then has a count of one and the append reuses it.
+- **Scope.** Counted pointers only (lists, dicts, sets, boxes), not strings, and one block, which covers updates without control flow in their values. Parameters are never counted locals, so a record parameter keeps copying (backlog).

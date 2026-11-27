@@ -2027,7 +2027,7 @@ impl Emitter<'_> {
             Op::CallTyped(index, arguments) => self.call_typed(*index, arguments, inst)?,
             Op::CallR(index, arguments) => self.call_r(*index, arguments, inst)?,
             Op::Construct(shape, fields) => self.construct(*shape, fields, inst)?,
-            Op::Field(a, shape, index) => {
+            Op::Field(a, shape, index) | Op::Take(a, shape, index) => {
                 let pointer = self.one(*a)?;
                 let shape = shapes::shape(*shape);
                 let (Some(&item), Some(&offset)) = (
@@ -2041,7 +2041,11 @@ impl Emitter<'_> {
                     .ins()
                     .iadd_imm_s(pointer, (values::BOX_FIELDS + 8 * offset as usize) as i64);
                 let values = self.load_item(address, item);
-                self.dup(Type::of_item(item), &values);
+                if matches!(inst.op, Op::Take(..)) {
+                    self.take(pointer, address, Type::of_item(item), &values);
+                } else {
+                    self.dup(Type::of_item(item), &values);
+                }
                 values
             }
             Op::ShapeOf(a) => {
@@ -2783,6 +2787,32 @@ impl Emitter<'_> {
         self.builder.ins().jump(done, &[copied]);
         self.builder.switch_to_block(done);
         self.builder.block_params(done)[0]
+    }
+
+    /// Gives the caller the field at `address` of the box at `pointer`: moved out of a box with a
+    /// count of one, whose slot is left empty for its drop to skip, else counted again.
+    fn take(&mut self, pointer: Value, address: Value, ty: Type, values: &[Value]) {
+        let count = self
+            .builder
+            .ins()
+            .load(I32, MemFlagsData::trusted(), pointer, 0);
+        let alone = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 1);
+        let (take, share, done) = (
+            self.builder.create_block(),
+            self.builder.create_block(),
+            self.builder.create_block(),
+        );
+        self.builder.ins().brif(alone, take, &[], share, &[]);
+        self.builder.switch_to_block(take);
+        let empty = self.iconst(0);
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), empty, address, 0);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(share);
+        self.dup(ty, values);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
     }
 
     /// A new box of `shape` holding the fields, which it takes over: a field that does not die

@@ -1,0 +1,59 @@
+# A user grows a list held in a record, `(..acc, values = List.append(acc$values, x))`, while the
+# update keeps another field from the old record. Native code moves the list out of a record no
+# one else holds, so the append runs in place, and it shares the list when the old record is
+# still held elsewhere or the field is read again.
+
+requires ry-runtime
+
+file take.R
+| alias Acc = Record{n: I64, values: List<F64>, label: Str}
+| alias Outer = Record{inner: Acc, tag: I64}
+| peek <- function(acc: Acc, k: I64) -> I64 if (k <= 0i64) List.len(acc$values) else peek(acc, k - 1i64)
+| grown <- function(count: I64) -> I64 {
+|   acc: Acc <- (n = 0i64, values = [], label = "a")
+|   total <- 0i64
+|   for (i in List.range(1i64, count)) {
+|     acc <- (..acc, values = List.append(acc$values, Num.to_f64(i)), n = acc$n + 1i64)
+|     total <- total + peek(acc, 1i64)
+|   }
+|   total * 1000i64 + List.len(acc$values)
+| }
+| shared <- function(count: I64) -> I64 {
+|   acc: Acc <- (n = 0i64, values = [1.0], label = "a")
+|   old <- acc
+|   for (i in List.range(1i64, count)) {
+|     acc <- (..acc, values = List.append(acc$values, Num.to_f64(i)), n = peek(old, 1i64))
+|   }
+|   List.len(old$values) * 1000i64 + List.len(acc$values) + acc$n * 100i64
+| }
+| twice <- function(count: I64) -> I64 {
+|   acc: Acc <- (n = 0i64, values = [], label = "a")
+|   for (i in List.range(1i64, count)) {
+|     acc <- (..acc, values = List.append(acc$values, Num.to_f64(i)), n = List.len(acc$values) + peek(acc, 1i64))
+|   }
+|   acc$n * 1000i64 + List.len(acc$values)
+| }
+| held <- function(count: I64) -> I64 {
+|   acc: Acc <- (n = 0i64, values = [], label = "a")
+|   all: List<Acc> <- []
+|   for (i in List.range(1i64, count)) {
+|     all <- List.append(all, acc)
+|     acc <- (..acc, values = List.append(acc$values, Num.to_f64(i)), n = peek(acc, 0i64))
+|   }
+|   List.walk(all, 0i64, \(sum, a) sum + List.len(a$values)) * 1000i64 + List.len(acc$values)
+| }
+| unwrapped <- function(count: I64) -> I64 {
+|   outer: Outer <- (inner = (n = 0i64, values = [], label = "a"), tag = 1i64)
+|   for (i in List.range(1i64, count)) {
+|     inner <- outer$inner
+|     outer <- (..outer, inner = (..inner, values = List.append(inner$values, Num.to_f64(i))), tag = peek(inner, 0i64))
+|   }
+|   outer$tag * 1000i64 + List.len(outer$inner$values)
+| }
+| print(c(Num.to_r(grown(5i64)), Num.to_r(shared(5i64)), Num.to_r(twice(5i64)), Num.to_r(held(5i64)), Num.to_r(unwrapped(5i64))))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry take.R
+expect exit 0
+expect stdout "[1] 15005  1106  8005 10005  4005"
+expect stderr lacks "runs in the interpreter"

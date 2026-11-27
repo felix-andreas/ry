@@ -21,8 +21,8 @@ file deep.R
 | options(expressions = 500000)
 | print(sum_to(200000i64))
 
-run ry run --runtime ry deep.R
 env RY_TYPED_LOG 1
+run ry run --runtime ry deep.R
 expect exit 0
 expect stdout "1000i64"
 expect stdout "[1] \"evaluation nested too deeply: infinite recursion / options(expressions=)?\""

@@ -679,6 +679,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A record or tuple that R holds converts at the native entry, and its shape is its type (settled)
 - Native code stops before the stack runs out, not only after a frame count (settled)
 - An empty map result the checker typed runs natively (settled)
+- A field read moves a list out of a record no one else holds (settled)
 
 ## DataFrame and the table engine
 
