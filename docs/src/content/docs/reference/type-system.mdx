@@ -1618,7 +1618,9 @@ A ry type asks in three places:
   is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
   `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
   or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
-  literal, so `step <- 1 / 4` is an `F64`. Each top-level
+  literal, so `step <- 1 / 4` is an `F64`. A literal written outside any function as a tuple item,
+  a record field or a tag payload item is a ry value too, so `pt <- (x = 3.0, y = 4.0)` is a
+  `Record{x: F64, y: F64}` and `pair <- ("a", 1)` a `Tuple{Str, I64}`. Each top-level
   statement is checked on its own, so nothing later in the file decides the type. In any other file
   a top-level literal has R's type.
 

@@ -676,6 +676,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `Result`-callback list functions leave their loop at the first `:Err` (settled)
 - A native set is a native dictionary with a placeholder value column (settled)
 - A native dictionary's value layout comes from the checker's spelling of the value type (settled)
+- A record or tuple that R holds converts at the native entry, and its shape is its type (settled)
 
 ## DataFrame and the table engine
 

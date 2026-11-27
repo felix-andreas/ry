@@ -541,3 +541,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - Dictionaries, sets and functions as values stay interpreted (`Uncompiled::DictEntries`), because a stored item (`ir::Item`) has no dictionary, set or function kind, so a `List` cannot hold them natively either.
 - `Dict.keep_shared` compares two list values whole (`Op::Compare` on `Item::Array`, the runtime's structural `object_equal`), and two empty lists are equal whatever storage kind the tier that built them chose.
 - `key_hash` and `key_equal` read an `I64` key as its whole word; reading it as an `INT` merged keys that share their low 32 bits.
+
+## A record or tuple that R holds converts at the native entry, and its shape is its type
+
+**Status:** settled.
+
+- `typed::call` gives a plain record, tuple or non-empty ry list of them no type up front (`type_of`), and `Arguments::push_boxes` converts it with `to_box` or `list_of_objects`, whose result names the shape, so the argument's type is `Type::Record(shape)` or a `Vector` of it. Typing and converting are one loop, so a shape is confirmed before the closure compiles for it, as a converted tag's is.
+- The type comes from the value, not the declaration. A shape whose fields do not fit the annotation refuses once per shape (the compile table remembers it), and the interpreter makes the call and raises the annotation's error, so both tiers agree. A lazy record that typed code returned passes its box back with one more reference.
+- A record, tuple or tag literal written outside any function in a strict or ry-syntax file has ry fields (`check::component` reads `binds_ry_value`), as a top-level scalar literal does. Each top-level statement is checked on its own, so `pt <- (x = 3.0, y = 4.0)` would otherwise keep `double` fields that no later call can decide, and `norm(pt)` with `p: Record{x: F64, y: F64}` would be a mismatch.
