@@ -65,7 +65,9 @@ pub struct List {
     pub count: u32,
     pub kind: u8,
     pub flags: u8,
-    pub _pad: u16,
+    /// How many R vectors share the list (the host's string lists), which the host keeps so
+    /// that it counts the list's bytes once however often it crosses.
+    pub wrappers: u16,
     pub length: u64,
     pub capacity: u64,
     pub data: *mut u8,
@@ -435,7 +437,7 @@ pub unsafe extern "C" fn ry_list_view(kind: u32, data: *mut u8, length: u64) -> 
         count: 1,
         kind,
         flags: VIEW,
-        _pad: 0,
+        wrappers: 0,
         length,
         capacity: length,
         data,
@@ -3139,7 +3141,7 @@ unsafe fn list_alloc(kind: u8, length: usize, capacity: usize) -> *mut List {
         count: 1,
         kind,
         flags: 0,
-        _pad: 0,
+        wrappers: 0,
         length: length as u64,
         capacity: capacity as u64,
         data,

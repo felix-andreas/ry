@@ -686,6 +686,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A field read moves a list out of a record no one else holds (settled)
 - A call of a typed or local function matches its arguments as R does (settled)
 - Arguments read ahead from variables are watched across R calls (settled)
+- A long `List<Str>` crosses to R as a string list over the native list (settled)
 
 ## DataFrame and the table engine
 

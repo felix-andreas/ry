@@ -14,7 +14,7 @@ use {
         arith::Op,
         arrays,
         builtins::Call,
-        records,
+        handles, interp, records,
         standard_library::{arguments, err, ok, wrong},
         unwind::{R, error},
         values::{self, length, nil, scalar_bool, scalar_integer, scalar_real},
@@ -889,6 +889,18 @@ pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> 
     };
     observe(call.call, list.kind());
     if MISSING != NA_KEPT {
+        // A list of strings typed code reads natively, so it converts here once rather than at
+        // every typed call it reaches.
+        if list.kind() == SexpType::String && !list.is_altrep() {
+            let shared = handles::in_caller_scope(|context| {
+                let list = handles::held(context, list);
+                let shared = (interp().hooks.share_strings)(context, list)?;
+                Ok(shared.map(|shared| shared.raw()))
+            })?;
+            if let Some(shared) = shared {
+                return Ok(arrays::finish(shared));
+            }
+        }
         return Ok(list);
     }
     let count = length(list);
