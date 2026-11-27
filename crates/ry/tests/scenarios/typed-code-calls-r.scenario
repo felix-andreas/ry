@@ -568,7 +568,8 @@ expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
 unset RY_JIT
 
 # A local function's argument is forced where the function first reads its formal, so the
-# parameters it reads count there, and not at all once the formal is overwritten.
+# parameters it reads count there, and not at all once the formal is overwritten. An annotated
+# local function forces its arguments at the call, as any typed call does.
 file loose/helpers.R
 | rebind <- function() y <<- 100.0
 | id_na <- function() NA_real_
@@ -581,6 +582,9 @@ file loose/helpers.R
 | keep_plus <- function(z) { plus_one(z); y <<- 100.0; z }
 | keep_overwritten <- function(z) { overwritten(z); y <<- 100.0; z }
 | keep_chosen <- function(z) { chosen(z, FALSE); z }
+| strict_late <- function(x: F64) -> F64 { h <- function(a: F64) -> F64 { rebind(); a }; h(x * 2.0) }
+| branch_argument <- function(x: F64, flag: Bool) -> F64 { h <- function(a) { v <- a + 1.0; if (v > 0.5) stop("e"); v }; h(if (flag) x else 1.0) }
+| keep_branch <- function(z) { tryCatch(branch_argument(z, FALSE), error = function(e) 0); y <<- 100.0; z }
 | y <- 1.0
 | print(keep_plus(y))
 | y <- 1.0
@@ -593,15 +597,20 @@ file loose/helpers.R
 | print(checked(y))
 | y <- 1.0
 | print(keep_chosen(y))
+| y <- 1.0
+| print(strict_late(y))
+| y <- 1.0
+| print(keep_branch(y))
 
 run ry run --runtime ry loose/helpers.R
 expect exit 0
-expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100"
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100"
 expect stderr lacks "`checked` runs in the interpreter"
 expect stderr lacks "`square_after` runs in the interpreter"
+expect stderr lacks "`strict_late` runs in the interpreter"
 
 env RY_JIT off
 run ry run --runtime ry loose/helpers.R
 expect exit 0
-expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100"
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100"
 unset RY_JIT

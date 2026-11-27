@@ -614,6 +614,16 @@ pub unsafe fn is_typed(function: Sexp) -> bool {
     key.has_gp(gp::TYPED_DEFINITION)
 }
 
+/// [`is_typed`] for the definition `formals`/`body`.
+pub unsafe fn is_typed_definition(formals: Sexp, body: Sexp) -> bool {
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else {
+        body
+    };
+    key.has_gp(gp::TYPED_DEFINITION)
+}
+
 /// Whether `RY_TYPED_LOG` asks for the typed core's decisions on standard error.
 pub fn typed_logging() -> bool {
     static LOGGING: OnceLock<bool> = OnceLock::new();
