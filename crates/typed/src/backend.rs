@@ -32,7 +32,10 @@ use {
         Type as Machine, Value, Variable,
         types::{F64, I32, I64},
     },
-    std::{cell::Cell, sync::atomic::AtomicBool},
+    std::{
+        cell::Cell,
+        sync::atomic::{AtomicBool, AtomicUsize},
+    },
 };
 
 /// A compiled function another one may call: where its code is and its machine signature.
@@ -76,6 +79,8 @@ pub enum Slot {
     Helper(Helper),
     /// The address of `interp::unwind::INTERRUPT_REQUESTED`.
     Interrupt,
+    /// The address of [`crate::STACK_LIMIT`].
+    StackLimit,
     /// The loading process's id of a shape, named by its id in the writing process.
     Shape(u32),
     /// The static box of a shape without fields, named by its id in the writing process.
@@ -615,12 +620,31 @@ impl Emitter<'_> {
         self.blocks = (0..self.function.blocks.len())
             .map(|_| self.builder.create_block())
             .collect();
-        // The budget counts the calls still allowed below this one, so the deepest recursion
-        // gives up instead of overflowing the machine stack.
-        let exhausted = self
+        // The budget counts the calls still allowed below this one, as R's `expressions` limit
+        // does, and the stack limit the bytes, so the deepest recursion gives up instead of
+        // overflowing the machine stack.
+        let deep = self
             .builder
             .ins()
             .icmp_imm_s(IntCC::SignedLessThan, budget, 1);
+        let frame = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        let here = self.builder.ins().stack_addr(I64, frame, 0);
+        let limit = self.word(Slot::StackLimit, || {
+            &crate::STACK_LIMIT as *const AtomicUsize as i64
+        });
+        let limit = self
+            .builder
+            .ins()
+            .load(I64, MemFlagsData::trusted(), limit, 0);
+        let low = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, here, limit);
+        let exhausted = self.builder.ins().bor(deep, low);
         self.fail_if(exhausted, &[])?;
         let first = *self
             .blocks
@@ -1195,7 +1219,9 @@ impl Emitter<'_> {
                         let compared = self.logical(compared);
                         self.na_or(na, compared)
                     }
-                    Item::Record(_) | Item::Tag(_) if matches!(op, Compare::Eq | Compare::Ne) => {
+                    Item::Record(_) | Item::Tag(_) | Item::Array(_)
+                        if matches!(op, Compare::Eq | Compare::Ne) =>
+                    {
                         let (x, y) = (self.one(*a)?, self.one(*b)?);
                         let equal = self.call(Helper::BoxEqual, &[I64; 2], &[I32], &[x, y])[0];
                         match op {

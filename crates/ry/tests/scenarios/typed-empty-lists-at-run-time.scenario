@@ -27,3 +27,20 @@ expect stdout "[1] \"list\""
 expect stdout "[2i64, 4i64]"
 expect stdout "[1] \"kept\" \"I64\"  \"I64\"  \"I64\" "
 expect stdout "[]"
+
+# A typed function that maps an empty list runs on native code: the checker gives the result's
+# item type, so both tiers build the same empty list and no call falls back to the interpreter.
+file mapped.R
+| doubled <- function(xs: List<I64>) -> List<I64> List.map(xs, \(x) x * 2i64)
+| halves <- function(xs: List<I64>) -> List<F64> List.map_with_index(xs, \(x, i) Num.to_f64(x) / 2.0)
+| words <- function(xs: List<I64>) -> List<Str> List.map2(xs, xs, \(a, b) Str.concat("a", "b"))
+| points <- function(xs: List<I64>) -> List<Record{x: I64}> List.map3(xs, xs, xs, \(a, b, c) (x = a,))
+| pieces <- function(xs: List<I64>) -> List<F64> List.join_map(xs, \(x) [Num.to_f64(x)])
+| xs <- List.from_r(integer(0))
+| print(c(typeof(doubled(xs)), typeof(halves(xs)), typeof(words(xs)), typeof(points(xs)), typeof(pieces(xs))))
+
+run ry run --runtime ry mapped.R
+env RY_TYPED_LOG 1
+expect exit 0
+expect stdout "[1] \"I64\"       \"double\"    \"character\" \"list\"      \"double\"   "
+expect stderr lacks "runs in the interpreter"

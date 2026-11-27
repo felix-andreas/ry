@@ -68,8 +68,8 @@ pub const FAILED: i64 = 1;
 /// keeps its closure rooted, so no other closure can take the closure's address as a key.
 #[derive(Debug)]
 pub struct Native {
-    /// The machine code. It takes the number of calls that may still nest and then each
-    /// argument (`i32` for an integer or a logical, `f64` for a double), and returns a status
+    /// The machine code. It takes the number of calls that may still nest, the lowest frame
+    /// address its stack allows ([`typed::native_stack_limit`]) and then each argument (`i32` for an integer or a logical, `f64` for a double), and returns a status
     /// ([`OK`] or [`FAILED`]) and the value.
     pub address: usize,
     pub params: SmallVec<[Ty; 4]>,
@@ -85,6 +85,7 @@ pub struct Native {
 /// The machine signature of a native function with these argument and result types.
 pub fn signature(params: &[Ty], result: Ty, call_conv: CallConv) -> Signature {
     let mut signature = Signature::new(call_conv);
+    signature.params.push(AbiParam::new(I64));
     signature.params.push(AbiParam::new(I64));
     signature
         .params
@@ -2245,9 +2246,12 @@ unsafe fn emit(
     builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
     let params: SmallVec<[Value; 5]> = builder.block_params(entry).iter().copied().collect();
-    let (&budget, arguments) = params
-        .split_first()
-        .ok_or(Refusal("a native function without a budget"))?;
+    let [budget, limit, arguments @ ..] = params.as_slice() else {
+        return Err(Refusal(
+            "a native function without a budget and a stack limit",
+        ));
+    };
+    let (budget, limit) = (*budget, *limit);
     let failure = builder.create_block();
     builder.set_cold_block(failure);
     let result = walker.own_result.unwrap_or(Ty::Int);
@@ -2256,6 +2260,7 @@ unsafe fn emit(
         call_conv,
         own,
         budget,
+        limit,
         failure,
         loops: Vec::new(),
         mark: None,
@@ -2264,11 +2269,23 @@ unsafe fn emit(
     if walker.allocates {
         emitter.mark = Some(emitter.handle_mark());
     }
-    // A call nested deeper than R allows, or a pending interrupt, belongs to the interpreter.
-    let exhausted = emitter
+    // A call nested deeper than R allows, one about to run out of machine stack, or a pending
+    // interrupt belongs to the interpreter.
+    let deep = emitter
         .builder
         .ins()
         .icmp_imm_s(IntCC::SignedLessThanOrEqual, budget, 0);
+    let frame = emitter.builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        8,
+        3,
+    ));
+    let here = emitter.builder.ins().stack_addr(I64, frame, 0);
+    let low = emitter
+        .builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, here, limit);
+    let exhausted = emitter.builder.ins().bor(deep, low);
     emitter.fail_if(exhausted);
     emitter.check_interrupt();
     for (local, &argument) in walker.locals.iter_mut().zip(arguments) {
@@ -2309,6 +2326,8 @@ struct Emitter {
     own: FuncRef,
     /// How many calls may still nest below this one.
     budget: Value,
+    /// The lowest frame address this call's stack segment allows ([`typed::native_stack_limit`]).
+    limit: Value,
     /// The block that returns [`FAILED`].
     failure: Block,
     /// The enclosing loops' blocks for `next` and `break`, innermost last.
@@ -2476,6 +2495,7 @@ impl Emitter {
         let budget = self.builder.ins().iadd_imm_s(self.budget, -1);
         let mut args: SmallVec<[Value; 5]> = SmallVec::new();
         args.push(budget);
+        args.push(self.limit);
         args.extend_from_slice(arguments);
         let call = match callee {
             Callee::Own(reference) => self.builder.ins().call(reference, &args),
@@ -2920,6 +2940,7 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
         trampoline(
             native.address,
             runtime::jit_depth_budget(),
+            typed::native_stack_limit(),
             words.as_ptr(),
             out,
         )
@@ -3494,9 +3515,9 @@ unsafe fn argument_word(value: Sexp) -> Option<(Ty, u64)> {
     })
 }
 
-/// Calls the native function at `address` with the call budget and arguments as 64-bit words,
-/// storing its value's bits in `out` and returning its status.
-type Trampoline = unsafe extern "C" fn(usize, i64, *const u64, *mut u64) -> i64;
+/// Calls the native function at `address` with the call budget, the stack limit and arguments
+/// as 64-bit words, storing its value's bits in `out` and returning its status.
+type Trampoline = unsafe extern "C" fn(usize, i64, usize, *const u64, *mut u64) -> i64;
 
 /// The trampoline for native functions of this machine signature, compiled on first use.
 unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
@@ -3513,18 +3534,19 @@ unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
         Allocator::Backtracking,
         |module| -> Result<usize, Refusal> {
             let mut outer = Signature::new(CallConv::Host);
-            outer.params.extend([AbiParam::new(I64); 4]);
+            outer.params.extend([AbiParam::new(I64); 5]);
             outer.returns.push(AbiParam::new(I64));
             let id = module.declare(&outer)?;
             let mut builder = Builder::new(outer);
             let entry = builder.create_block();
             builder.append_block_params_for_function_params(entry);
             builder.switch_to_block(entry);
-            let &[address, budget, words, out] = builder.block_params(entry) else {
+            let &[address, budget, limit, words, out] = builder.block_params(entry) else {
                 return Err(Refusal("a trampoline without its parameters"));
             };
-            let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
+            let mut arguments: SmallVec<[Value; 6]> = SmallVec::new();
             arguments.push(budget);
+            arguments.push(limit);
             for (index, &ty) in params.iter().enumerate() {
                 arguments.push(builder.ins().load(
                     machine_type(ty),

@@ -39,7 +39,7 @@ hint @20: I64
 #---- hover_on_an_array_of_records
 po$0ints <- [(x = 1, y = 2), (x = 3, y = 4)]
 #++++
-hover 0..6: points: List<Record{x: double, y: double}>
+hover 0..6: points: List<Record{x: I64, y: I64}>
 hover-definition: global 0..6
 definition 0..6
 references: 0..6*
@@ -47,11 +47,11 @@ rename: 1 edit(s)
 type-definition: stub source std at `List`
 signature: none
 action: Add inferred type annotation for `points`
-  edit 6..6 -> ": List<Record{x: double, y: double}>"
+  edit 6..6 -> ": List<Record{x: I64, y: I64}>"
 action: Add inferred type annotations for the whole file
-  edit 6..6 -> ": List<Record{x: double, y: double}>"
+  edit 6..6 -> ": List<Record{x: I64, y: I64}>"
 completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
-hint @6: List<Record{x: double, y: double}>
+hint @6: List<Record{x: I64, y: I64}>
 
 #---- completion_of_the_list_type
 #: Lis$0

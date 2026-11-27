@@ -3,30 +3,30 @@
 point <- (x = 1, y = "a")
 point$y$0
 #++++
-hover 32..33: y: character
+hover 32..33: y: Str
 definition 17..18
 references: 17..18*, 32..33
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": Record{x: double, y: character}"
+  edit 5..5 -> ": Record{x: I64, y: Str}"
 completion (1): y
-hint @5: Record{x: double, y: character}
+hint @5: Record{x: I64, y: Str}
 
 #---- hover_on_a_tag_literal
 some <- :So$0me(5L)
 #++++
-hover 8..17: :Some(integer)
+hover 8..17: :Some(I64)
 definition: none
 references: 9..13
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `some`
-  edit 4..4 -> ": :Some(integer)"
+  edit 4..4 -> ": :Some(I64)"
 action: Add inferred type annotations for the whole file
-  edit 4..4 -> ": :Some(integer)"
+  edit 4..4 -> ": :Some(I64)"
 completion: none
-hint @4: :Some(integer)
+hint @4: :Some(I64)
 
 #---- hover_on_a_pattern_binding
 #: fn(o: :Some(integer) | :None) -> integer
@@ -189,32 +189,32 @@ completion (1): radius
 #---- hover_on_a_record_literal_field_name
 point <- (x$0 = 1, y = "a")
 #++++
-hover 10..11: x: double
+hover 10..11: x: I64
 definition 10..11
 references: 10..11*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `point`
-  edit 5..5 -> ": Record{x: double, y: character}"
+  edit 5..5 -> ": Record{x: I64, y: Str}"
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": Record{x: double, y: character}"
+  edit 5..5 -> ": Record{x: I64, y: Str}"
 completion: none
-hint @5: Record{x: double, y: character}
+hint @5: Record{x: I64, y: Str}
 
 #---- hover_on_a_tag_payload_field_name
 shape <- :Circle(rad$0ius = 2)
 #++++
-hover 17..23: radius: double
+hover 17..23: radius: I64
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `shape`
-  edit 5..5 -> ": :Circle(radius: double)"
+  edit 5..5 -> ": :Circle(radius: I64)"
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": :Circle(radius: double)"
+  edit 5..5 -> ": :Circle(radius: I64)"
 completion (114): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
-hint @5: :Circle(radius: double)
+hint @5: :Circle(radius: I64)
 
 #---- tag_references_and_rename_cover_values_patterns_and_types
 alias Shape = :Circle(radius: double) | :Empty
@@ -313,11 +313,11 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 4..4 -> ": Tuple{integer, character}"
-  edit 23..23 -> ": Record{first: integer}"
+  edit 4..4 -> ": Tuple{I64, Str}"
+  edit 23..23 -> ": Record{first: I64}"
 completion: none
-hint @4: Tuple{integer, character}
-hint @23: Record{first: integer}
+hint @4: Tuple{I64, Str}
+hint @23: Record{first: I64}
 
 #---- no_hint_restates_a_payload_free_tag
 nothing <- :None
@@ -331,9 +331,9 @@ references: 0..7*, 35..42
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 21..21 -> ": :Some(integer)"
+  edit 21..21 -> ": :Some(I64)"
 completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
-hint @21: :Some(integer)
+hint @21: :Some(I64)
 
 #---- nominal_record_field_completion
 type Point = Record{x: double, y: double}
@@ -423,9 +423,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": Record{x: double, y: double}"
+  edit 5..5 -> ": Record{x: I64, y: I64}"
 completion (2): x, y
-hint @5: Record{x: double, y: double}
+hint @5: Record{x: I64, y: I64}
 
 #---- completion_in_a_record_literal_offers_the_missing_fields
 #: Record{amount: double, currency: character, rate: double}
@@ -526,33 +526,33 @@ completion (1): currency
 #---- completion_in_an_unexpected_record_offers_nothing
 m <- (amount = 1, cu$0)
 #++++
-hover 5..21: Record{amount: double}
+hover 5..21: Record{amount: I64}
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `m`
-  edit 1..1 -> ": Record{amount: double}"
+  edit 1..1 -> ": Record{amount: I64}"
 action: Add inferred type annotations for the whole file
-  edit 1..1 -> ": Record{amount: double}"
+  edit 1..1 -> ": Record{amount: I64}"
 completion: none
-hint @1: Record{amount: double}
+hint @1: Record{amount: I64}
 
 #---- completion_in_an_unchecked_tag_payload_follows_the_type_definitions
 alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
 s <- :Rect(width = 1, he$0)
 #++++
-hover 87..102: Record{width: double}
+hover 87..102: Record{width: I64}
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `s`
-  edit 78..78 -> ": :Rect(width: double)"
+  edit 78..78 -> ": :Rect(width: I64)"
 action: Add inferred type annotations for the whole file
-  edit 78..78 -> ": :Rect(width: double)"
+  edit 78..78 -> ": :Rect(width: I64)"
 completion (1): height
-hint @78: :Rect(width: double)
+hint @78: :Rect(width: I64)
 
 #---- completion_in_a_record_literal_follows_an_inline_annotation
 m: Record{amount: double, currency: character} <- (amount = 1, cu$0)

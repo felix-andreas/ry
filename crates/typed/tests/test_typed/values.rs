@@ -1381,6 +1381,9 @@ fn a_view_kept_past_its_loan_gets_its_own_items() {
     assert_eq!(live(), before);
 }
 
+/// Keys are strings, `INT` or `I64` (whose words share their low halves, the way `1i64` and
+/// `4294967297i64` do), and values are strings or counted lists, so both kinds of owned slot are
+/// duplicated, overwritten and dropped.
 #[test]
 fn dicts_follow_their_models() {
     let mut rng = Rng::from_env();
@@ -1388,40 +1391,62 @@ fn dicts_follow_their_models() {
     let before = live();
     for iteration in 0..iterations {
         set_hash_seed(rng.next());
-        let string_keys = iteration % 2 == 0;
-        let key_kind = if string_keys { STR } else { INT };
-        let mut dict = unsafe { ry_dict_new(key_kind as u32, STR as u32) };
+        let key_kind = [STR, INT, I64][iteration % 3];
+        let value_kind = if (iteration / 3) % 2 == 0 {
+            STR
+        } else {
+            OBJECT
+        };
+        let mut dict = unsafe { ry_dict_new(key_kind as u32, value_kind as u32) };
         let mut model: HashMap<String, String> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
         let mut snapshots: Vec<(*mut u8, Vec<(String, String)>)> = Vec::new();
         let key_space = 1 + rng.below(60);
         for step in 0..300 {
             let key_number = rng.below(key_space);
-            let key_text = if string_keys {
-                if key_number % 3 == 0 {
-                    format!("a key long enough to live on the heap {key_number}")
-                } else {
-                    format!("k{key_number}")
+            let (key_text, key) = match key_kind {
+                STR => {
+                    let text = if key_number % 3 == 0 {
+                        format!("a key long enough to live on the heap {key_number}")
+                    } else {
+                        format!("k{key_number}")
+                    };
+                    let key = str_of(&text);
+                    (text, key)
                 }
-            } else {
-                key_number.to_string()
-            };
-            let key = if string_keys {
-                str_of(&key_text)
-            } else {
-                Str {
-                    lo: key_number as u64,
-                    hi: 0,
+                INT => (
+                    key_number.to_string(),
+                    Str {
+                        lo: key_number as u64,
+                        hi: 0,
+                    },
+                ),
+                _ => {
+                    let word = (key_number as u64 % 4) | ((key_number as u64 / 4) << 32);
+                    (word.to_string(), Str { lo: word, hi: 0 })
                 }
             };
             match rng.below(10) {
                 0..=5 => {
-                    let value_text = if rng.below(2) == 0 {
-                        format!("v{step}")
+                    let (value_text, value) = if value_kind == STR {
+                        let text = if rng.below(2) == 0 {
+                            format!("v{step}")
+                        } else {
+                            format!("a value long enough to need a heap buffer {step}")
+                        };
+                        let value = str_of(&text);
+                        (text, value)
                     } else {
-                        format!("a value long enough to need a heap buffer {step}")
+                        let list = unsafe { ry_list_new(DBL as u32, 1) };
+                        unsafe { *((*list).data as *mut f64) = step as f64 };
+                        (
+                            step.to_string(),
+                            Str {
+                                lo: list as u64,
+                                hi: 0,
+                            },
+                        )
                     };
-                    let value = str_of(&value_text);
                     let owned = rng.below(4) != 0;
                     if !owned {
                         snapshots.push((dict, entries(&model, &order)));
@@ -1465,21 +1490,17 @@ fn dicts_follow_their_models() {
                     );
                 }
             }
-            if string_keys {
+            if key_kind == STR {
                 unsafe { ry_str_drop(key.lo, key.hi) };
             }
             assert_eq!(
-                read_dict(dict, string_keys),
+                read_dict(dict),
                 entries(&model, &order),
                 "after step {step}"
             );
         }
         for (snapshot, expected) in snapshots {
-            assert_eq!(
-                read_dict(snapshot, string_keys),
-                expected,
-                "a shared dict changed"
-            );
+            assert_eq!(read_dict(snapshot), expected, "a shared dict changed");
             unsafe { ry_list_drop(snapshot as *mut List) };
         }
         unsafe { ry_list_drop(dict as *mut List) };
@@ -1755,23 +1776,31 @@ fn read(list: *mut List) -> Model {
     }
 }
 
-fn read_dict(dict: *mut u8, string_keys: bool) -> Vec<(String, String)> {
+fn read_dict(dict: *mut u8) -> Vec<(String, String)> {
     unsafe {
         let keys = ry_dict_keys(dict);
         let values = ry_dict_values(dict);
-        let keys_model = read(keys);
-        let Model::Str(values_model) = read(values) else {
-            panic!("values are strings")
+        let column = |list: *mut List| -> Vec<String> {
+            let data = (*list).data;
+            (0..(*list).length as usize)
+                .map(|index| match (*list).kind {
+                    STR => text_of(*(data as *const Str).add(index)),
+                    INT => (*(data as *const i32).add(index)).to_string(),
+                    I64 => (*(data as *const u64).add(index)).to_string(),
+                    OBJECT => {
+                        let item = *(data as *const *mut List).add(index);
+                        (*((*item).data as *const f64)).to_string()
+                    }
+                    other => panic!("unexpected column kind {other}"),
+                })
+                .collect()
         };
-        let keys_text: Vec<String> = match keys_model {
-            Model::Str(keys) if string_keys => keys,
-            Model::Int(keys) if !string_keys => keys.iter().map(i32::to_string).collect(),
-            other => panic!("unexpected key column {other:?}"),
-        };
+        let keys_text = column(keys);
         assert_eq!(ry_dict_len(dict) as usize, keys_text.len());
+        let values_text = column(values);
         ry_list_drop(keys);
         ry_list_drop(values);
-        keys_text.into_iter().zip(values_model).collect()
+        keys_text.into_iter().zip(values_text).collect()
     }
 }
 

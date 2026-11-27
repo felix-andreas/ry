@@ -4656,6 +4656,20 @@ pub(crate) fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
     on_large_stack_slow(body)
 }
 
+/// The lowest address of the stack segment the caller runs on, or 0 when it cannot be measured:
+/// read from the interpreter's bounds when the caller is on the segment they describe, so
+/// native code entered from a closure call reads no thread-local state.
+#[inline]
+pub fn stack_floor() -> usize {
+    let marker = 0u8;
+    let pointer = std::ptr::addr_of!(marker) as usize;
+    let state = interp();
+    if state.stack_floor != 0 && pointer <= state.stack_ceiling && pointer > state.stack_floor {
+        return state.stack_floor;
+    }
+    stacker::remaining_stack().map_or(0, |remaining| pointer.saturating_sub(remaining))
+}
+
 #[inline(never)]
 fn on_large_stack_slow<T>(body: impl FnOnce() -> T) -> T {
     // An R error unwinds through here, so the caller's segment bounds are restored by a guard:

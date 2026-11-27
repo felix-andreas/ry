@@ -530,3 +530,39 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - Every rebuilt set is a loop of the dictionary's: `union` is `Dict.insert_all`'s, `intersection` and `difference` are `keep_shared`'s and `remove_all`'s without the value compare, and `map`, `join_map`, `keep_if`, `drop_if`, `walk` and `walk_until` pass the callback the element alone. `Set.map` inserts each result, so equal results merge.
 - `Set.empty()` takes its element type from the checker (`CheckedType::Set`, `.ry_items(Set.empty(), "Set<Str>")`) or from a walk step's state annotation, as `Dict.empty()` does. Elements are `I64` or `Str`; `Set.with_capacity` and `Set.capacity` are not compiled, because the interpreter's capacity is observable.
 - A change to a type's layout bumps `file::VERSION`, so a typed file written for the old layout is rejected rather than misread.
+
+## A native dictionary's value layout comes from the checker's spelling of the value type
+
+**Status:** settled.
+
+- `Dict` values may be any layout a `List` holds: `Bool`, records, tuples, lists and tags, besides `I64`, `F64` and `Str`. Keys stay `INT`, `I64`, `DBL` or `STR`. Object values are counted pointers, and every owned slot (a `STR` or `OBJECT` key or value) goes through `dup_items` and `drop_items`, so a removed entry's value is reset (`Str::EMPTY`, null) and `dict_free` drops every slot below the entry count.
+- The checker spells the value type for the runtime (`CheckedType::Dict { key, value }`, `check::stored_spelling`), as in `.ry_items(Dict.empty(), "Dict<I64, Record{x: I64, y: I64}>")`, in the `TypeRenderer`'s canonical grammar, and `lower::spelled_item` interns the shape. So a dictionary is laid out before its first insert, and a read of an empty one needs no pending layout. `types::stored_spelling` is the one source of truth: the checker spells through its inference table (`check::stored_view`), and the native check's `DictEntries` blocker calls it through the item's type definitions (`peel`), so a value type with no spelling (a field name outside ASCII letters, digits, `_` and `.`, an open or empty record, an R vector, a set inside a list) is an `interpreted` finding exactly when the lowering would refuse it.
+- Every tag value is `Item::Tag(shapes::ANY)` and spells as `:`: every tag shares one boxed layout, so the union never needs to reach the runtime. An empty dictionary in a slot annotated with a tag union has a value type that is a variable bounded by the union, and the bound alone settles the spelling.
+- Dictionaries, sets and functions as values stay interpreted (`Uncompiled::DictEntries`), because a stored item (`ir::Item`) has no dictionary, set or function kind, so a `List` cannot hold them natively either.
+- `Dict.keep_shared` compares two list values whole (`Op::Compare` on `Item::Array`, the runtime's structural `object_equal`), and two empty lists are equal whatever storage kind the tier that built them chose.
+- `key_hash` and `key_equal` read an `I64` key as its whole word; reading it as an `INT` merged keys that share their low 32 bits.
+
+## A record or tuple that R holds converts at the native entry, and its shape is its type
+
+**Status:** settled.
+
+- `typed::call` gives a plain record, tuple or non-empty ry list of them no type up front (`type_of`), and `Arguments::push_boxes` converts it with `to_box` or `list_of_objects`, whose result names the shape, so the argument's type is `Type::Record(shape)` or a `Vector` of it. Typing and converting are one loop, so a shape is confirmed before the closure compiles for it, as a converted tag's is.
+- The type comes from the value, not the declaration. A shape whose fields do not fit the annotation refuses once per shape (the compile table remembers it), and the interpreter makes the call and raises the annotation's error, so both tiers agree. A lazy record that typed code returned passes its box back with one more reference.
+- A record, tuple or tag literal bound to a name outside any function in a strict or ry-syntax file has ry fields, also nested and inside a list literal (`Checker::mark_ry_components`, read by `component`), as a bound top-level scalar literal does. Each top-level statement is checked on its own, so `pt <- (x = 3.0, y = 4.0)` would otherwise keep `double` fields that no later call can decide, and `norm(pt)` with `p: Record{x: F64, y: F64}` would be a mismatch. A literal inside a call keeps R's types, as `f(1)` does, so an R function given `(x = 1,)` sees `Record{x: double}` (`literal_in_a_call_keeps_r_types`).
+
+## Native code stops before the stack runs out, not only after a frame count
+
+**Status:** settled.
+
+- **Problem.** The depth budget (`typed::depth_budget`, R's `expressions` limit less the interpreter's frames) counts frames, but a typed frame can hold several inlined bodies and split slots, and the interpreter runs on `stacker` segments, so a native recursion entered from deep interpreted code overflowed the thread's stack and crashed the process.
+- **Mechanism.** `typed::call` grows the stack with `stacker::maybe_grow` (`NATIVE_STACK`, `NATIVE_SEGMENT`) and sets `STACK_LIMIT` to the segment's low end plus `NATIVE_RESERVE`, restoring the outer limit on return. Every compiled function's prologue compares a stack slot's address with that limit (`Slot::StackLimit`, a process word in JIT code and in code files) and stops as on an exhausted budget, so the interpreter takes over and R ends with `evaluation nested too deeply`.
+- The reserve covers the deepest frame plus the runtime calls a frame makes before the next prologue. Cost: one load and compare per call, next to the budget test.
+- **The entry reads the interpreter's segment bounds first** (`interp::eval::stack_floor`, the `stack_floor`/`stack_ceiling` pair `on_large_stack` keeps), so a call entered on the interpreter's segment with `NATIVE_STACK` to spare reads no `stacker` thread-local state; only a call near the floor or off that segment goes through `maybe_grow`. A call within `NATIVE_STACK` of an interpreter segment's floor allocates a fresh `NATIVE_SEGMENT` each time, so a hot loop of typed calls from that band pays an `mmap` per call (backlog).
+- **The JIT's scalar native functions take the limit as their second argument** (`typed::native_stack_limit`, the running segment's floor plus `NATIVE_RESERVE`), after the depth budget, and pass it on to the natives they call. A process word like `STACK_LIMIT` would not serve them: compiled R code calls a native directly on whatever segment the interpreter runs on, and a word set there would have to be restored around every call. They do not grow the stack: a native that reaches the limit stops and the interpreter runs the call. A native entered within reach of the limit (`try_native_typed` runs before `run_frame`'s `on_large_stack`, and a tier-1 `NativeCall` can sit anywhere in a body) therefore fails at once, and each interpreted level of that band tries it again; the waste is about one segment's worth of levels.
+
+## An empty map result the checker typed runs natively
+
+**Status:** settled.
+
+- The checker wraps a `List.map` family call whose items come only from its callback in `.ry_items(call, hint)` (`builds_fresh_items`, `crates/semantics/src/check.rs`), and the interpreter's `.ry_items` gives an empty list the hint's storage. Native code builds the empty list from the same item type, so the two tiers agree without the stop that sent an empty result to the interpreter.
+- The lowering of `.ry_items` sets `settled_empty` for its operand when the operand is one of `SETTLED_EMPTY` (`crates/typed/src/lower.rs`), and `map`, `join_map` and `map_many` drop their empty-result stop only then. An unwrapped call keeps the stop, because the interpreter would give `logical(0)`.

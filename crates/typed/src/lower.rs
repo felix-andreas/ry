@@ -345,6 +345,7 @@ unsafe fn lower_calling(
         r_use: None,
         converted: None,
         checked_items: None,
+        settled_empty: false,
         pending: Vec::new(),
         forward: None,
         declared_loops: Vec::new(),
@@ -590,6 +591,10 @@ struct Lowering<'c> {
     /// The item type the checker gave the `List.from_r` or sibling lowered next
     /// ([`Conversion::checked`]).
     checked_items: Option<Item>,
+    /// Whether the mapping call lowered next sits in a `.ry_items`, whose run-time function
+    /// gives an empty result the checker's storage in the interpreter too, so the native code
+    /// builds the empty list instead of stopping. The call takes it before lowering anything.
+    settled_empty: bool,
     /// Each empty list literal of records or tags whose item type the code has not shown yet,
     /// with the locals that hold it. The preflight names only the storage of such a list, so it
     /// starts as a list of any tag and takes the item type of the first item appended to it or
@@ -2288,7 +2293,7 @@ impl Lowering<'_> {
             (Type::Int, Item::Int)
             | (Type::I64, Item::I64)
             | (Type::Dbl, Item::Dbl)
-            | (Type::Lgl, Item::Lgl)
+            | (Type::Lgl | Type::Bool, Item::Lgl)
             | (Type::Str, Item::Str) => Ok(value),
             (Type::Record(a), Item::Record(b)) if a == b => Ok(value),
             (Type::Tag(a), Item::Tag(b)) if shapes::within(a, b) => Ok(value),
@@ -4162,7 +4167,7 @@ impl Lowering<'_> {
                 {
                     let ty = constant_string(hint)
                         .as_deref()
-                        .and_then(keyed_type)
+                        .and_then(|annotation| keyed_type(annotation))
                         .ok_or(Refusal::new(
                             "an empty dictionary or set of an unknown type",
                         ))?;
@@ -4192,7 +4197,14 @@ impl Lowering<'_> {
                     self.checked_items = None;
                     return value;
                 }
-                self.value(list)
+                let mut settled = false;
+                for (name, arity) in SETTLED_EMPTY {
+                    settled = settled || self.is_library_call(list, name, arity)?;
+                }
+                self.settled_empty = settled;
+                let value = self.value(list);
+                self.settled_empty = false;
+                value
             }
             ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
@@ -4433,19 +4445,20 @@ impl Lowering<'_> {
                 };
                 let key = self.value(key)?;
                 let value = self.value(value)?;
-                let item = |ty: Type| match ty {
-                    Type::Str => Some(Item::Str),
-                    Type::I64 => Some(Item::I64),
-                    Type::Dbl => Some(Item::Dbl),
-                    _ => None,
+                self.usable(value)?;
+                let key_item = match self.builder.ty(key) {
+                    Type::Str => Item::Str,
+                    Type::I64 => Item::I64,
+                    Type::Dbl => Item::Dbl,
+                    _ => {
+                        return Err(Refusal::new(
+                            "a `Dict.single` of a key that is not an `I64`, an `F64` or a `Str`",
+                        ));
+                    }
                 };
-                let (Some(key_item @ (Item::Str | Item::I64)), Some(value_item)) =
-                    (item(self.builder.ty(key)), item(self.builder.ty(value)))
-                else {
-                    return Err(Refusal::new(
-                        "a `Dict.single` of keys or values that are not scalars",
-                    ));
-                };
+                let value_item = self.builder.ty(value).held_item().ok_or(Refusal::new(
+                    "a `Dict.single` of a value a dictionary cannot hold",
+                ))?;
                 let ty = Type::Dict {
                     key: key_item,
                     value: value_item,
@@ -4727,6 +4740,7 @@ impl Lowering<'_> {
                 }
                 _ => return Err(Refusal::new("a map of an unsupported form")),
             };
+        let settled = std::mem::take(&mut self.settled_empty);
         let with_index = name == "List.map_with_index";
         let callable = self.function_argument(function)?;
         let vector = self.value(vector)?;
@@ -4745,7 +4759,7 @@ impl Lowering<'_> {
             None => None,
         };
         // `List.map` over a ry list builds a ry list of the results, which the interpreter
-        // cannot do from no items at all.
+        // cannot type from no items at all unless a `.ry_items` gives it the storage.
         let to_array = name.starts_with("List.") && matches!(ty, Type::Vector { array: true, .. });
         if with_index && !to_array {
             return Err(Refusal::new(
@@ -4754,7 +4768,7 @@ impl Lowering<'_> {
         }
         let held = self.builder.emit(ty, Op::Copy(vector));
         let count = self.builder.emit(Type::Int, Op::Length(held));
-        if to_array {
+        if to_array && !settled {
             let zero = self.int(0);
             let empty = self.builder.emit(Type::Bool, Op::Same(count, zero));
             self.fail_if(empty);
@@ -5147,7 +5161,7 @@ impl Lowering<'_> {
                 };
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
                     .as_deref()
-                    .and_then(keyed_type)
+                    .and_then(|annotation| keyed_type(annotation))
                     .ok_or(Refusal::new(
                         "a walk from an empty collection whose state type is unknown",
                     ))?;
@@ -6083,6 +6097,16 @@ impl Lowering<'_> {
 
     /// Whether `a` equals `b`, as a `Bool` to branch on, for the list function `name`.
     unsafe fn identical_items(&mut self, a: Local, b: Local, name: &str) -> Result<Local, Refusal> {
+        // Two lists are one item each here, where `compare` would pair their items.
+        let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+        if let (Some(item @ Item::Array(_)), Some(other)) = (ta.held_item(), tb.held_item()) {
+            if item != other {
+                return Err(Refusal(Cow::Owned(format!("a `{name}` of another type"))));
+            }
+            return Ok(self
+                .builder
+                .emit(Type::Bool, Op::Compare(Compare::Eq, item, a, b)));
+        }
         let equal = self.compare(Compare::Eq, a, b)?;
         match self.builder.ty(equal) {
             Type::Bool => Ok(equal),
@@ -6522,9 +6546,10 @@ impl Lowering<'_> {
     }
 
     /// `List.join_map(list, f)`: the lists `f` gives for each item, concatenated in a loop with
-    /// `f` inlined. An empty result stops the native code, because the interpreter builds it
-    /// without an item type, as for `List.map`.
+    /// `f` inlined. An empty result stops the native code unless a `.ry_items` settles it,
+    /// because the interpreter builds it without an item type, as for `List.map`.
     unsafe fn join_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let settled = std::mem::take(&mut self.settled_empty);
         let [list, function] = arguments.exactly(2)?[..] else {
             return Err(Refusal::new("a malformed `List.join_map`"));
         };
@@ -6564,10 +6589,12 @@ impl Lowering<'_> {
         let empty = self.empty_list(output_item);
         self.builder.push(Some(output), Op::Copy(empty));
         self.builder.switch_to(exit);
-        let length = self.builder.emit(Type::Int, Op::Length(output));
-        let zero = self.int(0);
-        let nothing = self.builder.emit(Type::Bool, Op::Same(length, zero));
-        self.fail_if(nothing);
+        if !settled {
+            let length = self.builder.emit(Type::Int, Op::Length(output));
+            let zero = self.int(0);
+            let nothing = self.builder.emit(Type::Bool, Op::Same(length, zero));
+            self.fail_if(nothing);
+        }
         Ok(output)
     }
 
@@ -6621,9 +6648,10 @@ impl Lowering<'_> {
     /// `List.map2(a, b, f)`, `List.map3(a, b, c, f)` and `List.map4`: `f` of the items at each
     /// position up to the shortest list's length, in a loop with `f` inlined. `List.map_try(list,
     /// f)` maps one list with an `f` that gives results, leaves with the first `:Err` and wraps
-    /// the list in `:Ok`. An empty result stops the native code, because the interpreter builds
-    /// it without an item type, as for `List.map`.
+    /// the list in `:Ok`. An empty result stops the native code unless a `.ry_items` settles it,
+    /// because the interpreter builds it without an item type, as for `List.map`.
     unsafe fn map_many(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let settled = std::mem::take(&mut self.settled_empty);
         let trying = name == "List.map_try";
         let parameters = arguments.exactly(match name {
             "List.map_try" => 2,
@@ -6652,10 +6680,12 @@ impl Lowering<'_> {
             self.builder.push(Some(total), Op::Copy(shorter));
         }
         let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
-        let empty = self
-            .builder
-            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
-        self.fail_if(empty);
+        if !settled {
+            let empty = self
+                .builder
+                .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
+            self.fail_if(empty);
+        }
         let count = self.builder.emit(Type::Int, Op::CountOfI64(total));
         let preheader = self.builder.current;
         let output = self.builder.local(Type::Null);
@@ -9079,7 +9109,19 @@ impl Lowering<'_> {
         let key = self.value(key)?;
         let value = self.value(value)?;
         let key = self.dict_key(dict, key)?;
-        let dict_ty = self.builder.ty(dict);
+        self.usable(value)?;
+        // A tag of another shape widens the dictionary's value union: its values are boxes
+        // either way.
+        let dict_ty = match (self.builder.ty(dict), self.builder.ty(value)) {
+            (
+                ty @ Type::Dict {
+                    value: Item::Tag(_),
+                    ..
+                },
+                Type::Tag(found),
+            ) => with_tags(ty, found),
+            (ty, _) => ty,
+        };
         let Type::Dict { value: item, .. } = dict_ty else {
             return Err(Refusal::new(
                 "a `Dict.insert` into something other than a dictionary",
@@ -9172,16 +9214,11 @@ impl Lowering<'_> {
             ));
         };
         let held_shape = shapes::shape(shape);
-        let (
-            &[
-                key @ (Item::Str | Item::I64),
-                value @ (Item::Str | Item::I64 | Item::Dbl),
-            ],
-            true,
-        ) = (&held_shape.fields[..], held_shape.layout == layout)
+        let (&[key @ (Item::Str | Item::I64 | Item::Dbl), value], true) =
+            (&held_shape.fields[..], held_shape.layout == layout)
         else {
             return Err(Refusal::new(
-                "a `Dict.from_list` of something other than pairs of scalars",
+                "a `Dict.from_list` of something other than pairs with `I64`, `F64` or `Str` keys",
             ));
         };
         let dict_ty = Type::Dict { key, value };
@@ -9404,13 +9441,12 @@ impl Lowering<'_> {
             .ok_or(Refusal(Cow::Owned(format!(
                 "a `{name}` callback that never completes"
             ))))?;
-        let mapped_item = match (over_set, self.builder.ty(mapped)) {
-            (_, Type::Str) => Item::Str,
-            (_, Type::I64) => Item::I64,
-            (false, Type::Dbl) => Item::Dbl,
+        self.usable(mapped)?;
+        let mapped_item = match (over_set, self.builder.ty(mapped).held_item()) {
+            (true, Some(item @ (Item::Str | Item::I64))) | (false, Some(item)) => item,
             _ => {
                 return Err(Refusal(Cow::Owned(format!(
-                    "a `{name}` callback whose result is not a whole number, a double or a string"
+                    "a `{name}` callback whose result its collection cannot hold"
                 ))));
             }
         };
@@ -10540,8 +10576,9 @@ unsafe fn tag_layout(name: &str, count: u32) -> Result<u32, Refusal> {
 }
 
 /// A dictionary's or a set's type from its annotation, such as `Dict<Str, F64>` or `Set<I64>`.
-fn keyed_type(annotation: &str) -> Option<Type> {
-    let item = |name: &str| match name.trim() {
+/// A dictionary's values may be any item, spelled as [`spelled_item`] reads it.
+unsafe fn keyed_type(annotation: &str) -> Option<Type> {
+    let key = |name: &str| match name.trim() {
         "Str" => Some(Item::Str),
         "I64" => Some(Item::I64),
         "F64" => Some(Item::Dbl),
@@ -10549,17 +10586,87 @@ fn keyed_type(annotation: &str) -> Option<Type> {
     };
     let annotation = annotation.trim();
     if let Some(inner) = annotation.strip_prefix("Set<") {
-        return match item(inner.strip_suffix('>')?)? {
+        return match key(inner.strip_suffix('>')?)? {
             Item::Dbl => None,
             element => Some(Type::Set(element)),
         };
     }
     let inner = annotation.strip_prefix("Dict<")?.strip_suffix('>')?;
-    let (key, value) = inner.split_once(',')?;
+    let mut parts = top_level_parts(inner);
+    let (Some(key_text), Some(value_text), None) = (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
     Some(Type::Dict {
-        key: item(key)?,
-        value: item(value)?,
+        key: key(key_text)?,
+        value: spelled_item(value_text)?,
     })
+}
+
+/// The item of a value of the type `text` spells as a canonical signature does, such as
+/// `Record{x: I64, ys: List<F64>}`. Every tag type is any tag, as a box's tag field is.
+unsafe fn spelled_item(text: &str) -> Option<Item> {
+    let text = text.trim();
+    if text.starts_with(':') {
+        return Some(Item::Tag(shapes::ANY));
+    }
+    match text {
+        "I64" => return Some(Item::I64),
+        "F64" => return Some(Item::Dbl),
+        "Str" => return Some(Item::Str),
+        "Bool" => return Some(Item::Lgl),
+        _ => {}
+    }
+    if let Some(inner) = text
+        .strip_prefix("List<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        return Some(Item::Array(shapes::array_of(spelled_item(inner)?)));
+    }
+    if let Some(inner) = text
+        .strip_prefix("Tuple{")
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
+        let items = top_level_parts(inner)
+            .map(|part| spelled_item(part))
+            .collect::<Option<SmallVec<[Item; 4]>>>()?;
+        let names: SmallVec<[Sexp; 4]> = items.iter().map(|_| rvalues::nil()).collect();
+        let (layout, _) = interp::records::constructor_layout(None, &names, false)?;
+        return shapes::intern(layout, &items).map(Item::Record);
+    }
+    let inner = text.strip_prefix("Record{")?.strip_suffix('}')?;
+    let mut names: SmallVec<[Sexp; 4]> = SmallVec::new();
+    let mut items: SmallVec<[Item; 4]> = SmallVec::new();
+    for field in top_level_parts(inner) {
+        let (name, ty) = field.split_once(':')?;
+        names.push(rvalues::install(name.trim()).ok()?);
+        items.push(spelled_item(ty)?);
+    }
+    let (layout, slots) = interp::records::constructor_layout(None, &names, true)?;
+    let mut placed: SmallVec<[(usize, Item); 4]> = slots.into_iter().zip(items).collect();
+    placed.sort_by_key(|&(slot, _)| slot);
+    let fields: SmallVec<[Item; 4]> = placed.into_iter().map(|(_, item)| item).collect();
+    shapes::intern(layout, &fields).map(Item::Record)
+}
+
+/// The comma-separated parts of a type's spelling that no bracket encloses.
+fn top_level_parts(text: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut parts: SmallVec<[&str; 4]> = SmallVec::new();
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'<' | b'{' | b'(' => depth += 1,
+            b'>' | b'}' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts.into_iter()
 }
 
 /// A `match` arm: its pattern, its `if` guard and its value.
@@ -10783,13 +10890,18 @@ unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
     Ok((formals, body))
 }
 
-/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags.
+/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags or of
+/// a dictionary's tag values.
 fn held_tags(ty: Type) -> Option<u32> {
     match ty {
         Type::Tag(union)
         | Type::Vector {
             item: Item::Tag(union),
             array: true,
+        }
+        | Type::Dict {
+            value: Item::Tag(union),
+            ..
         } => Some(union),
         _ => None,
     }
@@ -10805,6 +10917,13 @@ fn with_tags(ty: Type, union: u32) -> Type {
         } => Type::Vector {
             item: Item::Tag(shapes::join(held, union)),
             array: true,
+        },
+        Type::Dict {
+            key,
+            value: Item::Tag(held),
+        } => Type::Dict {
+            key,
+            value: Item::Tag(shapes::join(held, union)),
         },
         ty => ty,
     }
@@ -10872,6 +10991,17 @@ enum Step {
     /// `List.range(a, b)`: up by this step, an `I64`, empty when the end is below the start.
     Inclusive(Local),
 }
+
+/// The mapping calls whose empty result the native code builds when a `.ry_items` wraps them,
+/// with their arities: the checker wraps each whose result items only a callback gives.
+const SETTLED_EMPTY: [(&str, usize); 6] = [
+    ("List.map", 2),
+    ("List.map_with_index", 2),
+    ("List.map2", 3),
+    ("List.map3", 4),
+    ("List.map4", 5),
+    ("List.join_map", 2),
+];
 
 /// The item a `vapply` template such as `numeric(1)` declares.
 unsafe fn template_item(template: Sexp) -> Option<Item> {

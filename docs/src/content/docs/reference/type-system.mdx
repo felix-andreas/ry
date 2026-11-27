@@ -1382,7 +1382,7 @@ q <- (..p, z = 3)
 ```text ry check typing
 type-mismatch
 
-  x field `z` does not exist in `Record{x: double, y: double}`
+  x field `z` does not exist in `Record{x: I64, y: I64}`
 ```
 
 Only a record, or a nominal type whose representation is a record, can be updated this way, and
@@ -1557,8 +1557,10 @@ trial_size(time, treated)
 #> 2i64
 ```
 
-A record that R code converts with `as.record()` passes the type check, but compiled typed code
-takes records only from typed code, so a call that passes one runs in the interpreter.
+A record or tuple that R code builds with `as.record()` passes to compiled typed code when each
+field is a scalar, a string, another such record or tuple, or a ry list, and its shape is then its
+type. One with a longer R vector in a field, an `NA` string, a class or attributes makes the call
+run in the interpreter.
 
 ## Numbers, `Bool` and `Str`
 
@@ -1618,7 +1620,11 @@ A ry type asks in three places:
   is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
   `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
   or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
-  literal, so `step <- 1 / 4` is an `F64`. Each top-level
+  literal, so `step <- 1 / 4` is an `F64`. The tuple items, record fields and tag payload items of
+  a literal bound there are ry values too, also inside a nested literal or a `List`, so
+  `pt <- (x = 3.0, y = 4.0)` is a `Record{x: F64, y: F64}` and `pair <- ("a", 1)` a
+  `Tuple{Str, I64}`. A literal inside a call keeps R's type, as `f(1)` does: `f((x = 1,))` passes
+  a `Record{x: double}`. Each top-level
   statement is checked on its own, so nothing later in the file decides the type. In any other file
   a top-level literal has R's type.
 
@@ -5734,7 +5740,7 @@ interpreted
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
-| a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
+| a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values hold something other than numbers, strings, `Bool`s, lists, records, tuples and tags | convert the keys to `I64` or `Str`, and keep such values in a `List` whose positions the dictionary stores |
 | a `Set` whose elements are not `I64` or `Str` | convert the elements to `I64` or `Str`, or keep them in a `List` |
 | a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
