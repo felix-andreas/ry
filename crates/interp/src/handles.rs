@@ -4206,21 +4206,25 @@ pub fn formal_slots<'c, const N: usize>(
     if frame.slots == crate::NO_SLOTS || frame.env.raw() != values::nil() {
         return None;
     }
-    let slots = state.bytecode.registers.get(frame.slots as usize + 1..)?;
     let mut cell = frame.function.get(context).downcast::<Closure>()?.formals();
-    let mut next = 0;
+    let mut position = 0;
     let mut found = [(null().read(context), false); N];
     for (entry, symbol) in found.iter_mut().zip(symbols) {
-        let position = loop {
+        loop {
             let pair = cell.downcast::<Pairlist>()?;
             cell = pair.rest();
-            next += 1;
             if pair.tag().is(symbol) {
-                break next - 1;
+                break;
             }
-        };
+            position += 1;
+        }
         let missing = position < 64 && frame.missing & (1 << position) != 0;
-        *entry = (register_value(context, *slots.get(position)?), missing);
+        let register = state
+            .bytecode
+            .registers
+            .get(frame.slots as usize + 1 + position)?;
+        *entry = (register_value(context, *register), missing);
+        position += 1;
     }
     Some(found)
 }
@@ -4363,7 +4367,7 @@ pub fn run_promise_code<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -
 
 /// What the promise code `code`, compiled against the slot table of `frame`'s function, gives
 /// when run on the frame's slots (`bytecode::run_promise_on_slots`).
-#[inline]
+#[inline(always)]
 pub fn run_on_slots<'s>(
     context: &mut Cx<'s>,
     code: Local<'_, Bytecode>,

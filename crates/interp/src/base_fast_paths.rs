@@ -17,7 +17,7 @@ use {
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         conditions::{Handler, calling_established, make_condition, new_handler},
         eval::{self, CallFrame, Entering, Reify, Site},
-        handles::Held,
+        handles::{self, Held},
         interp,
         session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
@@ -27,6 +27,7 @@ use {
     },
     heap::{
         activity::{self, Counter},
+        handle::{Cx, Gc, Symbol},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
@@ -1594,8 +1595,8 @@ unsafe fn is_default(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
 /// Whether the call supplied the formal `name`, as `missing(name)` is false.
 unsafe fn is_supplied(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
     match frame.resolve() {
-        Ok(index) => match eval::slot_formal(index, symbol) {
-            Some((value, missing)) => Ok(!missing && !eval::value_is_missing(value)?),
+        Ok(index) => match handles::reading_with((index, Gc::adopt(symbol)), supplied_in_slot) {
+            Some(supplied) => supplied,
             None => Ok(!eval::is_missing(
                 symbol,
                 eval::frame_env(index, Reify::Site(Site::Missing))?,
@@ -1603,6 +1604,16 @@ unsafe fn is_supplied(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
         },
         Err(env) => Ok(!eval::is_missing(symbol, env)?),
     }
+}
+
+/// Whether the slot of the formal `symbol` in the slot frame at `index` holds a supplied
+/// argument, in one scope with the slot's read; `None` as for [`handles::formal_slots`].
+fn supplied_in_slot(context: &Cx<'_>, (index, symbol): (usize, Gc<'_, Symbol>)) -> Option<R<bool>> {
+    let [(value, missing)] = handles::formal_slots(context, index, [symbol])?;
+    if missing {
+        return Some(Ok(false));
+    }
+    Some(eval::content_is_missing(context, value).map(|missing| !missing))
 }
 
 /// The elements of the frame's `...`, unforced; `None` when one is an empty argument.

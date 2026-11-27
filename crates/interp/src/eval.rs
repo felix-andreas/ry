@@ -4371,7 +4371,14 @@ pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Re
     context.read_or_make(
         |context| {
             let frame = handles::live_frame(context, index);
-            (!frame.in_slots()).then(|| frame.recorded_environment())
+            if !frame.in_slots() {
+                return Some(frame.recorded_environment());
+            }
+            // A profile summary records who asked, so it takes the path that records.
+            if activity::enabled() {
+                return None;
+            }
+            frame.pending().map(|environment| environment.value())
         },
         |context| Ok(reified_environment(context, index, cause)?.value()),
     )
@@ -4616,6 +4623,13 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
         return Ok(frame.sys_parent.raw());
     }
     let caller = frame.caller as usize;
+    let fields = &interp().frames[caller];
+    if fields.env.raw() != nil() || fields.slots == crate::NO_SLOTS {
+        return Ok(fields.env.raw());
+    }
+    if fields.pending.raw() != nil() && !activity::enabled() {
+        return Ok(fields.pending.raw());
+    }
     handles::in_caller_scope(|context| Ok(frame_environment_of(context, caller, cause)?.raw()))
 }
 
