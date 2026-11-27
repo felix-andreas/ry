@@ -124,6 +124,7 @@ use {
         base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{Handler, HandlerStack, RestartStack},
+        handles::{Alt, Chars, Cx, Local},
         unwind::{R, Unwind},
     },
     heap::{
@@ -514,60 +515,63 @@ pub const FRAME_CLOSURES: usize = 16;
 #[derive(Clone, Copy)]
 pub struct Hooks {
     /// Writes console output: the text, and whether it is error output.
-    pub write_console: unsafe fn(&[u8], bool),
+    pub write_console: fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
-    pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    pub materialize_altrep: for<'s> fn(&mut Cx<'s>, Local<'s, Alt>) -> R<Local<'s>>,
     /// An ordinary vector to read an ALTREP vector's elements from: the one its class keeps
     /// them in when there is one, which may carry other attributes and must not be written or
     /// kept, and a copy otherwise.
-    pub altrep_storage: unsafe fn(Sexp) -> R<Sexp>,
+    pub altrep_storage: for<'s> fn(&mut Cx<'s>, Local<'s, Alt>) -> R<Local<'s>>,
     /// An ALTREP vector's length, from its class's `Length` method.
-    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
+    pub altrep_length: fn(&mut Cx<'_>, Local<'_, Alt>) -> R<usize>,
     /// A compact sequence (GNU R's `compact_intseq` or `compact_realseq`) of an integer or
     /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
     /// host has no compact sequences.
-    pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
+    pub compact_sequence:
+        for<'s> fn(&mut Cx<'s>, SexpType, usize, f64, f64) -> R<Option<Local<'s>>>,
     /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
-    pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
+    pub altrep_dataptr: fn(&mut Cx<'_>, Local<'_, Alt>) -> R<Option<*const u8>>,
     /// GNU R's `DATAPTR_OR_NULL`: an ALTREP vector's data when its class holds it already, as a
     /// wrapper does, without expanding or copying anything, or `None`.
-    pub altrep_dataptr_or_null: unsafe fn(Sexp) -> R<Option<*const u8>>,
+    pub altrep_dataptr_or_null: fn(&mut Cx<'_>, Local<'_, Alt>) -> R<Option<*const u8>>,
     /// Element `index` of an integer or logical ALTREP vector, from its class's `Elt` method,
     /// so that reading a few elements of a compact sequence never expands it.
-    pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
+    pub altrep_int_elt: fn(&mut Cx<'_>, Local<'_, Alt>, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
-    pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    pub altrep_real_elt: fn(&mut Cx<'_>, Local<'_, Alt>, usize) -> R<f64>,
     /// Element `index` of a character ALTREP vector, a `CHARSXP` from its class's `Elt` method,
     /// so that reading one string of a deferred string vector converts only that element.
-    pub altrep_string_elt: unsafe fn(Sexp, usize) -> R<Sexp>,
+    pub altrep_string_elt: for<'s> fn(&mut Cx<'s>, Local<'s, Alt>, usize) -> R<Local<'s, Chars>>,
     /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
     /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
-    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
+    pub altrep_summary:
+        for<'s> fn(&mut Cx<'s>, Local<'s, Alt>, AltrepSummary, bool) -> R<Option<Local<'s>>>,
     /// An ALTREP vector's `*_IS_SORTED` and `*_NO_NA` metadata, GNU R's sortedness enum
     /// (`NA_INTEGER` when unknown) and whether it knows the vector holds no missing value.
-    pub altrep_sortedness: unsafe fn(Sexp) -> R<(i32, bool)>,
+    pub altrep_sortedness: fn(&mut Cx<'_>, Local<'_, Alt>) -> R<(i32, bool)>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
-    pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
+    pub defer_strings: for<'s> fn(&mut Cx<'s>, Local<'s>) -> R<Option<Local<'s>>>,
     /// GNU R's `R_tryWrap` for an integer, logical, double, complex, raw or character vector:
     /// a wrapper that shares the data until something writes, or a copy when the host has no
     /// wrapper classes.
-    pub altrep_wrap: unsafe fn(Sexp) -> R<Sexp>,
+    pub altrep_wrap: for<'s> fn(&mut Cx<'s>, Local<'s>) -> R<Local<'s>>,
     /// GNU R's `R_tryUnwrap`: the data under a wrapper that vouches for nothing and that only
     /// its binding holds, with the wrapper's attributes moved onto it, or the value itself.
-    pub altrep_unwrap: unsafe fn(Sexp) -> Sexp,
+    pub altrep_unwrap: for<'s> fn(&mut Cx<'s>, Local<'s, Alt>) -> Local<'s>,
     /// Runs finalizers whose objects died, at a safe point.
-    pub run_finalizers: unsafe fn(),
+    pub run_finalizers: fn(&mut Cx<'_>),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
-    pub run_exit_finalizers: unsafe fn(),
+    pub run_exit_finalizers: fn(&mut Cx<'_>),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
     /// succeeded, and whether the value was visible.
-    pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
+    pub run_task_callbacks: for<'s> fn(&mut Cx<'s>, Local<'s>, Local<'s>, bool, bool) -> R<()>,
     /// Base's task-callback routines, which keep their list in the host so that callbacks
     /// registered from R and from native code share one list and one numbering.
-    pub task_callback_routine: unsafe fn(TaskCallbackRoutine, &[Sexp]) -> R<Sexp>,
+    pub task_callback_routine:
+        for<'s> fn(&mut Cx<'s>, TaskCallbackRoutine, &[Local<'s>]) -> R<Local<'s>>,
     /// Calls a C method of a custom connection under the host's native-code boundary, which
     /// turns an R error the method raises into an unwind.
     pub connection_method:
@@ -584,16 +588,17 @@ pub struct Hooks {
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
     /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
     /// finds `user_unif_rand`.
-    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
+    pub find_native_symbol: fn(&str) -> Option<NativeSymbol>,
     /// `object` serialized as `saveRDS` writes it without compression (XDR, version 3), without
     /// evaluating R code: the boundary-call recorder serializes inputs of the program it
     /// records, and an error it raised through `eval` would reach that program's handlers.
-    pub serialize: unsafe fn(Sexp) -> R<Vec<u8>>,
+    pub serialize: fn(&mut Cx<'_>, Local<'_>) -> R<Vec<u8>>,
     /// An ALTREP object read back from a stream: its class information, serialized state,
     /// attributes, levels and object bit. The host's class registry holds the classes packages
     /// register (s2's geographies), so it rebuilds the object, or `None` leaves the interpreter
     /// to materialize base R's classes itself.
-    pub unserialize_altrep: unsafe fn(Sexp, Sexp, Sexp, u16, bool) -> R<Option<Sexp>>,
+    pub unserialize_altrep:
+        for<'s> fn(&mut Cx<'s>, Local<'s>, Local<'s>, Local<'s>, u16, bool) -> R<Option<Local<'s>>>,
 }
 
 /// The ALTREP summary methods `sum`, `min` and `max` consult.
@@ -1035,24 +1040,24 @@ pub unsafe fn define_own_builtins(definitions: &[BuiltinDef]) {
 pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
-        materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
-        altrep_storage: |_| Err(unwind::error("ALTREP objects need the libR host")),
-        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
-        compact_sequence: |_, _, _, _| Ok(None),
-        altrep_dataptr: |_| Ok(None),
-        altrep_dataptr_or_null: |_| Ok(None),
-        altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
-        altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
-        altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
-        altrep_summary: |_, _, _| Ok(None),
-        altrep_sortedness: |_| Ok((NA_INTEGER, false)),
-        defer_strings: |_| Ok(None),
-        altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
-        altrep_unwrap: |object| object,
-        run_finalizers: || {},
-        run_exit_finalizers: || {},
-        run_task_callbacks: |_, _, _, _| Ok(()),
-        task_callback_routine: |_, _| {
+        materialize_altrep: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_storage: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        compact_sequence: |_, _, _, _, _| Ok(None),
+        altrep_dataptr: |_, _| Ok(None),
+        altrep_dataptr_or_null: |_, _| Ok(None),
+        altrep_int_elt: |_, _, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_real_elt: |_, _, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_string_elt: |_, _, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _, _| Ok(None),
+        altrep_sortedness: |_, _| Ok((NA_INTEGER, false)),
+        defer_strings: |_, _| Ok(None),
+        altrep_wrap: |context, object| Ok(handles::shallow_copy(context, object)?.finish()),
+        altrep_unwrap: |_, object| object.value(),
+        run_finalizers: |_| {},
+        run_exit_finalizers: |_| {},
+        run_task_callbacks: |_, _, _, _, _| Ok(()),
+        task_callback_routine: |_, _, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))
         },
         connection_method: |_, _| Err(unwind::error("custom connections need the libR host")),
@@ -1068,12 +1073,12 @@ pub fn default_hooks() -> Hooks {
         },
         connection_vfprintf: None,
         find_native_symbol: |_| None,
-        serialize: |_| Err(unwind::error("serialization needs the libR host")),
-        unserialize_altrep: |_, _, _, _, _| Ok(None),
+        serialize: |_, _| Err(unwind::error("serialization needs the libR host")),
+        unserialize_altrep: |_, _, _, _, _, _| Ok(None),
     }
 }
 
-unsafe fn default_write_console(text: &[u8], is_error: bool) {
+fn default_write_console(text: &[u8], is_error: bool) {
     use std::io::Write;
     // Console output that cannot be written has nowhere else to go, as in GNU R.
     let written = if is_error {
@@ -1100,8 +1105,7 @@ pub fn write_console(text: &[u8], is_error: bool) {
 
 /// Writes to the host's console, bypassing any `sink`.
 pub fn write_terminal(text: &[u8], is_error: bool) {
-    // SAFETY: the hook is the host's, which accepts any bytes.
-    unsafe { (interp().hooks.write_console)(&values::unescape_output(text), is_error) }
+    (interp().hooks.write_console)(&values::unescape_output(text), is_error)
 }
 
 /// Runs `body` in a handle scope: whatever it roots is released on exit, and its result (or the

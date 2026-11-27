@@ -1159,12 +1159,10 @@ unsafe fn expanded_row_names(row_names: Sexp, rows: usize) -> R<Sexp> {
     if row_names == nil() || values::compact_row_count(row_names).is_some() {
         // `as.character(seq_len(rows))`, deferred as GNU R defers it, so a large model's row
         // names cost nothing until something reads them.
-        let hooks = &interp::interp().hooks;
-        if let Some(sequence) = (hooks.compact_sequence)(SexpType::Integer, rows, 1.0, 1.0)? {
-            interp::heap().root(sequence);
-            if let Some(deferred) = (hooks.defer_strings)(sequence)? {
-                return Ok(deferred);
-            }
+        if let Some(sequence) = values::compact_sequence_of(SexpType::Integer, rows, 1.0, 1.0)?
+            && let Some(deferred) = values::deferred_strings(sequence)?
+        {
+            return Ok(deferred);
         }
         let names: Vec<String> = (1..=rows).map(|row| row.to_string()).collect();
         return values::string_vector(&names);

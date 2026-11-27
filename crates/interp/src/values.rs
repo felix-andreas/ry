@@ -3,6 +3,7 @@
 
 use {
     crate::{
+        handles::{self, Alt, Cx, Gc, Local, Owned},
         interp, records, standard_library,
         unwind::{R, error},
     },
@@ -363,6 +364,7 @@ impl Globals {
     }
 }
 
+#[inline]
 pub fn symbols() -> &'static Symbols {
     &interp().symbols
 }
@@ -838,7 +840,7 @@ unsafe fn altrep_length(object: Sexp) -> usize {
     if let Some((count, _, _)) = compact_sequence(object) {
         return count;
     }
-    match (interp().hooks.altrep_length)(object) {
+    match class_length(object) {
         Ok(count) => count,
         Err(unwind) => {
             crate::unwind::park(unwind);
@@ -847,16 +849,74 @@ unsafe fn altrep_length(object: Sexp) -> usize {
     }
 }
 
+/// The length an ALTREP vector's class's `Length` method answers.
+pub unsafe fn class_length(object: Sexp) -> R<usize> {
+    on_altrep(object, |context, object| {
+        (interp().hooks.altrep_length)(context, object)
+    })
+}
+
+/// A compact sequence of an integer or double `kind`, as the hook makes it, rooted in the
+/// caller's scope, or `None` when the host has no compact sequences.
+pub unsafe fn compact_sequence_of(
+    kind: SexpType,
+    count: usize,
+    first: f64,
+    increment: f64,
+) -> R<Option<Sexp>> {
+    handles::in_caller_scope(|context| {
+        let sequence = (interp().hooks.compact_sequence)(context, kind, count, first, increment)?;
+        Ok(sequence.map(|sequence| sequence.raw()))
+    })
+}
+
+/// `as.character` of the integer or double vector `object` as deferred strings, rooted in the
+/// caller's scope, or `None` when the host has no such class.
+pub unsafe fn deferred_strings(object: Sexp) -> R<Option<Sexp>> {
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        let deferred = (interp().hooks.defer_strings)(context, object)?;
+        Ok(deferred.map(|deferred| deferred.raw()))
+    })
+}
+
 /// An ordinary vector with the contents of `object`, which is `object` itself unless it is
 /// ALTREP.
+#[inline]
 pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
-    if object.is_altrep() {
-        let vector = (interp().hooks.materialize_altrep)(object)?;
-        crate::heap().root(vector);
-        Ok(vector)
-    } else {
-        Ok(object)
+    if !object.is_altrep() {
+        return Ok(object);
     }
+    altrep_result(object, |context, object| {
+        (interp().hooks.materialize_altrep)(context, object)
+    })
+}
+
+/// Runs `hook` on the ALTREP object `object` in a scope of its own, which roots the object,
+/// because a class's method is native code that may allocate.
+unsafe fn on_altrep<T>(
+    object: Sexp,
+    hook: impl for<'s> FnOnce(&mut Cx<'s>, Local<'s, Alt>) -> R<T>,
+) -> R<T> {
+    handles::with(|context| {
+        let object = context.root(Gc::<Alt>::adopt(object));
+        hook(context, object)
+    })
+}
+
+/// [`on_altrep`] for a hook that answers with an object, which is rooted in the caller's scope
+/// as a raw allocation's result is. It stays out of line so that the non-ALTREP test of a
+/// caller such as [`materialize`] inlines alone.
+#[cold]
+#[inline(never)]
+unsafe fn altrep_result(
+    object: Sexp,
+    hook: impl for<'s> FnOnce(&mut Cx<'s>, Local<'s, Alt>) -> R<Local<'s>>,
+) -> R<Sexp> {
+    handles::with_result(|context| {
+        let object = context.root(Gc::<Alt>::adopt(object));
+        Ok(hook(context, object)?.raw())
+    })
 }
 
 /// An ordinary vector with the contents of `object` to read, leaving `object` as it is: a compact
@@ -908,7 +968,9 @@ macro_rules! typed_slice {
             // The accessor cannot fail, so a method's error is parked, as for elements. The
             // class's own data pointer comes first, since materializing copies the whole vector
             // on every read.
-            let data = match (interp().hooks.altrep_dataptr)(object) {
+            let data = match on_altrep(object, |context, object| {
+                (interp().hooks.altrep_dataptr)(context, object)
+            }) {
                 Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
                 Ok(Some(pointer)) => Ok(std::slice::from_raw_parts(
                     pointer.cast::<$type>(),
@@ -968,7 +1030,9 @@ pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
 unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
     match compact_sequence(object) {
         Some((_, first, increment)) => Ok((first + increment * index as f64) as i32),
-        None => (interp().hooks.altrep_int_elt)(object, index),
+        None => on_altrep(object, |context, object| {
+            (interp().hooks.altrep_int_elt)(context, object, index)
+        }),
     }
 }
 
@@ -978,7 +1042,9 @@ unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
 unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
     match compact_sequence(object) {
         Some((_, first, increment)) => Ok(first + increment * index as f64),
-        None => (interp().hooks.altrep_real_elt)(object, index),
+        None => on_altrep(object, |context, object| {
+            (interp().hooks.altrep_real_elt)(context, object, index)
+        }),
     }
 }
 
@@ -988,7 +1054,9 @@ unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
 #[cold]
 #[inline(never)]
 pub unsafe fn altrep_string_elt(object: Sexp, index: usize) -> R<Sexp> {
-    (interp().hooks.altrep_string_elt)(object, index)
+    altrep_result(object, |context, object| {
+        Ok((interp().hooks.altrep_string_elt)(context, object, index)?.value())
+    })
 }
 
 #[inline]
@@ -1350,57 +1418,11 @@ pub fn check_attributable(kind: SexpType) -> R<()> {
 /// Sets an attribute without validating its value, or removes it when `value` is `NULL`. The
 /// object bit follows the class attribute.
 pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
-    let heap = crate::heap();
-    let nil = nil();
-    if value == nil {
-        remove_attr(object, name);
-        return Ok(());
-    }
-    check_attributable(object.kind())?;
-    // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
-    // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
-    let value = if value == object {
-        let copy = duplicate(value)?;
-        heap.root(copy);
-        copy
-    } else if name == symbols().row_names
-        && value.kind() == SexpType::Real
-        && length(value) == 2
-        && reals(value)[0].is_nan()
-    {
-        // `.set_row_names(n)` computes `c(NA_integer_, -n)` with a double `n`, so GNU R's
-        // `row_names_gets` stores a double `c(NA, n)` as the integer compact form that
-        // `.row_names_info` and `dim.data.frame` read.
-        let compact = crate::coerce::coerce_vector(value, SexpType::Integer)?;
-        heap.root(compact);
-        compact
-    } else {
-        value
-    };
-    let mut cell = object.attrib();
-    let mut last = nil;
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag() == name {
-            heap.set_car(cell, value);
-            if name == symbols().class {
-                object.set_object(true);
-            }
-            return Ok(());
-        }
-        last = cell;
-        cell = cell.cdr();
-    }
-    let fresh = heap.alloc_triple(SexpType::Pairlist, value, nil, name)?;
-    heap.root(fresh);
-    if last == nil {
-        heap.set_attrib(object, fresh);
-    } else {
-        heap.set_cdr(last, fresh);
-    }
-    if name == symbols().class {
-        object.set_object(true);
-    }
-    Ok(())
+    handles::in_caller_scope(|context| {
+        let mut object = Owned::assume(handles::held(context, object));
+        let value = handles::held(context, value);
+        handles::set_attribute(context, &mut object, Gc::adopt(name), value)
+    })
 }
 
 pub unsafe fn remove_attr(object: Sexp, name: Sexp) {
@@ -1427,23 +1449,11 @@ pub unsafe fn remove_attr(object: Sexp, name: Sexp) {
 
 /// Copies every attribute of `from` onto `to`, sharing the values.
 pub unsafe fn copy_most_attributes(from: Sexp, to: Sexp, keep_names_dims: bool) -> R<()> {
-    let symbols = symbols();
-    let mut cell = from.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        let tag = cell.tag();
-        let structural = tag == symbols.names || tag == symbols.dim || tag == symbols.dimnames;
-        if keep_names_dims || !structural {
-            set_attr(to, tag, cell.car())?;
-        }
-        cell = cell.cdr();
-    }
-    if from.is_object() {
-        to.set_object(true);
-    }
-    if from.has_gp(gp::S4_OBJECT) {
-        to.set_gp_bits(gp::S4_OBJECT, true);
-    }
-    Ok(())
+    handles::in_caller_scope(|context| {
+        let from = handles::held(context, from);
+        let mut to = Owned::assume(handles::held(context, to));
+        handles::copy_most_attributes(context, from, &mut to, keep_names_dims)
+    })
 }
 
 pub unsafe fn copy_attributes(from: Sexp, to: Sexp) -> R<()> {
@@ -1483,31 +1493,10 @@ pub unsafe fn names(object: Sexp) -> Sexp {
 
 /// The tags of a pairlist as a character vector, or `None` when no cell has a tag.
 pub unsafe fn pairlist_names(list: Sexp) -> R<Sexp> {
-    let count = pairlist_length(list);
-    let mut any = false;
-    let mut cell = list;
-    while cell.kind() != SexpType::Nil {
-        if cell.tag() != nil() {
-            any = true;
-            break;
-        }
-        cell = cell.cdr();
-    }
-    if !any {
-        return Ok(nil());
-    }
-    let result = alloc(SexpType::String, count)?;
-    let mut cell = list;
-    let mut index = 0;
-    while index < count {
-        let tag = cell.tag();
-        if tag.kind() == SexpType::Symbol {
-            set_elt(result, index, tag.car());
-        }
-        cell = cell.cdr();
-        index += 1;
-    }
-    Ok(result)
+    handles::in_caller_scope(|context| {
+        let list = handles::held(context, list);
+        Ok(handles::pairlist_names(context, list)?.raw())
+    })
 }
 
 pub unsafe fn class_attr(object: Sexp) -> Sexp {
@@ -1563,21 +1552,19 @@ pub unsafe fn dims(object: Sexp) -> Option<Dims> {
 /// code (which checks every write) puts the bit back. Arrays nested inside a copied list keep it,
 /// because the copy does not write into them.
 pub unsafe fn duplicate(object: Sexp) -> R<Sexp> {
-    let copy = duplicate_with(object, true)?;
-    if copy.is_array() {
-        copy.set_array(false);
-    }
-    Ok(copy)
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        Ok(handles::deep_copy(context, object)?.finish().raw())
+    })
 }
 
 /// A copy of the top level only: list elements and attribute values are shared. Like
 /// [`duplicate`], it drops the Array bit.
 pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
-    let copy = duplicate_with(object, false)?;
-    if copy.is_array() {
-        copy.set_array(false);
-    }
-    Ok(copy)
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        Ok(handles::shallow_copy(context, object)?.finish().raw())
+    })
 }
 
 /// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
@@ -1586,25 +1573,10 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
 /// written directly (`slice_mut`, `reals_mut`). Like [`shallow_duplicate`], it drops the Array
 /// bit.
 pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
-    let wrappable = matches!(
-        object.kind(),
-        SexpType::Integer
-            | SexpType::Logical
-            | SexpType::Real
-            | SexpType::Complex
-            | SexpType::Raw
-            | SexpType::String
-            | SexpType::List
-    );
-    // An Array's kernels read its storage directly, which a wrapper does not have.
-    if !wrappable || object.is_array() || length(object) < WRAP_THRESHOLD {
-        return shallow_duplicate(object);
-    }
-    let copy = (interp().hooks.altrep_wrap)(object)?;
-    if copy.is_array() {
-        copy.set_array(false);
-    }
-    Ok(copy)
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        Ok(handles::attribute_copy(context, object)?.finish().raw())
+    })
 }
 
 /// The copy a replacement function such as `attr<-` or `[<-` works on when its target is shared:
@@ -1616,21 +1588,10 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
 /// [`shallow_duplicate`], because the wrapper `shallow_duplicate_attr` makes of a long vector
 /// has no storage to write into.
 pub unsafe fn replacement_copy(object: Sexp) -> R<Sexp> {
-    if !object.is_altrep() {
-        return shallow_duplicate_attr(object);
-    }
-    let heap = crate::heap();
-    heap.root(object);
-    let copy = heap.alloc_altrep(object.kind(), object.tag(), object.car(), object.cdr())?;
-    copy.mark_not_mutable();
-    heap.root(copy);
-    if object.attrib() != nil() {
-        let attributes = duplicate_with(object.attrib(), false)?;
-        heap.set_attrib(copy, attributes);
-    }
-    copy.set_object(object.is_object());
-    copy.set_gp(object.gp() & gp::S4_OBJECT);
-    Ok(copy)
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        Ok(handles::replacement_copy(context, object)?.raw())
+    })
 }
 
 /// The length, first element and increment of a compact integer or double sequence, or `None`
@@ -1652,129 +1613,17 @@ pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
     Some((count as usize, first, increment))
 }
 
-/// The value a complex assignment binds: a wrapper [`shallow_duplicate_attr`] introduced is
-/// dropped for its data once the replacement has copied that data, as GNU R's
-/// `try_assign_unwrap` does. `bound` says whether the variable's binding is the one reference
-/// the value has.
+/// Whether a complex assignment binds the data under `value` instead of `value`: a wrapper
+/// [`shallow_duplicate_attr`] introduced is dropped for its data once the replacement has copied
+/// that data, as GNU R's `try_assign_unwrap` does. `bound` says whether the variable's binding
+/// is the one reference the value has.
 #[inline]
-pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
-    if value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound)) {
-        (interp().hooks.altrep_unwrap)(value)
-    } else {
-        value
-    }
+pub unsafe fn unwraps(value: Sexp, bound: bool) -> bool {
+    value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound))
 }
 
 /// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.
 pub(crate) const WRAP_THRESHOLD: usize = 64;
-
-unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
-    let heap = crate::heap();
-    let kind = object.kind();
-    let copy = match kind {
-        SexpType::Nil
-        | SexpType::Symbol
-        | SexpType::Environment
-        | SexpType::Special
-        | SexpType::Builtin
-        | SexpType::Promise
-        | SexpType::ExternalPtr
-        | SexpType::WeakRef
-        | SexpType::Char
-        | SexpType::Binding
-        | SexpType::Bytecode => return Ok(object),
-        SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
-            let mut builder = PairlistBuilder::new(kind);
-            let mut cell = object;
-            while matches!(
-                cell.kind(),
-                SexpType::Pairlist | SexpType::Language | SexpType::Dots
-            ) {
-                let value = if deep {
-                    duplicate_with(cell.car(), true)?
-                } else {
-                    cell.car()
-                };
-                builder.push(cell.tag(), value)?;
-                // The head cell's attributes and flags are the object's, copied below.
-                let attributes = cell.attrib();
-                if cell != object && attributes != nil() {
-                    let attributes = if deep {
-                        duplicate_with(attributes, true)?
-                    } else {
-                        attributes
-                    };
-                    heap.set_attrib(builder.last(), attributes);
-                }
-                cell = cell.cdr();
-            }
-            let list = builder.finish();
-            if list == nil() {
-                return Ok(list);
-            }
-            list
-        }
-        SexpType::Closure => {
-            let body = crate::bytecode::body_to_copy(object)?;
-            let copy = triple(SexpType::Closure, object.car(), body, object.tag())?;
-            // The copy captures the same frame, so a move must count it as it counts the original.
-            crate::moves::created_closure(copy)?;
-            copy
-        }
-        SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
-        _ if kind.is_vector() => {
-            let source = materialize(object)?;
-            let count = source.length() as usize;
-            let copy = alloc(kind, count)?;
-            match kind {
-                // The elements are shared, so the slots copy as one block and are then counted
-                // and barriered together.
-                SexpType::String | SexpType::List | SexpType::Expression if !deep => {
-                    std::ptr::copy_nonoverlapping(
-                        source.data() as *const Sexp,
-                        copy.data() as *mut Sexp,
-                        count,
-                    );
-                    heap.count_written_elements(copy);
-                }
-                SexpType::String => {
-                    for index in 0..count {
-                        heap.set_element(copy, index, source.element(index));
-                    }
-                }
-                SexpType::List | SexpType::Expression => {
-                    for index in 0..count {
-                        let element = source.element(index);
-                        let element = if deep {
-                            duplicate_with(element, true)?
-                        } else {
-                            element
-                        };
-                        heap.set_element(copy, index, element);
-                    }
-                }
-                _ => {
-                    let bytes = count * kind.element_size().unwrap_or(0);
-                    std::ptr::copy_nonoverlapping(source.data(), copy.data(), bytes);
-                }
-            }
-            copy
-        }
-        _ => return Ok(object),
-    };
-    if object.attrib() != nil() {
-        let attributes = if deep {
-            duplicate_with(object.attrib(), true)?
-        } else {
-            duplicate_with(object.attrib(), false)?
-        };
-        heap.set_attrib(copy, attributes);
-    }
-    copy.set_object(object.is_object());
-    copy.set_array(object.is_array());
-    copy.set_gp(object.gp() & (gp::S4_OBJECT));
-    Ok(copy)
-}
 
 /// `object` as a plain R vector: an Array becomes a copy without the Array bit, and anything else
 /// is returned as is. R's own conversions (`as.double`, `as.vector`, `as.list`) go through here,
@@ -2007,67 +1856,21 @@ pub unsafe fn list_items(list: Sexp) -> Vec<Sexp> {
 
 /// The pairlist as a list vector with the tags as names.
 pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
-    let is_cell = |cell: Sexp| {
-        matches!(
-            cell.kind(),
-            SexpType::Pairlist | SexpType::Language | SexpType::Dots
-        )
-    };
-    let mut count = 0;
-    let mut tagged = false;
-    let mut cell = list;
-    while is_cell(cell) {
-        count += 1;
-        tagged |= cell.tag() != nil();
-        cell = cell.cdr();
-    }
-    let result = alloc(SexpType::List, count)?;
-    let mut cell = list;
-    for index in 0..count {
-        set_elt(result, index, cell.car());
-        cell = cell.cdr();
-    }
-    copy_attributes(list, result)?;
-    if tagged {
-        let names = alloc(SexpType::String, count)?;
-        let mut cell = list;
-        for index in 0..count {
-            let tag = cell.tag();
-            if tag.kind() == SexpType::Symbol {
-                set_elt(names, index, tag.car());
-            }
-            cell = cell.cdr();
-        }
-        set_attr(result, symbols().names, names)?;
-    }
-    Ok(result)
+    handles::in_caller_scope(|context| {
+        let list = handles::held(context, list);
+        Ok(handles::pairlist_to_list(context, list)?.raw())
+    })
 }
 
 /// The list vector as a pairlist with its names as tags. An `NA` name is the tag `NA` under
 /// `tag_na`, as where GNU R converts a list, and no tag otherwise, as where it sets names.
 pub unsafe fn list_to_pairlist(list: Sexp, kind: SexpType, tag_na: bool) -> R<Sexp> {
-    let names = names(list);
-    let mut builder = PairlistBuilder::new(kind);
-    for index in 0..length(list) {
-        let tag = if names.kind() == SexpType::String {
-            let name = names.element(index);
-            if name == na_string() {
-                if tag_na { install("NA")? } else { nil() }
-            } else if name.bytes().is_empty() {
-                nil()
-            } else {
-                crate::heap().install_char(name)?
-            }
-        } else {
-            nil()
-        };
-        let value = match list.kind() {
-            SexpType::List | SexpType::Expression => list.element(index),
-            _ => crate::subset::vector_element(list, index)?,
-        };
-        builder.push(tag, value)?;
-    }
-    Ok(builder.finish())
+    handles::in_caller_scope(|context| {
+        let list = handles::held(context, list);
+        Ok(handles::vector_to_pairlist(context, list, kind, tag_na)?
+            .finish()
+            .raw())
+    })
 }
 
 /// Whether a `CHARSXP` is the empty string.

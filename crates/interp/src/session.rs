@@ -1211,7 +1211,13 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::profile_summary::finish() {
         report_toplevel(unwind);
     }
-    (interp().hooks.run_exit_finalizers)();
+    let finalized = crate::handles::with(|context| {
+        (interp().hooks.run_exit_finalizers)(context);
+        Ok(())
+    });
+    if let Err(unwind) = finalized {
+        report_toplevel(unwind);
+    }
     crate::system::remove_session_temp_dir();
 }
 
@@ -1257,8 +1263,12 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     }
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
     let visible = interp().visible;
-    if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
-    {
+    let callbacks = crate::handles::with(|context| {
+        let expression = crate::handles::adopt(context, expression);
+        let value = crate::handles::adopt(context, value);
+        (interp().hooks.run_task_callbacks)(context, expression, value, succeeded, visible)
+    });
+    if let Err(unwind) = callbacks {
         report_toplevel(unwind);
         crate::truncate_frames(interp(), 0);
         interp().foreign_calls.clear();

@@ -1519,7 +1519,10 @@ unsafe fn sample_inputs(
 /// serializes it directly: through `eval`, an error would be signalled to the recorded
 /// program's handlers.
 unsafe fn serialize(object: Sexp) -> R<Vec<u8>> {
-    (interp().hooks.serialize)(object)
+    crate::handles::with(|context| {
+        let object = crate::handles::adopt(context, object);
+        (interp().hooks.serialize)(context, object)
+    })
 }
 
 /// Completes the sample of a call of `key` selected for `slot`, whose serialized `inputs` it

@@ -1182,12 +1182,8 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         && object.kind() == SexpType::Integer
         && !values::has_attributes(object)
         && let Some((_, first, increment)) = values::compact_sequence(object)
-        && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
-            SexpType::Real,
-            values::length(object),
-            first,
-            increment,
-        )?
+        && let Some(sequence) =
+            values::compact_sequence_of(SexpType::Real, values::length(object), first, increment)?
     {
         return Ok(sequence);
     }
@@ -1196,7 +1192,7 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     if kind == SexpType::String
         && matches!(object.kind(), SexpType::Integer | SexpType::Real)
         && !values::has_attributes(object)
-        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+        && let Some(deferred) = values::deferred_strings(object)?
     {
         return Ok(deferred);
     }
@@ -1238,7 +1234,7 @@ unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
     if mode == "character"
         && matches!(object.kind(), SexpType::Integer | SexpType::Real)
         && !values::has_attributes(object)
-        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+        && let Some(deferred) = values::deferred_strings(object)?
     {
         return Ok(deferred);
     }

@@ -756,9 +756,16 @@ impl Reader<'_> {
                 let info = self.item()?;
                 let state = self.item()?;
                 let attributes = self.attributes()?;
-                if let Some(object) = (crate::interp().hooks.unserialize_altrep)(
-                    info, state, attributes, levels, is_object,
-                )? {
+                let host = crate::handles::with_result(|context| {
+                    let info = crate::handles::adopt(context, info);
+                    let state = crate::handles::adopt(context, state);
+                    let attributes = crate::handles::adopt(context, attributes);
+                    let object = (crate::interp().hooks.unserialize_altrep)(
+                        context, info, state, attributes, levels, is_object,
+                    )?;
+                    Ok(object.map(|object| object.raw()))
+                })?;
+                if let Some(object) = host {
                     return Ok(object);
                 }
                 let object = altrep_unserialize(info, state)?;

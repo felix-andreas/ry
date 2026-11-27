@@ -18,6 +18,7 @@ use {
         vectors::{format_real, xlength},
     },
     heap::{
+        handle::{Chars, Cx, Gc, Local, Value},
         object::{NA_INTEGER, Sexp, SexpType},
         strings::Encoding,
     },
@@ -32,6 +33,16 @@ use {
         path::{Path, PathBuf},
     },
 };
+
+/// Roots `raw`, which a hook's native code made, in the hook's scope.
+///
+/// # Safety
+///
+/// `raw` is a live object, and nothing has allocated since it was made.
+unsafe fn rooted<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
+    // SAFETY: the caller's contract.
+    context.root(unsafe { Gc::<Value>::adopt(raw) })
+}
 
 /// Runs a graphics callback inside a C context, so that an R error raised from C code in it
 /// unwinds to here instead of past Rust frames.
@@ -79,72 +90,101 @@ unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
         write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
-        materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
-        altrep_storage: |object| unsafe { crate::altrep::element_storage(object) },
-        altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
-        compact_sequence: |kind, length, first, increment| unsafe {
+        materialize_altrep: |context, object| unsafe {
+            Ok(rooted(context, crate::altrep::materialize(object.raw())?))
+        },
+        altrep_storage: |context, object| unsafe {
+            Ok(rooted(
+                context,
+                crate::altrep::element_storage(object.raw())?,
+            ))
+        },
+        altrep_length: |_, object| unsafe {
+            Ok(crate::altrep::length(object.raw())?.max(0) as usize)
+        },
+        compact_sequence: |context, kind, length, first, increment| unsafe {
             let length = length as crate::R_xlen_t;
-            Ok(Some(if kind == SexpType::Integer {
+            let sequence = if kind == SexpType::Integer {
                 crate::altrep::compact_intseq(length, first as i32, increment as i32)?
             } else {
                 crate::altrep::compact_realseq(length, first, increment)?
-            }))
+            };
+            Ok(Some(rooted(context, sequence)))
         },
-        altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
-        altrep_dataptr_or_null: |object| unsafe {
-            let pointer = crate::altrep::dataptr_or_null(object)?;
+        altrep_dataptr: |_, object| unsafe { crate::altrep::readable_dataptr(object.raw()) },
+        altrep_dataptr_or_null: |_, object| unsafe {
+            let pointer = crate::altrep::dataptr_or_null(object.raw())?;
             Ok((!pointer.is_null()).then_some(pointer.cast()))
         },
-        altrep_int_elt: |object, index| unsafe {
-            crate::altrep::int_elt(object, index as crate::R_xlen_t)
+        altrep_int_elt: |_, object, index| unsafe {
+            crate::altrep::int_elt(object.raw(), index as crate::R_xlen_t)
         },
-        altrep_real_elt: |object, index| unsafe {
-            crate::altrep::real_elt(object, index as crate::R_xlen_t)
+        altrep_real_elt: |_, object, index| unsafe {
+            crate::altrep::real_elt(object.raw(), index as crate::R_xlen_t)
         },
-        altrep_string_elt: |object, index| unsafe {
-            crate::altrep::sexp_elt(object, index as crate::R_xlen_t)
+        altrep_string_elt: |context, object, index| unsafe {
+            let element = crate::altrep::sexp_elt(object.raw(), index as crate::R_xlen_t)?;
+            Ok(context.root(Gc::<Chars>::adopt(element)))
         },
-        defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
-        altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
-        altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
-        altrep_sortedness: |object| unsafe {
+        defer_strings: |context, object| unsafe {
+            let deferred = crate::altrep::deferred_string(object.raw())?;
+            Ok(Some(rooted(context, deferred)))
+        },
+        altrep_wrap: |context, object| unsafe {
+            Ok(rooted(context, crate::altrep::try_wrap(object.raw())?))
+        },
+        // Unwrapping clears the wrapper, which held the data until then.
+        altrep_unwrap: |context, object| unsafe {
+            rooted(context, crate::altrep::try_unwrap(object.raw()))
+        },
+        altrep_sortedness: |_, object| unsafe {
             Ok((
-                crate::altrep::is_sorted(object)?,
-                crate::altrep::no_na(object)? != 0,
+                crate::altrep::is_sorted(object.raw())?,
+                crate::altrep::no_na(object.raw())? != 0,
             ))
         },
-        altrep_summary: |object, method, remove_na| unsafe {
-            Ok(match method {
-                AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
-                AltrepSummary::Min => crate::altrep::min(object, remove_na)?,
-                AltrepSummary::Max => crate::altrep::max(object, remove_na)?,
-            })
+        altrep_summary: |context, object, method, remove_na| unsafe {
+            let answer = match method {
+                AltrepSummary::Sum => crate::altrep::sum(object.raw(), remove_na)?,
+                AltrepSummary::Min => crate::altrep::min(object.raw(), remove_na)?,
+                AltrepSummary::Max => crate::altrep::max(object.raw(), remove_na)?,
+            };
+            Ok(answer.map(|answer| rooted(context, answer)))
         },
-        run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
-        run_exit_finalizers: || unsafe {
+        run_finalizers: |_| unsafe { crate::boundary::run_pending_finalizers() },
+        run_exit_finalizers: |_| unsafe {
             crate::boundary::run_pending_finalizers();
             crate::extptr::R_RunExitFinalizers();
         },
-        run_task_callbacks: |expression, value, succeeded, visible| unsafe {
-            run_task_callbacks(expression, value, succeeded, visible)
+        run_task_callbacks: |_, expression, value, succeeded, visible| unsafe {
+            run_task_callbacks(expression.raw(), value.raw(), succeeded, visible)
         },
-        task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
+        task_callback_routine: |context, routine, args| unsafe {
+            let args: Vec<Sexp> = args.iter().map(|arg| arg.raw()).collect();
+            Ok(rooted(context, task_callback_routine(routine, &args)?))
+        },
         connection_method: |con, call| unsafe { crate::connections::call_method(con, call) },
         enter_from_native: |body| unsafe { crate::boundary::enter(body) },
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
         find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
-        serialize: |object| unsafe {
+        serialize: |_, object| unsafe {
             crate::serialize::serialize_to_bytes(
-                object,
+                object.raw(),
                 crate::serialize::Format::Xdr,
                 3,
                 interp::values::nil(),
             )
         },
-        unserialize_altrep: |info, state, attributes, levels, is_object| unsafe {
-            crate::serialize::unserialize_altrep(info, state, attributes, levels, is_object)
-                .map(Some)
+        unserialize_altrep: |context, info, state, attributes, levels, is_object| unsafe {
+            let object = crate::serialize::unserialize_altrep(
+                info.raw(),
+                state.raw(),
+                attributes.raw(),
+                levels,
+                is_object,
+            )?;
+            Ok(Some(rooted(context, object)))
         },
     };
     interp::install(&mut runtime.heap, hooks);

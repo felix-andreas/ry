@@ -803,8 +803,9 @@ impl<T: Elements> Fresh<'_, T> {
     }
 
     /// Stores one element. A collection between two stores can promote the object, so each
-    /// store runs the write barrier.
-    #[inline]
+    /// store runs the write barrier. It is inlined as [`Stores::set`] is, so a builder's
+    /// per-element store costs no call.
+    #[inline(always)]
     pub fn set(&mut self, cx: &Cx<'_>, index: usize, value: impl Pointer<T::Element>) {
         assert!(index < self.len(), "element index out of bounds");
         // SAFETY: the heap is live, the index is in bounds, the vector is a standard one, and

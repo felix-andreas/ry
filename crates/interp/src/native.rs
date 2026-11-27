@@ -12,7 +12,7 @@ use {
     crate::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        conditions, interp, linalg,
+        conditions, handles, interp, linalg,
         unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, string_vector, symbols},
     },
@@ -97,13 +97,13 @@ impl BaseRoutine {
 /// LINPACK QR and condition routines behind `qr()` and `kappa()`.
 pub const BASE_ROUTINES: &[BaseRoutine] = &[
     call_routine("R_addTaskCallback", 4, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Add, args)
+        handles::task_callback(TaskCallbackRoutine::Add, args)
     }),
     call_routine("R_getTaskCallbackNames", 0, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Names, args)
+        handles::task_callback(TaskCallbackRoutine::Names, args)
     }),
     call_routine("R_removeTaskCallback", 1, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Remove, args)
+        handles::task_callback(TaskCallbackRoutine::Remove, args)
     }),
     fortran_routine("dqrcf", 8, linalg::dqrcf),
     fortran_routine("dqrdc2", 9, linalg::dqrdc2),
