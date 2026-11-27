@@ -168,8 +168,9 @@ pub struct Compiled {
     /// The parameters the code passes among the arguments of an R call that may run R code
     /// before it has read them on every path ([`lower::ReadsBefore::passed_late`]).
     pub passed_late: u64,
-    /// The parameters some path reads before it returns ([`lower::ReadsBefore::returned`]),
-    /// whose arguments a call that returns settles.
+    /// The parameters some path reads before it returns, outside the arguments of calls that
+    /// force them later ([`lower::ReadsBefore::returned`]), whose arguments a call that returns
+    /// settles.
     pub returned: u64,
     /// The addresses of the code's own R call sites, from the first to past the last, whose
     /// [`RCall::read_before`] name the parameters of the call the native entry made. Empty when
@@ -420,7 +421,7 @@ pub unsafe fn call(
     } else {
         0
     };
-    if ahead.lazy() & compiled.passed_late != 0 {
+    if calls_r(compiled) && ahead.lazy() & compiled.passed_late != 0 {
         arguments.release();
         decline(|| {
             String::from(
@@ -588,7 +589,8 @@ pub unsafe fn call(
     let value = value.and_then(|value| {
         heap.root(value);
         for &(promise, read, param) in &ahead.promises {
-            if param_bit(param) & compiled.returned != 0 {
+            // The masks hold 64 parameters, and one past them settles as R may have forced it.
+            if param >= 64 || (1 << param) & compiled.returned != 0 {
                 interp::eval::settle_unforced(promise, read)?;
             }
         }

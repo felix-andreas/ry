@@ -532,3 +532,37 @@ run ry run --runtime ry loose/forced.R
 expect exit 0
 expect stdout "[1] 100\nhi\n[1] 100\n[1] 1"
 unset RY_JIT
+
+# A base function that calls the function a string names forwards its arguments unforced, and so
+# does an untyped local function, so the R code they run first decides what the argument is:
+# `apply_named` and `local_late` run in the interpreter or give up, and every result is the
+# interpreter's. A parameter passed to a local function as itself counts where the local function
+# reads it, so `local_square` runs natively. The default of `List.from_r_or` comes after its R
+# call, so `fill` sees the `y` that call set.
+
+file loose/forwarded.R
+| g <- function(i, a) { y <<- 100.0; a }
+| rebind <- function() y <<- 100.0
+| na_after <- function() { y <<- 100.0; NA_real_ }
+| apply_named <- function(x: F64) -> F64 Num.from_r(sapply(1.0, "g", x))
+| local_late <- function(x: F64) -> F64 { h <- function(a) { rebind(); a }; h(x) }
+| local_square <- function(x: F64) -> F64 { h <- function(a) a * a; cat("r\n"); h(x) }
+| fill <- function(x: F64) -> F64 List.sum(List.from_r_or(na_after(), x))
+| for (i in 1:2) { y <- 1.0; print(apply_named(y)) }
+| y <- 1.0
+| print(local_late(y))
+| y <- 3.0
+| print(local_square(y))
+| y <- 1.0
+| print(fill(y))
+
+run ry run --runtime ry loose/forwarded.R
+expect exit 0
+expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
+expect stderr lacks "`local_square` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/forwarded.R
+expect exit 0
+expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
+unset RY_JIT

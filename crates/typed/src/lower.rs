@@ -67,14 +67,16 @@ pub struct Lowered {
 
 /// A read of parameter `param` in block `block`, which held `position` instructions when
 /// lowering reached it, so the read comes before the instruction at that position. A read among
-/// the arguments of an R call names that call's [`Op::CallR`] site in `into`: R forces such an
-/// argument where the function it calls first reads it, not where the call is made.
+/// the arguments of an R call names that call's [`Op::CallR`] site in `into`, and one among the
+/// arguments of a local function is `deferred`: R forces such an argument where the function it
+/// is passed to first reads it, not where the call is made.
 #[derive(Clone, Copy, Debug)]
 pub struct ParamRead {
     pub block: BlockId,
     pub position: u32,
     pub param: u32,
     pub into: Option<usize>,
+    pub deferred: bool,
 }
 
 /// Which parameters, as bits by position among the first 64, the body has read where it may run
@@ -90,17 +92,17 @@ pub struct ReadsBefore {
     pub ambiguous: u64,
     /// The parameters every path reads before each [`Op::CallR`], by site.
     pub sites: Vec<(usize, u64)>,
-    /// The parameters the code passes among the arguments of an R call that may run R code,
-    /// on some path without having read them first, so R would force them inside that call.
+    /// The parameters the code passes among the arguments of an R call that may run R code, or
+    /// of a local function, on some path without having read them first, so R would force them
+    /// inside that call.
     pub passed_late: u64,
-    /// The parameters some path reads before it returns. R never forces the argument of a
-    /// parameter outside them.
+    /// The parameters some path reads, outside those arguments, before it returns.
     pub returned: u64,
 }
 
 /// [`ReadsBefore`] for `lowered`, where `runs_r` says which instructions may run R code. A read
-/// among the arguments of a site that runs R counts at no point, since R forces it somewhere
-/// inside the call.
+/// among the arguments of a site that runs R, or a deferred one, counts at no point, since R
+/// forces it somewhere inside the call.
 pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBefore {
     let blocks = &lowered.function.blocks;
     let mut acting = vec![false; lowered.r_calls.len()];
@@ -112,10 +114,15 @@ pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBef
         }
     }
     let mut passed = vec![0u64; lowered.r_calls.len()];
-    let mut reads: Vec<SmallVec<[(u32, u64); 2]>> = vec![SmallVec::new(); blocks.len()];
+    // Each block's reads by position, with a deferred read's bit in the upper half of the pair.
+    let mut reads: Vec<SmallVec<[(u32, u64, u64); 2]>> = vec![SmallVec::new(); blocks.len()];
     for read in &lowered.param_reads {
         let bit = if read.param < 64 { 1 << read.param } else { 0 };
-        if let Some(site) = read.into
+        if read.deferred {
+            if let Some(list) = reads.get_mut(read.block.0 as usize) {
+                list.push((read.position, 0, bit));
+            }
+        } else if let Some(site) = read.into
             && acting.get(site).is_none_or(|&acting| acting)
         {
             match passed.get_mut(site) {
@@ -123,11 +130,11 @@ pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBef
                 None => return ReadsBefore::unknown(),
             }
         } else if let Some(list) = reads.get_mut(read.block.0 as usize) {
-            list.push((read.position, bit));
+            list.push((read.position, bit, 0));
         }
     }
     for list in &mut reads {
-        list.sort_unstable_by_key(|&(position, _)| position);
+        list.sort_unstable_by_key(|&(position, ..)| position);
     }
     // What every path into a block has read, and what some path has.
     let every = entering(blocks, &reads, u64::MAX, |a, b| a & b);
@@ -140,9 +147,10 @@ pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBef
         let (mut all, mut any) = (every[index], some[index]);
         let mut events = reads[index].iter().peekable();
         for (position, inst) in block.insts.iter().enumerate() {
-            while let Some(&&(at, bit)) = events.peek()
+            while let Some(&&(at, bit, deferred)) = events.peek()
                 && at as usize <= position
             {
+                before.passed_late |= deferred & !all;
                 all |= bit;
                 any |= bit;
                 events.next();
@@ -159,8 +167,14 @@ pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBef
                 before.ambiguous |= any & !all;
             }
         }
+        for &(at, bit, deferred) in events {
+            debug_assert!(at as usize >= block.insts.len());
+            before.passed_late |= deferred & !all;
+            all |= bit;
+            any |= bit;
+        }
         if let Terminator::Return(_) = block.terminator {
-            before.returned |= reads[index].iter().fold(any, |bits, &(_, bit)| bits | bit);
+            before.returned |= any;
         }
     }
     before
@@ -184,7 +198,7 @@ impl ReadsBefore {
 /// a block no path has reached yet holds. The entry starts with nothing read.
 fn entering(
     blocks: &[Block],
-    reads: &[SmallVec<[(u32, u64); 2]>],
+    reads: &[SmallVec<[(u32, u64, u64); 2]>],
     start: u64,
     join: impl Fn(u64, u64) -> u64,
 ) -> Vec<u64> {
@@ -197,7 +211,7 @@ fn entering(
         for (index, block) in blocks.iter().enumerate() {
             let read = reads[index]
                 .iter()
-                .fold(entering[index], |bits, &(_, bit)| bits | bit);
+                .fold(entering[index], |bits, &(_, bit, _)| bits | bit);
             for successor in block.terminator.successors() {
                 if let Some(slot) = entering.get_mut(successor.0 as usize)
                     && join(*slot, read) != *slot
@@ -371,6 +385,22 @@ pub const SELF: usize = usize::MAX;
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
 
+/// Base R closures that force every argument they are passed before they run R code a caller
+/// could have written: they format, print or report what they are given and call no function
+/// it names. A ry value crosses to R without a class, so `print` and `format` reach base methods.
+const FORCING_BASE_FUNCTIONS: [&str; 10] = [
+    "cat",
+    "format",
+    "message",
+    "paste",
+    "paste0",
+    "print",
+    "sprintf",
+    "toString",
+    "warning",
+    "writeLines",
+];
+
 /// How many variables and walks a function's lowering widens to more tags before it gives up.
 const MAX_WIDENINGS: usize = 8;
 /// How deep in inlined functions a call of a typed function may still inline, which leaves
@@ -505,6 +535,7 @@ unsafe fn lower_calling(
         probing: 0,
         captures: Vec::new(),
         param_variables: SmallVec::new(),
+        param_aliases: SmallVec::new(),
         param_reads: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
@@ -772,6 +803,9 @@ struct Lowering<'c> {
     captures: Vec<FxHashMap<Sexp, Binding>>,
     /// The variable each parameter is bound to, by position.
     param_variables: SmallVec<[Local; 4]>,
+    /// The formals of inlined local functions passed a parameter's variable, with that
+    /// parameter, whose reads are the parameter's ([`Lowering::defer_reads`]).
+    param_aliases: SmallVec<[(Local, u32); 4]>,
     /// Where the body reads a parameter by name ([`reads_before`]).
     param_reads: Vec<ParamRead>,
 }
@@ -1200,14 +1234,58 @@ impl Lowering<'_> {
             .emit(Type::Str, Op::Const(Constant::Str(words.lo, words.hi)))
     }
 
+    /// The parameter whose variable `local` is, directly or as the formal of an inlined local
+    /// function it was passed to.
+    fn param_of(&self, local: Local) -> Option<u32> {
+        match self
+            .param_variables
+            .iter()
+            .position(|&variable| variable == local)
+        {
+            Some(param) => Some(param as u32),
+            None => self
+                .param_aliases
+                .iter()
+                .find(|&&(alias, _)| alias == local)
+                .map(|&(_, param)| param),
+        }
+    }
+
+    /// Marks the parameter reads from `start` on, made computing the arguments `values` of a
+    /// local function, as reads R makes where that function first reads the formal. A parameter
+    /// passed as itself, and read nowhere else among the arguments, drops its read instead: the
+    /// formal is an alias of it ([`Lowering::param_aliases`]), whose reads count where they are.
+    fn defer_reads(&mut self, start: usize, values: &[Argument]) {
+        let passed: SmallVec<[u32; 4]> = values
+            .iter()
+            .filter_map(|value| match *value {
+                Argument::Value(local) => self.param_of(local),
+                Argument::Function(_) => None,
+            })
+            .collect();
+        let Some(reads) = self.param_reads.get(start..) else {
+            return;
+        };
+        let once = |param: u32| {
+            passed.iter().filter(|&&passed| passed == param).count() == 1
+                && reads.iter().filter(|read| read.param == param).count() == 1
+        };
+        let kept: Vec<ParamRead> = reads
+            .iter()
+            .filter(|read| !once(read.param))
+            .map(|&read| ParamRead {
+                deferred: true,
+                ..read
+            })
+            .collect();
+        self.param_reads.truncate(start);
+        self.param_reads.extend(kept);
+    }
+
     unsafe fn read(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
         match self.lookup(symbol) {
             Some(Binding::Value(local)) => {
-                if let Some(param) = self
-                    .param_variables
-                    .iter()
-                    .position(|&variable| variable == local)
-                {
+                if let Some(param) = self.param_of(local) {
                     let block = self.builder.current;
                     let position = self
                         .builder
@@ -1218,8 +1296,9 @@ impl Lowering<'_> {
                     self.param_reads.push(ParamRead {
                         block,
                         position: position as u32,
-                        param: param as u32,
+                        param,
                         into: None,
+                        deferred: false,
                     });
                 }
                 Ok(local)
@@ -1797,6 +1876,7 @@ impl Lowering<'_> {
         }
         if let Some(Binding::Function(callable)) = self.lookup(head) {
             let arguments = Arguments::of(call);
+            let reads = self.param_reads.len();
             let values = match callable {
                 Callable::Inline(formals, body, scope) => {
                     let frame = Frame::Local(scope + 1, body);
@@ -1816,6 +1896,9 @@ impl Lowering<'_> {
                     self.passed_arguments(&arguments)?
                 }
             };
+            if matches!(callable, Callable::Inline(..) | Callable::Captured(..)) {
+                self.defer_reads(reads, &values);
+            }
             return self.apply_arguments(callable, &values);
         }
         match self.lookup(head) {
@@ -1931,18 +2014,20 @@ impl Lowering<'_> {
                 name()
             ))));
         }
-        // Base R forces what it is passed before it runs any R code of the caller's, which only
-        // a variable or a call passed as code could bring, so its arguments count as read at the
-        // call.
-        let forced_at_call = called_symbol(call.car())
-            .is_some_and(|symbol| is_base_value(symbol, function))
-            && arguments.iter().all(|argument| {
-                !matches!(argument.passed, Passed::Code)
-                    || !matches!(
-                        argument.code.kind(),
-                        SexpType::Language | SexpType::Symbol | SexpType::Promise
-                    )
-            });
+        // A base builtin, or a base function that only formats or reports what it is passed,
+        // forces its arguments before it runs any R code of the caller's, which only a variable
+        // or a call passed as code could bring, so its arguments count as read at the call.
+        let forced_at_call = called_symbol(call.car()).is_some_and(|symbol| {
+            is_base_value(symbol, function)
+                && (function.kind() == SexpType::Builtin
+                    || FORCING_BASE_FUNCTIONS.contains(&&*rvalues::symbol_name(symbol)))
+        }) && arguments.iter().all(|argument| {
+            !matches!(argument.passed, Passed::Code)
+                || !matches!(
+                    argument.code.kind(),
+                    SexpType::Language | SexpType::Symbol | SexpType::Promise
+                )
+        });
         let local = self.r_site(call, function, (r_use, result), table, arguments, values);
         if !forced_at_call {
             let site = self.r_calls.len() - 1;
@@ -3404,6 +3489,9 @@ impl Lowering<'_> {
             let ty = self.widened_type(symbol, self.builder.ty(argument));
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
+            if let Some(param) = self.param_of(argument) {
+                self.param_aliases.push((variable, param));
+            }
             scope.names.insert(symbol, Binding::Value(variable));
         }
         // The body sees the names of the scope that defines the function, as R's lexical scoping
@@ -5076,6 +5164,7 @@ impl Lowering<'_> {
                 };
                 // The interpreter computes the default after the vector, and compiled code before
                 // it, which agree while the default calls no R function.
+                let default_reads = self.param_reads.len();
                 let default = match default {
                     Some(code) => {
                         let calls = self.r_calls.len();
@@ -5099,10 +5188,28 @@ impl Lowering<'_> {
                     },
                     default,
                 ));
+                let default_end = self.param_reads.len();
                 let value = self.value(inner);
                 self.r_use = None;
                 let value = value?;
                 if self.converted.take() == Some(value) {
+                    // The default's reads come after the R call, where R computes it.
+                    let block = self.builder.current;
+                    let position = self
+                        .builder
+                        .function
+                        .blocks
+                        .get(block.0 as usize)
+                        .map_or(0, |block| block.insts.len());
+                    for read in self
+                        .param_reads
+                        .iter_mut()
+                        .take(default_end)
+                        .skip(default_reads)
+                    {
+                        read.block = block;
+                        read.position = position as u32;
+                    }
                     return Ok(value);
                 }
                 // A conversion of a value that already has the type it gives is that value.
