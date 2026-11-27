@@ -6329,7 +6329,7 @@ pub(crate) unsafe fn switch_name_matches(name: Sexp, text: Sexp) -> bool {
 fn do_missing<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     arguments.check_arity(1)?;
     let name = arguments.value(0);
-    let symbol = match name.standard::<Str>() {
+    let symbol = match handles::dense::<Str>(context, name)? {
         Some(text) if text.len() == 1 => Some(handles::install_name_at(context, text, 0)?),
         _ => name
             .read(context)
@@ -6346,9 +6346,9 @@ fn do_missing<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
 
 fn do_on_exit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     let [expression, add, after] = arguments.matched(context, ["expr", "add", "after"])?;
-    let environment = arguments.environment(context)?;
     let add = match add {
         Some(add) => {
+            let environment = arguments.environment(context)?;
             let add = handles::evaluate(context, add, environment)?;
             handles::logical_scalar(context, add) == 1
         }
@@ -6356,6 +6356,7 @@ fn do_on_exit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
     };
     let after = match after {
         Some(after) => {
+            let environment = arguments.environment(context)?;
             let after = handles::evaluate(context, after, environment)?;
             handles::logical_scalar(context, after) != 0
         }
@@ -7007,10 +7008,10 @@ fn do_tilde<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
     let class = handles::symbol(|symbols| symbols.class);
     if handles::get_attribute(context, formula.get(), class).r_type() == SexpType::Nil {
         let environment = arguments.environment(context)?;
-        let mut names = StringFill::new(context, 1)?;
-        names.push_text(context, "formula")?;
-        let names = names.finish().finish().value();
-        handles::set_attribute(context, &mut formula, class, names)?;
+        let mut class_value = StringFill::new(context, 1)?;
+        class_value.push_text(context, "formula")?;
+        let class_value = class_value.finish().finish().value();
+        handles::set_attribute(context, &mut formula, class, class_value)?;
         let name = handles::symbol(|symbols| symbols.dot_environment);
         handles::set_attribute(context, &mut formula, name, environment.value())?;
     }
@@ -7052,8 +7053,13 @@ fn do_make_lazy<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> 
         }
         return Err(error("invalid first argument"));
     };
-    let evaluation = assignment_environment(arguments.value(3), "eenv")?;
-    let assignment = assignment_environment(arguments.value(4), "aenv")?;
+    let environment = |index: usize, name: &str| {
+        arguments
+            .value(index)
+            .downcast::<Environment>()
+            .ok_or_else(|| error(format!("invalid '{name}' argument")))
+    };
+    let (evaluation, assignment) = (environment(3, "eval.env")?, environment(4, "assign.env")?);
     // As in GNU R, each promise's code is a copy of `expression` with its first argument
     // replaced by the variable's key, and every promise shares `eval_env`, so `PRCODE` reads
     // `lazyLoadDBfetch(c(offset, length), datafile, compressed, envhook)`.

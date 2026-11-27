@@ -3091,10 +3091,10 @@ pub fn loop_jump(_context: &mut Cx<'_>, environment: Local<'_, Environment>, nex
     if let Err(unwind) = unsafe { crate::eval::reachable_loop(environment.raw()) } {
         return unwind;
     }
-    let env = environment.raw();
+    let target = environment.raw();
     crate::unwind::jump(match next {
-        true => crate::unwind::Jump::Next { env },
-        false => crate::unwind::Jump::Break { env },
+        true => crate::unwind::Jump::Next { env: target },
+        false => crate::unwind::Jump::Break { env: target },
     })
 }
 
@@ -3104,11 +3104,11 @@ pub fn loop_jump(_context: &mut Cx<'_>, environment: Local<'_, Environment>, nex
 #[inline]
 pub fn loop_continues(result: R<()>, environment: Local<'_, Environment>) -> R<bool> {
     use crate::unwind::Jump;
-    let env = environment.raw();
+    let own = environment.raw();
     match result {
         Ok(()) => Ok(true),
-        Err(Unwind::Jump(Jump::Break { env: target })) if target == env => Ok(false),
-        Err(Unwind::Jump(Jump::Next { env: target })) if target == env => Ok(true),
+        Err(Unwind::Jump(Jump::Break { env: target })) if target == own => Ok(false),
+        Err(Unwind::Jump(Jump::Next { env: target })) if target == own => Ok(true),
         Err(other) => Err(other),
     }
 }
