@@ -920,6 +920,43 @@ loose: <T> fn(x: T) -> logical
 535..536 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 605..606 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `T`. Declare `<T: comparable or number>`
 
+#---- a_comparison_takes_null_ry_lists_and_nominals
+# `NULL > 0` is `logical(0)`, a ry `List` compares item by item, and a ry nominal compares as its
+# representation. A key also admits ry values, so a key compared with a number is an R key.
+pos <- function(x) x > 0
+same <- function(x) x == x
+keyed <- function(d, k) { Dict.get(d, k); k > 0 }
+maybe <- if (runif(1) > 0.5) 1 else NULL
+type Point = Record{x: I64}
+p <- @Point((x = 1i64,))
+items: List<I64> <- [1i64, 2i64]
+names: List<Str> <- ["a", "b"]
+s: Str <- "a"
+ok_null <- pos(maybe)
+ok_items <- pos(items)
+ok_same_items <- same(items)
+ok_point <- same(p)
+bad_names <- pos(names)
+bad_key <- keyed(Dict.single(s, 1i64), s)
+#++++
+pos: <T: comparable or number> fn(x: T) -> Compared<T>
+same: <T: eq> fn(x: T) -> Compared<T>
+keyed: <T: atomic, U> fn(d: Dict<T, U>, k: T) -> logical
+maybe: double | NULL
+p: Point
+items: List<I64>
+names: List<Str>
+s: Str
+ok_null: logical
+ok_items: List<Bool>
+ok_same_items: List<Bool>
+ok_point: Bool
+bad_names: Unknown
+bad_key: Unknown
+575..580 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `List<Str>`
+599..619 error[type-mismatch] expected `Dict<T, U>`, found `Dict<Str, I64>`
+621..622 error[type-mismatch] expected an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`), found `Str`
+
 #---- a_num_parameter_takes_both_families
 #: <T: num> fn(a: T, b: T) -> T
 add <- function(a, b) a + b

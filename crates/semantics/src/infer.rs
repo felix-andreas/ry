@@ -11,7 +11,7 @@ use {
         stubs::stubs,
         types::{
             Atomic, Binder, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar, Name,
-            NativeField, NativeScalar, RecordField, Ty, TyKind, array_element,
+            NativeField, NativeScalar, RecordField, Ty, TyKind, array, array_element,
             contains_inference_var, family_result, for_each_child_type, frame_with_row,
             is_ry_value_type, map_child_types, native_record_with_row, native_scalar,
             r_column_type, scalar, substitute_rigid, union_of, unknown,
@@ -289,12 +289,18 @@ impl<'db> InferenceTable<'db> {
                 if expanded != operand {
                     return self.family(db, result, expanded);
                 }
+                // A ry `List` compares and computes item by item.
+                if let Some(item) = array_element(db, operand) {
+                    return match result {
+                        FamilyResult::Arithmetic => operand,
+                        FamilyResult::Comparison => array(db, self.family(db, result, item)),
+                    };
+                }
                 return match self.representation(db, *name, arguments) {
-                    Some(representation)
-                        if matches!(representation.kind(db), TyKind::Native(_)) =>
-                    {
-                        result.ry_outcome(db, operand)
-                    }
+                    Some(representation) if is_ry_value_type(db, representation) => match result {
+                        FamilyResult::Arithmetic => operand,
+                        FamilyResult::Comparison => self.family(db, result, representation),
+                    },
                     _ => result.r_outcome(db),
                 };
             }
@@ -2606,13 +2612,19 @@ pub(crate) fn constraint_rejects<'db>(
         constraint,
         Constraint::ComparableOrNumber | Constraint::ComparableOrOrdered
     ) && let TyKind::Named(name, _) = ty.kind(db)
-        && let Some(definition) = table
-            .definitions
-            .and_then(|definitions| definitions.get(db, *name))
-        && is_ry_value_type(db, definition.body)
     {
-        return constraint_rejects(db, table, constraint, definition.body)
-            .map(|_| UnifyError::ConstraintRejected(constraint, ty));
+        // A ry `List` compares item by item, and a ry nominal as its representation.
+        let unfolded = array_element(db, ty).or_else(|| {
+            table
+                .definitions
+                .and_then(|definitions| definitions.get(db, *name))
+                .map(|definition| definition.body)
+                .filter(|body| is_ry_value_type(db, *body))
+        });
+        if let Some(unfolded) = unfolded {
+            return constraint_rejects(db, table, constraint, unfolded)
+                .map(|_| UnifyError::ConstraintRejected(constraint, ty));
+        }
     }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
@@ -2718,7 +2730,8 @@ pub(crate) fn constraint_rejects<'db>(
             _ => true,
         },
         Constraint::Comparable => match ty.kind(db) {
-            TyKind::Any | TyKind::Unknown | TyKind::Frame(..) => true,
+            // `NULL > 0` is `logical(0)`.
+            TyKind::Any | TyKind::Unknown | TyKind::Frame(..) | TyKind::Null => true,
             TyKind::Rigid(name) => binder_implies(name),
             // A class compares through R's `Ops` methods; a ry nominal is a ry value.
             TyKind::Named(name, _) => {

@@ -1156,4 +1156,6 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Previous shape: `Compared<T>` asked nothing of `T`, so `pos <- function(x) x > 0` accepted a `Str` or a record and typed the call `Bool`, while `s > 0` written directly is a `type-mismatch`.
 - The constraint follows the other side, because each family compares a different set: beside a number literal `comparable or number` (R compares any atomic value with a number, ry only a number); a value with itself under `==`/`!=` `eq`; under an ordering operator `comparable or ordered` (`I64`, `F64`, `Str` on the ry side).
 - `comparable` is the R half: an atomic type other than `complex` or `raw` in any shape, a list, or a class (R's `Ops` methods). A ry nominal unfolds to its body for the two comparison families, so `type Count = I64` compares with a number.
-- `Compared<T>` over a ry record or list reduces to `Bool` (`family_result`), as ry's `==` compares them structurally.
+- `Compared<T>` over a ry record, tuple, tag or nominal is `Bool`, and over a ry `List` `List<Bool>`, since a `List` compares item by item (`InferenceTable::family`); a `List` meets the comparison constraints through its item type.
+- `key` admits ry values, so it meets a comparison family as an R atomic scalar (`AtomicElement`), as it meets an arithmetic one; otherwise a key compared with a number would let a `Str` through.
+- Two different open operands, or one beside a string literal, ask nothing (`backlog.md`).

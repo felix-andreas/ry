@@ -936,8 +936,10 @@ impl Constraint {
                         Some(single)
                     }
                     WholeLiteral { .. } | FracLiteral => Some(FracLiteral),
-                    // A value used both ways is an R number. `Key` has no exact meet (a number of
-                    // either family that is a key), so it takes the R side.
+                    // `Key` has no exact meet (a key of either family that the half admits), so it
+                    // takes the R side, where a key is an atomic scalar.
+                    Key => r.join(AtomicElement),
+                    // A value used both ways is an R number.
                     _ => r.join(single),
                 };
             }
@@ -977,7 +979,6 @@ impl Constraint {
                 c @ (Numeric
                 | ScalarNumeric
                 | AtomicElement
-                | Key
                 | WholeLiteral { .. }
                 | FracLiteral
                 | StrLiteral
@@ -987,18 +988,19 @@ impl Constraint {
                 c @ (Numeric
                 | ScalarNumeric
                 | AtomicElement
-                | Key
                 | WholeLiteral { .. }
                 | FracLiteral
                 | StrLiteral
                 | BoolLiteral),
                 Comparable,
             ) => c,
+            // A key also admits ry values, which `comparable` does not.
+            (Comparable, Key) | (Key, Comparable) => AtomicElement,
             (Comparable, _) | (_, Comparable) => return None,
             (Ordered, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Ordered) => c,
             (Ordered, ArrayItem | Key) | (ArrayItem | Key, Ordered) => Ordered,
-            (Ordered, WholeLiteral { .. } | FracLiteral)
-            | (WholeLiteral { .. } | FracLiteral, Ordered) => Number,
+            (Ordered, WholeLiteral { .. }) | (WholeLiteral { .. }, Ordered) => Number,
+            (Ordered, FracLiteral) | (FracLiteral, Ordered) => Frac,
             (Ordered, StrLiteral) | (StrLiteral, Ordered) => StrLiteral,
             (Ordered, _) | (_, Ordered) => return None,
             // An R integer literal and an R double literal have different R types, so they never

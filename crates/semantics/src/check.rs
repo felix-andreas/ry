@@ -3584,8 +3584,8 @@ fn comparison_operand_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<Op
     }
 }
 
-/// A comparison coerces across atomic types, so an operand only needs to be atomic, and an
-/// open one (a variable, or a vector of one) constrains nothing.
+/// A comparison coerces across atomic types, so an operand only needs to be atomic. An open
+/// operand (a variable, or a vector of one) passes here, and `Checker::infer_compare` constrains it.
 pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
     match ty.kind(db) {
         TyKind::Var(_) | TyKind::Rigid(_) => Some(OperandShape::Scalar),

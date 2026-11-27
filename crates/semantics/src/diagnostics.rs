@@ -4897,7 +4897,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Frac => "an `F64`",
         Constraint::Eq => "a value `==` can compare (anything but a function)",
         Constraint::Comparable => {
-            "a comparable R value (numeric, `character`, or `logical`, or a class)"
+            "a comparable R value (a numeric, `character` or `logical` value, or a class)"
         }
         Constraint::Ordered => "an ordered ry value (`I64`, `F64` or `Str`)",
         Constraint::ComparableOrNumber => {

@@ -787,10 +787,10 @@ The constraints named `... or ...` join an R constraint and a ry one, and they a
 [unannotated arithmetic](#unannotated-values-in-arithmetic) and comparisons infer, with a result
 written `Promoted<T>` or `Compared<T>` when R and ry give different results:
 
-| Type | `T` a ry number | `T` an R value |
+| Type | `T` a ry value | `T` an R value |
 | --- | --- | --- |
 | `Promoted<T>` | `T` | `double` |
-| `Compared<T>` | `Bool` | `logical` |
+| `Compared<T>` | `Bool`, or `List<Bool>` for a `List` | `logical` |
 
 So `function(x) x * 2` is `<T: arithmetic or number> fn(x: T) -> Promoted<T>`: it gives an `I64`
 for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer`, as R does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
@@ -2806,8 +2806,8 @@ operand pick the [constraint](#constraints) and the result:
 | two of one type, under `^` | `num` | `Promoted<T>` |
 | beside any other value | `arithmetic` | R's result |
 | a comparison beside a number literal (`x > 0`) | `comparable or number` | `Compared<T>` |
-| two of one type, under `==` or `!=` | `eq` | `Compared<T>` |
-| two of one type, under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
+| a value compared with itself under `==` or `!=` | `eq` | `Compared<T>` |
+| a value compared with itself under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
 
 A whole literal is one with no fractional part, so `2.0` counts as whole and `2.5` does not. A
 class such as `Date` adds a number but not another value of its own, so two operands of one type
@@ -2833,6 +2833,11 @@ the same way, because a condition reads R's truth of a number, which a ry number
 - `function(x) x > 0` is `<T: comparable or number> fn(x: T) -> Compared<T>`, a `Bool` for an
   `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
   because ry compares a `Str` only with a `Str`.
+
+A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
+ry nominal through its representation. Two different open operands (`function(a, b) a < b`), or
+an open operand beside a string literal, are a gap in the checker: it asks nothing of them and
+types the result `logical`, which is wrong for a ry value.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
