@@ -6,6 +6,9 @@ version = "0.5.0"
 edition = "2024"
 license = "MIT"
 
+# Its own workspace: the stable toolchain cannot read the root manifest's profile `rustflags`.
+[workspace]
+
 [lib]
 crate-type = ["cdylib"]
 

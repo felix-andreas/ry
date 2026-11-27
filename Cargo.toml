@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "editors/zed"]
+members = ["crates/*"]
 default-members = ["crates/ry"]
 
 # zig cross-links macOS without an Apple SDK, and the real crate links CoreFoundation.
