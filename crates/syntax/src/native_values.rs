@@ -192,3 +192,11 @@ pub fn reads_its_frame(name: &str) -> bool {
     ];
     FRAME.contains(&name) || name.starts_with("sys.") || name.starts_with("with")
 }
+
+/// Whether native code must not call the base R function `name`: it reads or changes the
+/// variables or the call of the frame it is called from, and native code calls R from the
+/// function's enclosing environment. `stop`, `warning` and `stopifnot` only record the call for
+/// their message, which native code supplies.
+pub fn uses_its_frame(name: &str) -> bool {
+    reads_its_frame(name) && !matches!(name, "stop" | "warning" | "stopifnot")
+}

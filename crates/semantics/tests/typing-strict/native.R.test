@@ -245,7 +245,6 @@ NULL
 
 #---- typed_call_with_named_arguments
 #~~~~ script.R
-# blocked: area_of
 area <- function(width: F64, height: F64) -> F64 width * height
 area_of <- function(side: F64) -> F64 area(width = side, height = 2 * side)
 cat(area_of(3), "\n")
@@ -254,11 +253,9 @@ cat(area_of(3), "\n")
 area: fn(width: F64, height: F64) -> F64
 area_of: fn(side: F64) -> F64
 NULL
-121..158 warning[interpreted] this function runs in the interpreter, because a call of `area` with named arguments is not compiled natively yet. Pass the arguments by position
 
 #---- typed_call_that_leaves_a_default_out
 #~~~~ script.R
-# blocked: with_default
 scaled <- function(x: F64, factor: F64 = 2) -> F64 x * factor
 with_default <- function(x: F64) -> F64 scaled(x)
 cat(with_default(3), "\n")
@@ -267,7 +264,194 @@ cat(with_default(3), "\n")
 scaled: fn(x: F64, [factor]: F64) -> F64
 with_default: fn(x: F64) -> F64
 NULL
-126..135 warning[interpreted] this function runs in the interpreter, because this call of `scaled` does not pass every parameter, which is not compiled natively yet. Pass each argument by position
+
+#---- local_call_with_named_arguments_and_a_default
+#~~~~ script.R
+shifted <- function(x: F64) -> F64 {
+  minus <- function(a: F64, b: F64 = 1.0) -> F64 a - b
+  minus(b = x, a = 10.0) + minus(x)
+}
+cat(shifted(3), "\n")
+#++++
+== script.R
+shifted: fn(x: F64) -> F64
+NULL
+
+#---- local_call_that_leaves_out_a_required_parameter
+#~~~~ script.R
+# blocked: shifted
+shifted <- function(x: F64) -> F64 {
+  minus <- function(a: F64, b: F64) -> F64 a - b
+  minus(x)
+}
+cat(shifted(3), "\n")
+#++++
+== script.R
+shifted: fn(x: F64) -> F64
+NULL
+107..112 error[type-mismatch] this call leaves out `b`, which the function requires
+107..115 warning[interpreted] this function runs in the interpreter, because this call of `minus` leaves out a parameter without a default, or passes an argument that matches no parameter, which is not compiled natively yet. Pass each parameter without a default, by position or by its name
+
+#---- default_that_the_body_changes
+#~~~~ script.R
+offset <- function(a: F64, b: F64 = a * 2.0) -> F64 {
+  a <- a + 1.0
+  a + b
+}
+cat(offset(1, 1), "\n")
+#++++
+== script.R
+offset: fn(a: F64, [b]: F64) -> F64
+NULL
+36..43 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_that_calls_r
+#~~~~ script.R
+noisy <- function(a: F64, b: F64 = { cat("default\n"); a }) -> F64 a + b
+cat(noisy(1, 2), "\n")
+#++++
+== script.R
+noisy: fn(a: F64, [b]: F64) -> F64
+NULL
+35..58 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_that_a_match_arm_rebinds
+#~~~~ script.R
+alias Reading = :Value(amount: F64) | :Missing
+grade <- function(reading: Reading, a: F64 = 1.0, s: F64 = a * 2.0) -> F64 {
+  t <- match (reading) {
+    :Value(amount = a) => a
+    :Missing => 0.0
+  }
+  t + s
+}
+cat(grade(:Missing), "\n")
+#++++
+== script.R
+grade: fn(reading: Reading, [a]: F64, [s]: F64) -> F64
+NULL
+106..113 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_that_reads_a_global
+#~~~~ script.R
+limit <- 10.0
+capped <- function(x: F64, l: F64 = limit) -> F64 Num.min(x, l)
+cat(capped(1, 2), "\n")
+#++++
+== script.R
+limit: F64
+capped: fn(x: F64, [l]: F64) -> F64
+NULL
+50..55 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_of_a_list_the_body_changes_in_place
+#~~~~ script.R
+first_of <- function(xs: List<F64>, first: F64 = List.sum(xs)) -> F64 {
+  xs[[1]] <- 99.0
+  first
+}
+cat(first_of([1.0, 2.0], 0.0), "\n")
+#++++
+== script.R
+first_of: fn(xs: List<F64>, [first]: F64) -> F64
+NULL
+49..61 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- missing_in_a_native_function
+#~~~~ script.R
+# blocked: given
+given <- function(a: F64, b: F64 = 2.0) -> Bool Bool.from_r(missing(b))
+print(given(1))
+#++++
+== script.R
+given: fn(a: F64, [b]: F64) -> Bool
+Bool
+77..87 warning[interpreted] this function runs in the interpreter, because `missing` is not compiled natively yet: a native call passes values, so it does not keep how R called the function. Give the parameter a default, such as a tag that marks it missing, and test that
+
+#---- namespaced_missing_in_a_native_function
+#~~~~ script.R
+# blocked: given
+given <- function(a: F64, b: F64 = 2.0) -> Bool Bool.from_r(base::missing(b))
+print(given(1))
+#++++
+== script.R
+given: fn(a: F64, [b]: F64) -> Bool
+Bool
+77..93 warning[interpreted] this function runs in the interpreter, because `missing` is not compiled natively yet: a native call passes values, so it does not keep how R called the function. Give the parameter a default, such as a tag that marks it missing, and test that
+
+#---- r_call_that_writes_the_frame
+#~~~~ script.R
+# blocked: reset
+reset <- function(a: F64 = 1.0, b: F64 = a) -> F64 {
+  assign("a", 5)
+  b
+}
+print(reset())
+#++++
+== script.R
+reset: fn([a]: F64, [b]: F64) -> F64
+F64
+72..86 warning[interpreted] this function runs in the interpreter, because a call of R's `assign` is not compiled natively yet: it looks at the frame it is called from, which native code does not keep. Move the call into a function with an R type in its signature
+
+#---- default_over_a_name_a_loop_sets
+#~~~~ script.R
+outer <- function(xs: List<F64>) -> F64 {
+  last <- 0.0
+  for (x in xs) last <- x
+  g <- function(a: F64, b: F64 = last) -> F64 a + b
+  g(1.0)
+}
+print(outer([1.0, 2.0]))
+#++++
+== script.R
+outer: fn(xs: List<F64>) -> F64
+F64
+
+#---- default_judged_at_the_call_that_leaves_it_out
+#~~~~ script.R
+outer <- function(x: F64) -> F64 {
+  g <- function(a: F64, b: F64 = k) -> F64 a + b
+  y <- g(x, 1.0)
+  k <- 2.0
+  y + g(x)
+}
+print(outer(1.0))
+#++++
+== script.R
+outer: fn(x: F64) -> F64
+F64
+
+#---- default_that_every_call_supplies
+#~~~~ script.R
+outer <- function(x: F64) -> F64 {
+  g <- function(a: F64, b: F64 = Num.to_f64(Num.from_r(nchar("ab")))) -> F64 a + b
+  g(x, 1.0) + g(b = 2.0, a = x)
+}
+print(outer(1.0))
+#++++
+== script.R
+outer: fn(x: F64) -> F64
+F64
+
+#---- default_of_standard_library_calls
+#~~~~ script.R
+clamped <- function(x: F64, low: F64 = Num.min(x, 0.0), high: F64 = -low + 1.0) -> F64 Num.max(Num.min(x, high), low)
+cat(clamped(3), "\n")
+#++++
+== script.R
+clamped: fn(x: F64, [low]: F64, [high]: F64) -> F64
+NULL
+
+#---- function_parameter_called_with_named_arguments
+#~~~~ script.R
+# blocked: twice
+twice <- function(f: fn(v: F64) -> F64, x: F64) -> F64 f(v = f(x))
+cat(twice(function(v: F64) -> F64 v + 1, 1), "\n")
+#++++
+== script.R
+twice: fn(f: fn(v: F64) -> F64, x: F64) -> F64
+NULL
+72..83 warning[interpreted] this function runs in the interpreter, because a call of a function parameter with named arguments is not compiled natively yet. Pass the arguments by position
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
@@ -1102,6 +1286,7 @@ counted: fn(word: Str) -> Str
 1028..1035 warning[unused] `counted` is assigned but never used
 740..753 error[native] this calls R's `toupper` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
   unsafe fix 723..753 "value <- Str.from_r(toupper(word))\n  Str.from_r(paste(value"
+827..839 warning[interpreted] this function runs in the interpreter, because a call of R's `get` is not compiled natively yet: it looks at the frame it is called from, which native code does not keep. Move the call into a function with an R type in its signature
 827..839 error[native] this calls R's `get` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `get` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
 995..1012 error[strict] strict mode: `str_glue` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 995..1023 error[native] this calls R's `str_glue` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `str_glue` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
