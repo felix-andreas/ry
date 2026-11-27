@@ -94,3 +94,112 @@ file strict.R
 run ry run strict.R
 expect exit 0
 expect stdout "[1] \"numeric\"\n[1] 0.3333333"
+
+# A strict script may call what a file it `source()`s by a literal path defines, as `ry check`
+# lets it, also through a file that file sources. R resolves the path against the working
+# directory. The checker reads the sourced signature, so a wrong argument is refused before
+# anything runs.
+file lib/util.R
+| triple <- function(x: I64) -> I64 x * 3i64
+file lib/api.R
+| source("lib/util.R")
+| six_of <- function(x: I64) -> I64 triple(x) * 2i64
+file calls.R
+| source("lib/api.R")
+| print(six_of(7i64))
+run ry run calls.R
+expect exit 0
+expect stdout "42i64"
+
+file wrong.R
+| source("lib/api.R")
+| cat("started\n")
+| print(six_of(2.5))
+run ry run wrong.R
+expect exit 1
+expect stderr "does not fit `I64`"
+expect stdout lacks "started"
+
+# A console command sees what an earlier command's `source()` defined.
+file console.txt
+| source("lib/api.R")
+| print(six_of(1i64))
+stdin console.txt
+run ry run --runtime ry
+expect exit 0
+expect stdout "6i64"
+
+# A console command binds what the file read as when it ran: editing the file and sourcing it
+# again in a command strict mode refuses leaves the earlier `six` the one that runs. Plain input
+# before the first typed command sources too, and a file sourced into another environment
+# defines nothing a later command sees.
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file edit.txt
+| source("lib/six.R")
+| writeLines("six <- function(x: Str) -> Str x", "lib/six.R")
+| { source("lib/six.R"); y: Str <- 1i64 }
+| print(six(1i64))
+stdin edit.txt
+run ry run --runtime ry
+expect exit 0
+expect stdout "6i64"
+
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file local.R
+| source("lib/six.R", local = new.env())
+| print(six(1i64))
+run ry run local.R
+expect exit 1
+expect stderr "six"
+
+# An earlier command's own values keep the types the file it sourced gave them, even after a
+# later command's check reads the edited file.
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file reload.txt
+| source("lib/six.R"); x <- six(1i64)
+| writeLines("six <- function(x: I64) -> Str \"s\"", "lib/six.R")
+| reload <- function() source("lib/six.R")
+| z: Str <- x
+stdin reload.txt
+run ry run --runtime ry
+expect stderr "expected `Str`, found `I64`"
+
+# The last file to run defines a name, though an earlier file sources the other definition.
+file order/a1.R
+| f <- function(x: I64) -> I64 x
+file order/a.R
+| source("order/a1.R")
+file order/b.R
+| f <- function(x: I64) -> Str "s"
+file order.R
+| source("order/a.R")
+| source("order/b.R")
+| y: I64 <- f(1i64)
+run ry run order.R
+expect exit 1
+expect stderr "expected `I64`, found `Str`"
+
+# A file's own definition after its `source()` call beats the file it sources, as it runs later.
+file order/p1.R
+| g <- function(x: I64) -> I64 x
+file order/p.R
+| source("order/p1.R")
+| g <- function(x: I64) -> Str "s"
+file parent.R
+| source("order/p.R")
+| y: I64 <- g(1i64)
+run ry run parent.R
+expect exit 1
+expect stderr "expected `I64`, found `Str`"
+
+# `sys.source()` without kept source runs the text unelaborated, so strict code may not call
+# what it defines.
+file sys.R
+| sys.source("lib/util.R", envir = globalenv())
+| print(triple(2i64))
+run ry run sys.R
+expect exit 1
+expect stderr "triple"
