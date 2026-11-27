@@ -3253,10 +3253,21 @@ pub fn check_return<'s>(
 /// What keeps the environment of the returning slot frame at `index` alive past the frame as
 /// it returns `value` (`eval::outliving_cause`).
 pub fn outliving_cause(
-    _context: &Cx<'_>,
+    context: &Cx<'_>,
     index: usize,
     value: Local<'_>,
 ) -> Option<crate::eval::Site> {
+    let frame = &crate::interp().frames[index];
+    // The test reads the frame's slots, which only a slot frame with a pending environment has.
+    assert!(
+        frame.slots != crate::NO_SLOTS
+            && frame
+                .pending
+                .get(context)
+                .downcast::<Environment>()
+                .is_some_and(|pending| pending.has_flag(gp::SLOT_FRAME)),
+        "frame {index} is not a slot frame with a pending environment"
+    );
     // SAFETY: the frame is live and holds its slots and environment, the value is rooted, and
     // the test reads reference counts and cells without allocating.
     unsafe { crate::eval::outliving_cause(index, value.raw()) }

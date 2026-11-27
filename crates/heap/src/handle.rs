@@ -938,13 +938,14 @@ impl<'a> Gc<'a, Environment> {
         unsafe { (*self.raw.frame_ptr()).may_bind(symbol.raw()) }
     }
 
-    /// Sets or clears the interpreter's flags `bits` of the environment, which describe how
-    /// its frame runs and which only the interpreter reads.
+    /// Clears the flag that says compiled code's registers may hold the frame's values
+    /// (`gp::COMPILED_FRAME`), once the frame's body has returned. The frame flags that decide
+    /// where its variables live are set only by the heap's frame operations.
     #[inline]
-    pub fn set_flags(self, bits: u16, on: bool) {
-        // SAFETY: the environment is live for `'a`, and the flags are bits of its header that
-        // no reader keeps across a change.
-        unsafe { self.raw.set_gp_bits(bits, on) }
+    pub fn clear_compiled_frame(self) {
+        // SAFETY: the environment is live for `'a`, and the flag is a bit of its header that no
+        // reader keeps across a change.
+        unsafe { self.raw.set_gp_bits(gp::COMPILED_FRAME, false) }
     }
 }
 

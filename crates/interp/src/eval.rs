@@ -5183,7 +5183,7 @@ fn finish_frame<'s>(
         }
     }
     // The body has returned, so no register of compiled code holds a value of the frame.
-    pending.read(context).set_flags(gp::COMPILED_FRAME, false);
+    pending.read(context).clear_compiled_frame();
     result
 }
 
