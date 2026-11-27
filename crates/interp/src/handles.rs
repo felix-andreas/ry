@@ -4282,6 +4282,8 @@ pub fn replace_pooled_reference(
             promise: reference,
             target,
         };
+        // The pool grows only at its end: `index` is the count of references in use.
+        debug_assert!(index <= references.len());
         let Some(pooled) = references.get_mut(index) else {
             references.push(replacement);
             return Ok(());

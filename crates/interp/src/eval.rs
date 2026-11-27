@@ -3566,9 +3566,9 @@ fn bind_environment<'s>(
     // One check covers the frame, a binding cell and a default promise per formal, so they are
     // made without one. The function, the arguments and the matched values are rooted.
     context.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count);
-    let context_ref: &Cx<'s> = context;
-    let closure = function.read(context_ref);
-    let environment = context_ref.new_function_frame_uncollected(closure.environment(), count)?;
+    let reading: &Cx<'s> = context;
+    let closure = function.read(reading);
+    let environment = reading.new_function_frame_uncollected(closure.environment(), count)?;
     let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
     let mut formal = closure.formals();
     let mut index = 0;
@@ -3588,7 +3588,7 @@ fn bind_environment<'s>(
             let value = if is_literal(default) {
                 default
             } else {
-                context_ref
+                reading
                     .new_promise_uncollected(default, environment)?
                     .value()
             };
@@ -3600,7 +3600,7 @@ fn bind_environment<'s>(
         } else {
             LocalBinding {
                 symbol,
-                value: actual.read(context_ref),
+                value: actual.read(reading),
                 missing: false,
             }
         };
@@ -3608,9 +3608,9 @@ fn bind_environment<'s>(
         formal = cell.rest();
         index += 1;
     }
-    context_ref.define_formals_uncollected(environment, &bindings)?;
+    reading.define_formals_uncollected(environment, &bindings)?;
     drop(bindings);
-    let environment = context_ref.root(environment);
+    let environment = reading.root(environment);
     if let Arguments::Matched(supplied) = arguments {
         let generic_call_env = handles::symbol(|symbols| symbols.dot_generic_call_env);
         for variable in supplied {
@@ -6340,7 +6340,7 @@ fn match_positional_args<'s>(
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
-    // SAFETY: both are live, and the test allocates nothing.
+    // SAFETY: both are live, and the test allocates only with collection inhibited.
     unsafe {
         handles::reading(|context| formal_is_missing(context, Gc::adopt(symbol), Gc::adopt(env)))
     }
@@ -6361,7 +6361,7 @@ pub fn formal_is_missing(
 /// as `f(m, )` passes an empty `i`, which selects everything. A defaulted formal is not missing,
 /// and an unbound symbol is left to evaluation to report.
 pub unsafe fn argument_is_missing(expression: Sexp, env: Sexp) -> R<bool> {
-    // SAFETY: both are live, and the test allocates nothing.
+    // SAFETY: both are live, and the test allocates only with collection inhibited.
     unsafe {
         handles::reading(|context| {
             expression_is_missing(context, Gc::adopt(expression), Gc::adopt(env))
@@ -6401,7 +6401,7 @@ pub fn expression_is_missing(
 /// Whether what a binding or slot holds is a missing argument: the empty argument, or an
 /// unforced promise of a name that is missing where the promise reads it.
 pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
-    // SAFETY: the value is live, and the test allocates nothing.
+    // SAFETY: the value is live, and the test allocates only with collection inhibited.
     unsafe { handles::reading(|context| content_is_missing(context, Gc::adopt(value))) }
 }
 
