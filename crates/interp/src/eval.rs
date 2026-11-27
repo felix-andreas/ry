@@ -14,11 +14,12 @@ use {
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch,
-        handles::{self, Cx, List, Local, StringFill, safe},
-        interp, moves, scope,
-        unwind::{
-            ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, jump, missing_argument,
+        handles::{
+            self, Cells, Chars, Cx, Environment, Expression, Gc, Integer, Language, List, Local,
+            Promise, Real, Str, StringFill, Symbol, safe,
         },
+        interp, moves, scope,
+        unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
         utils::record_profile_sample,
         values::{
             self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
@@ -5421,29 +5422,29 @@ unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
 // The control-flow specials.
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    special("{", -1, do_begin).keep_visibility(),
-    special("(", 1, do_paren),
-    special("if", -1, do_if).keep_visibility(),
-    special("for", -1, |call| unsafe { in_loop(call, do_for) }).invisible(),
-    special("while", -1, |call| unsafe { in_loop(call, do_while) }).invisible(),
-    special("repeat", -1, |call| unsafe { in_loop(call, do_repeat) }).invisible(),
-    special("break", 0, do_break),
-    special("next", 0, do_next),
-    special("return", -1, do_return),
-    special("function", -1, do_function),
+    special("{", -1, safe!(do_begin)).keep_visibility(),
+    special("(", 1, safe!(do_paren)),
+    special("if", -1, safe!(do_if)).keep_visibility(),
+    special("for", -1, safe!(do_for)).invisible(),
+    special("while", -1, safe!(do_while)).invisible(),
+    special("repeat", -1, safe!(do_repeat)).invisible(),
+    special("break", 0, safe!(do_break)),
+    special("next", 0, safe!(do_next)),
+    special("return", -1, safe!(do_return)),
+    special("function", -1, safe!(do_function)),
     special("<-", 2, do_assign).invisible(),
     special("=", 2, do_assign).invisible(),
     special("<<-", 2, do_assign).invisible(),
     special("quote", 1, safe!(do_quote)),
-    special("&&", 2, do_and2),
-    special("||", 2, do_or2),
-    special("switch", -1, do_switch).keep_visibility(),
-    special("missing", 1, do_missing),
-    special("on.exit", -1, do_on_exit).invisible(),
+    special("&&", 2, safe!(do_and2)),
+    special("||", 2, safe!(do_or2)),
+    special("switch", -1, safe!(do_switch)).keep_visibility(),
+    special("missing", 1, safe!(do_missing)),
+    special("on.exit", -1, safe!(do_on_exit)).invisible(),
     special(".Internal", 1, do_internal).keep_visibility(),
-    special("substitute", -1, do_substitute),
+    special("substitute", -1, safe!(do_substitute)),
     builtin("invisible", -1, safe!(do_invisible)).invisible(),
-    builtin("nargs", 0, do_nargs),
+    builtin("nargs", 0, safe!(do_nargs)),
     special("forceAndCall", -1, do_force_and_call).keep_visibility(),
     special("Tailcall", -1, do_tailcall).keep_visibility(),
     special("Exec", -1, do_exec).keep_visibility(),
@@ -5451,15 +5452,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("eval", 3, do_eval).keep_visibility(),
     internal("withVisible", 1, safe!(do_with_visible)),
     internal_special("Recall", -1, do_recall).keep_visibility(),
-    builtin(".Primitive", 1, do_primitive),
+    builtin(".Primitive", 1, safe!(do_primitive)),
     internal("identity", 1, |call| Ok(call.arg(0))),
-    special("~", -1, do_tilde),
-    internal("delayedAssign", 4, do_delayed_assign).invisible(),
-    internal("makeLazy", 5, do_make_lazy).invisible(),
+    special("~", -1, safe!(do_tilde)),
+    internal("delayedAssign", 4, safe!(do_delayed_assign)).invisible(),
+    internal("makeLazy", 5, safe!(do_make_lazy)).invisible(),
     builtin("standardGeneric", -1, dispatch::do_standard_generic).keep_visibility(),
-    builtin("call", -1, do_call),
-    special("expression", -1, do_expression),
-    internal("all.names", 4, do_all_names),
+    builtin("call", -1, safe!(do_call)),
+    special("expression", -1, safe!(do_expression)),
+    internal("all.names", 4, safe!(do_all_names)),
     internal("returnValue", 1, |call| {
         Ok(interp()
             .returned_values
@@ -5480,93 +5481,86 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("builtins", 1, safe!(do_builtins)),
 ];
 
-unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
-    let Some(first) = call.args.first() else {
-        return Err(call.error("first argument must be a character string"));
+fn do_call<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let name = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(name) if name.len() == 1 => name,
+        _ => return Err(arguments.error("first argument must be a character string")),
     };
-    let name = first.value;
-    if name.kind() != SexpType::String || length(name) != 1 {
-        return Err(call.error("first argument must be a character string"));
+    let function = handles::install_element(context, name, 0)?;
+    let mut cells = Cells::new(SexpType::Language);
+    cells.push(context, handles::null(), function.value())?;
+    for index in 1..arguments.len() {
+        cells.push(context, arguments.tag(index), arguments.value(index))?;
     }
-    let function = values::install_charsxp(name.element(0))?;
-    let mut items = vec![(nil(), function)];
-    items.extend(call.args[1..].iter().map(|arg| (arg.tag, arg.value)));
-    values::pairlist(&items, SexpType::Language)
+    match cells.finish() {
+        Some(call) => Ok(call.finish()),
+        None => Err(error("internal error: a call without a function")),
+    }
 }
 
-unsafe fn do_expression(call: &Call<'_>) -> R<Sexp> {
-    let result = alloc(SexpType::Expression, call.len())?;
-    let mut any_names = false;
-    for (index, arg) in call.args.iter().enumerate() {
-        values::set_elt(result, index, arg.value);
-        any_names |= arg.tag != nil();
+fn do_expression<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let count = arguments.len();
+    let mut result = context.alloc::<Expression>(count)?;
+    let mut named = false;
+    for index in 0..count {
+        result.set(context, index, arguments.value(index));
+        named |= arguments.tag(index).r_type() != SexpType::Nil;
     }
-    if any_names {
-        let names: Vec<String> = call
-            .args
-            .iter()
-            .map(|arg| {
-                if arg.tag == nil() {
-                    String::new()
-                } else {
-                    symbol_name(arg.tag).into_owned()
-                }
-            })
-            .collect();
-        let names = values::string_vector(&names)?;
-        values::set_attr(result, symbols().names, names)?;
+    let mut result = result.owned();
+    if named {
+        let mut names = StringFill::new(context, count)?;
+        for index in 0..count {
+            match arguments.tag(index).downcast::<Symbol>() {
+                Some(tag) => names.push(context, tag.read(context).name()),
+                None => names.push(context, handles::blank()),
+            }
+        }
+        let names = names.finish().finish().value();
+        handles::set_attribute(context, &mut result, handles::symbol(|s| s.names), names)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// `all.names(expr, functions, max.names, unique)`. Without `functions` the whole function
 /// position of a call is skipped, even when it is a call itself.
-unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
-    let functions = values::as_logical_scalar(call.arg(1)) == 1;
-    let maximum = match values::as_integer_scalar_warning(call.arg(2))? {
+fn do_all_names<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let functions = handles::logical_scalar(context, arguments.value(1)) == 1;
+    let maximum = match handles::integer_scalar_warning(context, arguments.value(2))? {
         -1 => usize::MAX,
         maximum => usize::try_from(maximum).unwrap_or(0),
     };
-    let unique = values::as_logical_scalar(call.arg(3)) != 0;
-    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<Sexp>) {
-        match expression.kind() {
-            SexpType::Symbol => {
-                let name = expression.car();
-                if name.length() != 0 {
-                    names.push(name);
-                }
+    let unique = handles::logical_scalar(context, arguments.value(3)) != 0;
+    fn walk(expression: Gc<'_>, functions: bool, names: &mut Vec<Gc<'static, Chars>>) {
+        if let Some(symbol) = expression.downcast::<Symbol>() {
+            let name = handles::permanent(symbol).name();
+            if !name.bytes().is_empty() {
+                names.push(name);
             }
-            SexpType::Language => {
-                let mut cell = if functions {
-                    expression
-                } else {
-                    expression.cdr()
-                };
-                while cell != nil() {
-                    walk(cell.car(), functions, names);
-                    cell = cell.cdr();
-                }
+        } else if let Some(call) = expression.downcast::<Language>() {
+            let mut cell = if functions { call.value() } else { call.rest() };
+            while let Some((value, _, rest)) = handles::cell_fields(cell) {
+                walk(value, functions, names);
+                cell = rest;
             }
-            SexpType::Expression => {
-                for index in 0..length(expression) {
-                    walk(expression.element(index), functions, names);
-                }
+        } else if let Some(expressions) = expression.standard::<Expression>() {
+            for index in 0..expressions.len() {
+                walk(expressions.get(index), functions, names);
             }
-            _ => {}
         }
     }
-    // The names are symbols' print names, which their symbols keep alive.
-    let mut names: Vec<Sexp> = Vec::new();
-    walk(call.arg(0), functions, &mut names);
+    // The names are symbols' print names, which the symbol table keeps alive.
+    let mut names = Vec::new();
+    walk(arguments.value(0).read(context), functions, &mut names);
     if unique {
         let mut seen = std::collections::HashSet::new();
-        names.retain(|&name| seen.insert(name));
+        names.retain(|name| seen.insert(name.bytes()));
     }
     names.truncate(maximum);
-    let result = crate::heap().alloc_vector(SexpType::String, names.len() as isize)?;
-    result.slice_mut::<Sexp>().copy_from_slice(&names);
-    crate::heap().count_written_elements(result);
-    Ok(result)
+    let mut result = StringFill::new(context, names.len())?;
+    for name in names {
+        result.push(context, name);
+    }
+    Ok(result.finish().finish().value())
 }
 
 fn do_builtins<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
@@ -5588,69 +5582,100 @@ fn do_builtins<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R
     Ok(result.finish().finish().value())
 }
 
-unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
-    let mut value = nil();
+fn do_begin<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     interp().visible = true;
-    let srcrefs = values::get_attr(call.call, symbols().srcref);
+    let Some(last) = arguments.len().checked_sub(1) else {
+        return Ok(handles::null());
+    };
+    let environment = arguments.environment(context)?;
+    let srcrefs = handles::get_attribute(
+        context,
+        arguments.expression(),
+        handles::symbol(|s| s.srcref),
+    );
+    let srcrefs = context.root(srcrefs);
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
-    let saved = interp().srcref;
+    let saved = handles::current_srcref(context);
     // Nothing a statement made stays rooted while the next one runs, not even its value, so an
     // object it drops can be collected (and finalized) by a `gc()` later in the same block.
-    let mark = crate::heap().handle_mark();
-    let last = call.args.len().saturating_sub(1);
-    for (index, arg) in call.args.iter().enumerate() {
-        if srcrefs != nil() {
-            interp().srcref = statement_srcref(srcrefs, index + 1);
-        }
-        let result = match interp().debugger.is_some() {
-            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env()?)),
-            false => eval(arg.value, call.env()?),
-        };
-        interp().srcref = saved;
-        crate::heap().release_handles(mark);
-        match result {
-            Ok(next) => {
-                if index == last {
-                    crate::heap().root(next);
-                }
-                value = next;
-            }
-            Err(unwind) => {
-                unwind.root();
-                return Err(unwind);
-            }
-        }
+    for index in 0..last {
+        let result = context.scope_reading(|inner, outer| {
+            let srcrefs = outer.pass(srcrefs);
+            statement(
+                inner,
+                srcrefs,
+                index,
+                outer.pass(arguments.value(index)),
+                outer.pass(environment),
+            )
+            .map(|_| ())
+        });
+        handles::set_srcref(context, saved);
+        result?;
     }
-    Ok(value)
+    let result = statement(context, srcrefs, last, arguments.value(last), environment);
+    handles::set_srcref(context, saved);
+    result
 }
 
-/// Element `index` of a `srcref` list, or `NULL` when the list has no such srcref.
+/// Statement `index` of a `{` evaluated with its srcref current, which the debugger may stop
+/// at first.
+fn statement<'s>(
+    context: &mut Cx<'s>,
+    srcrefs: Local<'s>,
+    index: usize,
+    expression: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    if srcrefs.r_type() != SexpType::Nil {
+        let srcref = statement_source(srcrefs.read(context), index + 1);
+        handles::set_srcref(
+            context,
+            srcref.unwrap_or_else(|| handles::null().read(context)),
+        );
+    }
+    if interp().debugger.is_some() {
+        handles::debugger_statement(context)?;
+    }
+    handles::evaluate(context, expression, environment)
+}
+
+/// Element `index` of a `srcref` list, or `None` when the list has no such srcref.
+pub fn statement_source(srcrefs: Gc<'_>, index: usize) -> Option<Gc<'_>> {
+    let srcrefs = srcrefs
+        .standard::<List>()
+        .filter(|srcrefs| index < srcrefs.len())?;
+    let srcref = srcrefs.get(index).standard::<Integer>()?;
+    (srcref.len() >= 6).then(|| srcref.value())
+}
+
+/// [`statement_source`] for raw callers, `NULL` where there is no srcref.
+///
+/// # Safety
+///
+/// `srcrefs` is a live object.
 pub unsafe fn statement_srcref(srcrefs: Sexp, index: usize) -> Sexp {
-    if srcrefs.kind() != SexpType::List || index >= length(srcrefs) {
-        return nil();
-    }
-    let srcref = srcrefs.element(index);
-    if srcref.kind() == SexpType::Integer && length(srcref) >= 6 {
-        srcref
-    } else {
-        nil()
-    }
+    statement_source(Gc::adopt(srcrefs), index).map_or_else(nil, Gc::raw)
 }
 
-unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(1)?;
-    if call.arg(0) != symbols().dots {
-        return eval(call.arg(0), call.env()?);
+fn do_paren<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(1)?;
+    let environment = arguments.environment(context)?;
+    let expression = arguments.value(0);
+    if !expression.is(handles::symbol(|s| s.dots)) {
+        return handles::evaluate(context, expression, environment);
     }
     // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
-    let args = evaluate_args(call.call.cdr(), call.env()?, false, call.call)?;
-    let expanded = Call {
-        args: &args,
-        ..*call
-    };
-    expanded.check_arity(1)?;
-    Ok(expanded.arg(0))
+    let expanded = handles::evaluated_arguments(context, arguments.expression(), environment)?;
+    match expanded.as_slice() {
+        [(_, value)] => Ok(*value),
+        _ => Err(arguments.error(format!(
+            "{} argument{} passed to '(' which requires 1",
+            expanded.len(),
+            if expanded.len() == 1 { "" } else { "s" },
+        ))),
+    }
 }
 
 /// The condition of `if` and `while`, with GNU R's messages.
@@ -5700,163 +5725,163 @@ unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
     }
 }
 
-unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
-    let condition = eval(call.arg(0), call.env()?)?;
-    if crate::records::is_native(condition) {
-        return Err(crate::records::boundary_error(
+fn do_if<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let condition = handles::evaluate(context, arguments.value(0), environment)?;
+    if crate::records::is_native_type(condition.r_type()) {
+        return Err(handles::boundary_error(
             condition,
-            call.arg(0),
-            call.call,
+            arguments.value(0),
+            arguments.expression(),
         ));
     }
-    if as_condition(condition, call.call)? {
-        eval(call.arg(1), call.env()?)
-    } else if call.len() > 2 {
-        eval(call.arg(2), call.env()?)
+    if handles::condition(context, condition, arguments.expression())? {
+        handles::evaluate(context, arguments.value(1), environment)
+    } else if arguments.len() > 2 {
+        handles::evaluate(context, arguments.value(2), environment)
     } else {
         interp().visible = false;
-        Ok(nil())
+        Ok(handles::null())
     }
 }
 
 /// Runs one loop iteration and reports whether the loop goes on: `Ok(false)` after `break`.
-unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
+fn loop_body<'s>(
+    context: &mut Cx<'s>,
+    body: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<bool> {
     // Every iteration polls, so even `repeat NULL`, whose body makes no call, can be interrupted.
     crate::unwind::poll_interrupt()?;
-    let result = scope(|| eval(body, env).map(|_| ()));
-    match result {
-        Ok(()) => Ok(true),
-        Err(Unwind::Jump(jump)) => match jump {
-            Jump::Break { env: target } if target == env => Ok(false),
-            Jump::Next { env: target } if target == env => Ok(true),
-            other => Err(Unwind::Jump(other)),
-        },
-        Err(other) => Err(other),
-    }
+    let result = context.scope_reading(|inner, outer| {
+        handles::evaluate(inner, outer.pass(body), outer.pass(environment)).map(|_| ())
+    });
+    handles::loop_continues(result, environment)
 }
 
-unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    let variable = call.arg(0);
-    if variable.kind() != SexpType::Symbol {
-        return Err(call.error("invalid for() loop sequence"));
+fn do_for<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    in_loop(context, arguments, |context, environment| {
+        run_for(context, arguments, environment)
+    })
+}
+
+fn run_for<'s>(
+    context: &mut Cx<'s>,
+    arguments: &handles::Args<'_, 's>,
+    environment: Local<'s, Environment>,
+) -> R<()> {
+    let Some(variable) = arguments.value(0).downcast::<Symbol>() else {
+        return Err(arguments.error("invalid for() loop sequence"));
+    };
+    let mut sequence = handles::evaluate(context, arguments.value(1), environment)?;
+    let body = arguments.value(2);
+    if handles::inherits(context, sequence, "factor") {
+        sequence = handles::factor_as_character(context, sequence)?;
     }
-    let mut sequence = eval(call.arg(1), env)?;
-    let body = call.arg(2);
-    if values::inherits(sequence, "factor") {
-        sequence = crate::coerce::factor_as_character(sequence)?;
-    }
-    let kind = sequence.kind();
+    let kind = sequence.r_type();
     if kind.is_vector()
         && kind != SexpType::I64
-        && let Some(value) = bytecode::run_loop(call.call, Some(sequence), env)?
+        && handles::compiled_loop(context, arguments.expression(), Some(sequence), environment)?
     {
-        return Ok(value);
+        return Ok(());
     }
     // A compact sequence is stepped through by its first element and increment, as compiled
-    // loops do. Other numbers are read one element at a time through `vector_element`, as GNU
+    // loops do. Other numbers are read one element at a time through `subset::element`, as GNU
     // R's loop reads them through `INTEGER_ELT` and `REAL_ELT`, so no ALTREP number vector is
     // expanded before the first iteration.
-    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
-    let sequence = if steps.is_some()
-        || matches!(
-            sequence.kind(),
-            SexpType::Logical | SexpType::Integer | SexpType::Real
-        ) {
-        sequence
-    } else {
-        values::materialize(sequence)?
+    let steps = handles::compact_sequence(sequence).map(|(_, first, step)| (first, step));
+    let sequence = match kind {
+        _ if steps.is_some() => sequence,
+        SexpType::Logical | SexpType::Integer | SexpType::Real => sequence,
+        // A pairlist is read as the list of its values, which are the same objects.
+        SexpType::Pairlist => handles::pairlist_to_list(context, sequence)?,
+        _ => handles::materialize(context, sequence)?,
     };
-    let count = match sequence.kind() {
+    let count = match kind {
         SexpType::Nil => 0,
-        SexpType::Pairlist => values::pairlist_length(sequence),
-        SexpType::I64 if !sequence.is_array() => {
-            return Err(crate::records::boundary_error(
+        SexpType::I64 if !handles::is_array(sequence) => {
+            return Err(handles::boundary_error(
                 sequence,
-                call.arg(1),
-                call.call,
+                arguments.value(1),
+                arguments.expression(),
             ));
         }
-        kind if kind.is_vector() => length(sequence),
         SexpType::Record => {
-            return Err(crate::records::boundary_error(
+            return Err(handles::boundary_error(
                 sequence,
-                call.arg(1),
-                call.call,
+                arguments.value(1),
+                arguments.expression(),
             ));
         }
-        _ => return Err(call.error("invalid for() loop sequence")),
+        SexpType::Pairlist => handles::length(context, sequence),
+        kind if kind.is_vector() => handles::length(context, sequence),
+        _ => return Err(arguments.error("invalid for() loop sequence")),
     };
     // R binds the variable to NULL before the first iteration, which only shows when there is
     // none.
     if count == 0 {
-        define(variable, nil(), env)?;
+        handles::define(context, variable, handles::null(), environment)?;
     }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
-    sequence.increment_refcount();
-    let mut cell = sequence;
-    let mut outcome = Ok(nil());
-    let heap = crate::heap();
-    heap.root(sequence);
-    // Each element is rooted when it is allocated, and the binding keeps it alive after that, so
-    // releasing per iteration stops a long loop from holding every element it ever made.
-    let mark = heap.handle_mark();
-    for index in 0..count {
-        crate::heap().release_handles(mark);
-        let element = match (steps, sequence.kind()) {
-            (Some((first, step)), SexpType::Integer) => {
-                values::scalar_integer((first + step * index as f64) as i32)
-            }
-            (Some((first, step)), _) => values::scalar_real(first + step * index as f64),
-            (None, SexpType::List | SexpType::Expression) => Ok(sequence.element(index)),
-            (None, SexpType::Pairlist | SexpType::Language) => {
-                let value = cell.car();
-                cell = cell.cdr();
-                Ok(value)
-            }
-            (None, _) => crate::subset::vector_element(sequence, index),
-        };
-        match element
-            .and_then(|element| define(variable, element, env))
-            .and_then(|()| loop_body(body, env))
-        {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(unwind) => {
-                outcome = Err(unwind);
+    handles::referenced_while(context, sequence, |context| {
+        for index in 0..count {
+            // Each element is rooted when it is made, and the binding keeps it alive after
+            // that, so releasing per iteration stops a long loop from holding every element it
+            // ever made.
+            let goes_on = context.scope_reading(|inner, outer| {
+                let sequence = outer.pass(sequence);
+                let element = match (steps, sequence.r_type()) {
+                    (Some((first, step)), SexpType::Integer) => inner
+                        .scalar::<Integer>((first + step * index as f64) as i32)?
+                        .finish()
+                        .value(),
+                    (Some((first, step)), _) => inner
+                        .scalar::<Real>(first + step * index as f64)?
+                        .finish()
+                        .value(),
+                    (None, _) => crate::subset::element(inner, sequence, index)?,
+                };
+                let environment = outer.pass(environment);
+                handles::define(inner, outer.pass(variable), element, environment)?;
+                loop_body(inner, outer.pass(body), environment)
+            })?;
+            if !goes_on {
                 break;
             }
         }
-    }
-    sequence.decrement_refcount();
-    outcome
+        Ok(())
+    })
 }
 
-unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    if let Some(value) = bytecode::run_loop(call.call, None, env)? {
-        return Ok(value);
-    }
-    loop {
-        let condition = scope(|| eval(call.arg(0), env))?;
-        if !as_condition(condition, call.call)? {
-            break;
+fn do_while<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    in_loop(context, arguments, |context, environment| {
+        let call = arguments.expression();
+        if handles::compiled_loop(context, call, None, environment)? {
+            return Ok(());
         }
-        if !loop_body(call.arg(1), env)? {
-            break;
+        loop {
+            let goes_on = context.scope_reading(|inner, outer| {
+                let environment = outer.pass(environment);
+                let condition =
+                    handles::evaluate(inner, outer.pass(arguments.value(0)), environment)?;
+                handles::condition(inner, condition, outer.pass(call))
+            })?;
+            if !goes_on || !loop_body(context, arguments.value(1), environment)? {
+                return Ok(());
+            }
         }
-    }
-    Ok(nil())
+    })
 }
 
-unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    if let Some(value) = bytecode::run_loop(call.call, None, env)? {
-        return Ok(value);
-    }
-    while loop_body(call.arg(0), env)? {}
-    Ok(nil())
+fn do_repeat<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    in_loop(context, arguments, |context, environment| {
+        if handles::compiled_loop(context, arguments.expression(), None, environment)? {
+            return Ok(());
+        }
+        while loop_body(context, arguments.value(0), environment)? {}
+        Ok(())
+    })
 }
 
 /// A loop the tree-walking interpreter runs, which a `break` or `next` evaluated in `env` can
@@ -5873,19 +5898,32 @@ pub struct LoopContext {
     body: Sexp,
 }
 
+impl LoopContext {
+    fn new(environment: Local<'_, Environment>, depth: usize, body: Local<'_>) -> Self {
+        LoopContext {
+            env: environment.raw(),
+            depth,
+            body: body.raw(),
+        }
+    }
+}
+
 /// Runs a loop of the tree-walking interpreter with its environment on the stack of loops a
-/// `break` or `next` can reach.
-unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Sexp> {
-    let body = call.args.last().map_or(nil(), |arg| arg.value);
-    let context = LoopContext {
-        env: call.env()?,
-        depth: interp().frames.len(),
-        body,
-    };
-    interp().loops.push(context);
-    let result = run(call);
+/// `break` or `next` can reach. The loop's value is `NULL`.
+fn in_loop<'s>(
+    context: &mut Cx<'s>,
+    arguments: &handles::Args<'_, 's>,
+    run: impl FnOnce(&mut Cx<'s>, Local<'s, Environment>) -> R<()>,
+) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let body = arguments.value(arguments.len().saturating_sub(1));
+    let depth = interp().frames.len();
+    interp()
+        .loops
+        .push(LoopContext::new(environment, depth, body));
+    let result = run(context, environment);
     interp().loops.pop();
-    result
+    result.map(|()| handles::null())
 }
 
 /// Whether `expression` holds a loop, outside nested functions, that GNU R's compiler gives a
@@ -5955,16 +5993,16 @@ unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
     true
 }
 
-unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(0)?;
-    reachable_loop(call.env()?)?;
-    Err(jump(Jump::Break { env: call.env()? }))
+fn do_break<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(0)?;
+    let environment = arguments.environment(context)?;
+    Err(handles::loop_jump(context, environment, false))
 }
 
-unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(0)?;
-    reachable_loop(call.env()?)?;
-    Err(jump(Jump::Next { env: call.env()? }))
+fn do_next<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(0)?;
+    let environment = arguments.environment(context)?;
+    Err(handles::loop_jump(context, environment, true))
 }
 
 /// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
@@ -5976,7 +6014,7 @@ unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
 /// reachable when it is written directly in the body, or when the
 /// body has a loop with a context. A jump that then leaves the closure frame without meeting a
 /// loop is an error (`stray_loop_jump`).
-unsafe fn reachable_loop(env: Sexp) -> R<()> {
+pub(crate) unsafe fn reachable_loop(env: Sexp) -> R<()> {
     let state = interp();
     let depth = state.frames.len();
     let in_loop = state.loops.iter().any(|context| {
@@ -5993,25 +6031,30 @@ unsafe fn reachable_loop(env: Sexp) -> R<()> {
     Err(error("no loop for break/next, jumping to top level"))
 }
 
-unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
-    let value = match call.args {
-        [] => nil(),
-        [arg] => eval(arg.value, call.env()?)?,
-        _ => return Err(call.error("multi-argument returns are not permitted")),
+fn do_return<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let value = match arguments.len() {
+        0 => handles::null(),
+        1 => handles::evaluate(context, arguments.value(0), environment)?,
+        _ => return Err(arguments.error("multi-argument returns are not permitted")),
     };
     // GNU R looks for the function context before jumping, so a `return` with no function to
     // return from is an ordinary error that `tryCatch` can catch.
-    if call.frame_index().is_none() {
+    if !arguments.in_function(context) {
         return Err(error("no function to return from, jumping to top level"));
     }
-    Err(jump(Jump::Return {
-        env: call.env()?,
-        value,
-    }))
+    Err(handles::return_jump(environment, value))
 }
 
-unsafe fn do_function(call: &Call<'_>) -> R<Sexp> {
-    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env()?)
+fn do_function<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    handles::closure(
+        context,
+        arguments.value(0),
+        arguments.value(1),
+        arguments.value(2),
+        environment,
+    )
 }
 
 /// A closure of `formals` and `body` in `env`. A `function` call parsed with source references
@@ -6052,16 +6095,12 @@ fn do_quote<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<L
     Ok(arguments.value(0))
 }
 
-unsafe fn do_and2(call: &Call<'_>) -> R<Sexp> {
-    logical_operator(call, true)
+fn do_and2<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    logical_operator(context, arguments, true)
 }
 
-unsafe fn do_or2(call: &Call<'_>) -> R<Sexp> {
-    logical_operator(call, false)
-}
-
-unsafe fn logical_operand(value: Sexp, call: &Call<'_>, side: &str) -> R<i32> {
-    logical_operand_of(value, call.call, call.name(), side)
+fn do_or2<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    logical_operator(context, arguments, false)
 }
 
 /// An operand of `&&` or `||` (`operator`) as `TRUE`, `FALSE` or `NA`, with GNU R's errors for
@@ -6098,18 +6137,25 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
     Ok(values::as_logical_scalar(value))
 }
 
-unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
-    let left = eval(call.arg(0), call.env()?)?;
-    let left = logical_operand(left, call, "x")?;
+fn logical_operator<'s>(
+    context: &mut Cx<'s>,
+    arguments: &handles::Args<'_, 's>,
+    is_and: bool,
+) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let call = arguments.expression();
+    let operator = arguments.name();
+    let left = handles::evaluate(context, arguments.value(0), environment)?;
+    let left = handles::logical_operand(context, left, call, operator, "x")?;
     let na = heap::object::NA_LOGICAL;
     if is_and && left == 0 {
-        return values::scalar_logical(0);
+        return handles::logical_constant(context, 0);
     }
     if !is_and && left == 1 {
-        return values::scalar_logical(1);
+        return handles::logical_constant(context, 1);
     }
-    let right = eval(call.arg(1), call.env()?)?;
-    let right = logical_operand(right, call, "y")?;
+    let right = handles::evaluate(context, arguments.value(1), environment)?;
+    let right = handles::logical_operand(context, right, call, operator, "y")?;
     let result = if is_and {
         if right == 0 {
             0
@@ -6125,34 +6171,32 @@ unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     } else {
         0
     };
-    values::scalar_logical(result)
+    handles::logical_constant(context, result)
 }
 
-unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
-    let Some(first) = call.args.first() else {
-        return Err(call.error("'EXPR' is missing"));
-    };
-    let selector = eval(first.value, call.env()?)?;
+fn do_switch<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    if arguments.is_empty() {
+        return Err(arguments.error("'EXPR' is missing"));
+    }
+    let environment = arguments.environment(context)?;
+    let selector = handles::evaluate(context, arguments.value(0), environment)?;
     // `switch(x, ...)` forwards the caller's alternatives, so `...` expands to its promises.
-    let mut alternatives: Vec<Arg> = Vec::with_capacity(call.args.len() - 1);
-    for arg in &call.args[1..] {
-        if arg.value == symbols().dots && arg.tag == nil() {
-            let dots = find_var(symbols().dots, call.env()?)?;
-            if dots.kind() == SexpType::Dots {
-                crate::heap().root(dots);
-                for (tag, value) in values::pairlist_items(dots) {
-                    alternatives.push(Arg { tag, value });
-                }
-            }
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut alternatives: SmallVec<[(Local<'s>, Local<'s>); 8]> = SmallVec::new();
+    for index in 1..arguments.len() {
+        let (tag, value) = (arguments.tag(index), arguments.value(index));
+        if value.is(dots) && tag.r_type() == SexpType::Nil {
+            alternatives.extend(handles::dots_cells(context, environment)?);
         } else {
-            alternatives.push(*arg);
+            alternatives.push((tag, value));
         }
     }
-    match switch_alternative(selector, call.call, &alternatives)? {
-        Some(chosen) => eval(chosen, call.env()?),
+    let call = arguments.expression();
+    match handles::switch_alternative(context, selector, call, &alternatives)? {
+        Some(chosen) => handles::evaluate(context, chosen, environment),
         None => {
             interp().visible = false;
-            Ok(nil())
+            Ok(handles::null())
         }
     }
 }
@@ -6282,44 +6326,45 @@ pub(crate) unsafe fn switch_name_matches(name: Sexp, text: Sexp) -> bool {
     values::same_string(name, text)
 }
 
-unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(1)?;
-    let mut symbol = call.arg(0);
-    if symbol.kind() == SexpType::String && length(symbol) == 1 {
-        symbol = values::install_charsxp(symbol.element(0))?;
-    }
-    if symbol.kind() != SexpType::Symbol {
-        return Err(call.error("invalid use of 'missing'"));
-    }
-    values::scalar_bool(is_missing(symbol, call.env()?)?)
+fn do_missing<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(1)?;
+    let name = arguments.value(0);
+    let symbol = match handles::dense::<Str>(context, name)? {
+        Some(text) if text.len() == 1 => Some(handles::install_name_at(context, text, 0)?),
+        _ => name
+            .read(context)
+            .downcast::<Symbol>()
+            .map(handles::permanent),
+    };
+    let Some(symbol) = symbol else {
+        return Err(arguments.error("invalid use of 'missing'"));
+    };
+    let environment = arguments.environment(context)?;
+    let missing = handles::is_missing(context, context.root(symbol), environment)?;
+    handles::logical_constant(context, missing as i32)
 }
 
-unsafe fn do_on_exit(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["expr", "add", "after"])?;
-    let expression = crate::builtins::present(matched[0]).unwrap_or(nil());
-    let add = match crate::builtins::present(matched[1]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) == 1,
+fn do_on_exit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let [expression, add, after] = arguments.matched(context, ["expr", "add", "after"])?;
+    let add = match add {
+        Some(add) => {
+            let environment = arguments.environment(context)?;
+            let add = handles::evaluate(context, add, environment)?;
+            handles::logical_scalar(context, add) == 1
+        }
         None => false,
     };
-    let after = match crate::builtins::present(matched[2]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) != 0,
+    let after = match after {
+        Some(after) => {
+            let environment = arguments.environment(context)?;
+            let after = handles::evaluate(context, after, environment)?;
+            handles::logical_scalar(context, after) != 0
+        }
         None => true,
     };
-    let Some(index) = call.frame_index() else {
-        return Ok(nil());
-    };
-    let frame = &mut interp().frames[index];
-    if !add {
-        frame.on_exit.clear();
-    }
-    if expression != nil() {
-        if after {
-            frame.on_exit.push(expression);
-        } else {
-            frame.on_exit.insert(0, expression);
-        }
-    }
-    Ok(nil())
+    let expression = expression.unwrap_or_else(handles::null);
+    arguments.register_on_exit(context, expression, add, after);
+    Ok(handles::null())
 }
 
 unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
@@ -6352,18 +6397,10 @@ fn do_invisible<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) ->
     Ok(arguments.value(0))
 }
 
-unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
-    let state = interp();
-    let count = call.frame_index().map_or(NA_INTEGER, |index| {
-        // `eval`'s own frame counts its three arguments, as GNU R's context for it keeps them,
-        // so `nargs()` in code that `eval` or `source` runs at top level answers 3.
-        if state.frames[index].function.kind() != SexpType::Closure {
-            return 3;
-        }
-        crate::frame_args(state, index).len() as i32
-    });
+fn do_nargs<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
-    values::scalar_integer(count)
+    let count = arguments.frame_argument_count(context);
+    handles::integer(context, count)
 }
 
 unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
@@ -6950,194 +6987,277 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
     )
 }
 
-unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_str(call.arg(0), "name")?;
-    crate::builtins::primitive(&name)
-        .ok_or_else(|| call.error("no such primitive function".to_string()))
+fn do_primitive<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let name = arguments.value(0);
+    let primitive = match handles::length(context, name) {
+        1 => handles::first_string(context, name).map(|name| handles::primitive(&name)),
+        _ => None,
+    };
+    let Some(primitive) = primitive else {
+        return Err(error("invalid 'name' argument"));
+    };
+    let Some(primitive) = primitive else {
+        return Err(arguments.error("no such primitive function"));
+    };
+    Ok(context.root(primitive))
 }
 
 /// A formula: the call itself, with class `formula` and the environment it was made in.
-unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
-    let formula = values::duplicate(call.call)?;
-    if values::get_attr(formula, symbols().class) == nil() {
-        let class = values::scalar_string("formula")?;
-        values::set_attr(formula, symbols().class, class)?;
-        let environment = symbols().dot_environment;
-        values::set_attr(formula, environment, call.env()?)?;
+fn do_tilde<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let mut formula = handles::deep_copy(context, arguments.expression())?;
+    let class = handles::symbol(|symbols| symbols.class);
+    if handles::get_attribute(context, formula.get(), class).r_type() == SexpType::Nil {
+        let environment = arguments.environment(context)?;
+        let mut class_value = StringFill::new(context, 1)?;
+        class_value.push_text(context, "formula")?;
+        let class_value = class_value.finish().finish().value();
+        handles::set_attribute(context, &mut formula, class, class_value)?;
+        let name = handles::symbol(|symbols| symbols.dot_environment);
+        handles::set_attribute(context, &mut formula, name, environment.value())?;
     }
-    Ok(formula)
+    Ok(formula.finish().value())
 }
 
-unsafe fn do_delayed_assign(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    if names.kind() != SexpType::String || length(names) == 0 {
+fn do_delayed_assign<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let names = handles::dense::<Str>(context, arguments.value(0))?;
+    let Some(names) = names.filter(|names| !names.is_empty()) else {
         return Err(error("invalid first argument"));
+    };
+    let symbol = handles::install_element(context, names, 0)?;
+    let evaluation = assignment_environment(arguments.value(2), "eval.env")?;
+    let assignment = assignment_environment(arguments.value(3), "assign.env")?;
+    let promise = handles::promise(context, arguments.value(1), evaluation)?;
+    handles::define(context, symbol, promise.value(), assignment)?;
+    Ok(handles::null())
+}
+
+/// The environment argument `name` of `delayedAssign`, with GNU R's errors for another value.
+fn assignment_environment<'s>(value: Local<'s>, name: &str) -> R<Local<'s, Environment>> {
+    if value.r_type() == SexpType::Nil {
+        return Err(error("use of NULL environment is defunct"));
     }
-    let symbol = values::install_charsxp_text(names.element(0))?;
-    let value = call.arg(1);
-    let eval_env = call.arg(2);
-    let assign_env = call.arg(3);
-    for (env, name) in [(eval_env, "eval.env"), (assign_env, "assign.env")] {
-        if env == nil() {
-            return Err(error("use of NULL environment is defunct"));
-        }
-        if env.kind() != SexpType::Environment {
-            return Err(error(format!("invalid '{name}' argument")));
-        }
-    }
-    let promise = make_promise(value, eval_env)?;
-    define(symbol, promise, assign_env)?;
-    Ok(nil())
+    value
+        .downcast::<Environment>()
+        .ok_or_else(|| error(format!("invalid '{name}' argument")))
 }
 
 /// `makeLazy(vars, vals, expr, eenv, aenv)`: binds each variable to a promise of `expr` with
 /// `key` bound to its value, which is how lazy-load databases install their objects.
-unsafe fn do_make_lazy(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    let keys = call.arg(1);
-    let expression = call.arg(2);
-    let eval_env = call.arg(3);
-    let assign_env = call.arg(4);
-    if names.kind() != SexpType::String && names != nil() {
+fn do_make_lazy<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let names = arguments.value(0);
+    let keys = arguments.value(1);
+    let expression = arguments.value(2);
+    let Some(names) = handles::dense::<Str>(context, names)? else {
+        if names.r_type() == SexpType::Nil {
+            return Ok(handles::null());
+        }
         return Err(error("invalid first argument"));
-    }
+    };
+    let environment = |index: usize, name: &str| {
+        arguments
+            .value(index)
+            .downcast::<Environment>()
+            .ok_or_else(|| error(format!("invalid '{name}' argument")))
+    };
+    let (evaluation, assignment) = (environment(3, "eval.env")?, environment(4, "assign.env")?);
     // As in GNU R, each promise's code is a copy of `expression` with its first argument
     // replaced by the variable's key, and every promise shares `eval_env`, so `PRCODE` reads
     // `lazyLoadDBfetch(c(offset, length), datafile, compressed, envhook)`.
-    for index in 0..length(names) {
-        crate::scope(|| {
-            let symbol = values::install_charsxp_text(names.element(index))?;
-            let key = eval(crate::subset::vector_element(keys, index)?, eval_env)?;
-            crate::heap().root(key);
-            let expression_copy = values::duplicate(expression)?;
-            let arguments = expression_copy.cdr();
-            if expression_copy.kind() != SexpType::Language
-                || arguments.kind() != SexpType::Pairlist
-            {
-                return Err(call.error("invalid lazy-load expression"));
+    for index in 0..names.len() {
+        context.scope_reading(|inner, outer| {
+            let (names, keys) = (outer.pass(names), outer.pass(keys));
+            let (evaluation, assignment) = (outer.pass(evaluation), outer.pass(assignment));
+            let symbol = handles::install_element(inner, names, index)?;
+            let key = crate::subset::element(inner, keys, index)?;
+            let key = handles::evaluate(inner, key, evaluation)?;
+            let mut code = handles::deep_copy(inner, outer.pass(expression))?;
+            if !handles::set_first_argument(inner, &mut code, key) {
+                return Err(arguments.error("invalid lazy-load expression"));
             }
-            crate::heap().set_car(arguments, key);
-            let promise = make_promise(expression_copy, eval_env)?;
-            define(symbol, promise, assign_env)
+            let promise = handles::promise(inner, code.get(), evaluation)?;
+            handles::define(inner, symbol, promise.value(), assignment)
         })?;
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["expr", "env"])?;
-    let expression = crate::builtins::present(matched[0]).unwrap_or(missing_arg());
-    let env = match crate::builtins::present(matched[1]) {
-        Some(env) => eval(env, call.env()?)?,
-        None => call.env()?,
+fn do_substitute<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let [expression, environment] = arguments.matched(context, ["expr", "env"])?;
+    let expression = expression.unwrap_or_else(handles::missing_argument);
+    let caller = arguments.environment(context)?;
+    let environment = match environment {
+        Some(environment) => handles::evaluate(context, environment, caller)?,
+        None => caller.value(),
     };
-    let env = match env.kind() {
-        SexpType::Environment => env,
-        SexpType::List => crate::envir::list_to_env(env, values::empty_env())?,
-        SexpType::Pairlist => crate::envir::list_to_env(
-            crate::coerce::coerce_vector(env, SexpType::List)?,
-            values::empty_env(),
-        )?,
-        SexpType::Nil => values::empty_env(),
-        _ => return Err(call.error("invalid environment specified")),
+    let environment = match environment.r_type() {
+        SexpType::Environment => environment
+            .downcast::<Environment>()
+            .ok_or_else(|| arguments.error("invalid environment specified"))?,
+        SexpType::List | SexpType::Pairlist => handles::list_environment(context, environment)?,
+        SexpType::Nil => handles::empty_environment(),
+        _ => return Err(arguments.error("invalid environment specified")),
     };
     // A bare `...` splices like an argument list, of which `substitute` keeps the first
     // element, or `NULL` when the dots are empty.
-    if expression == symbols().dots {
-        let wrapped = values::pairlist(&[(nil(), expression)], SexpType::Pairlist)?;
-        crate::heap().root(wrapped);
-        let substituted = substitute_list(wrapped, env)?;
-        return Ok(if substituted == nil() {
-            nil()
-        } else {
-            substituted.car()
+    if expression.is(handles::symbol(|symbols| symbols.dots))
+        && !environment.is(handles::global_environment())
+    {
+        return Ok(match spliced_dots(context, environment) {
+            Splice::Cells(first) => context.root(dots_code(first)),
+            Splice::Nothing => handles::null(),
+            Splice::Itself => expression,
         });
     }
-    let result = substitute(expression, env)?;
-    Ok(result)
+    substitute(context, expression, environment)
 }
 
 /// Replaces the symbols in `expression` that are bound in `env` (the global environment is
 /// never substituted from): promises by their code, `...` by its contents, and anything else
 /// by its value.
-pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
-    match expression.kind() {
-        SexpType::Promise => substitute(expression.cdr(), env),
-        SexpType::Symbol => {
-            if env == values::global_env() || env == values::empty_env() {
-                return Ok(expression);
-            }
-            let Some(cell) = crate::heap().frame_cell(env, expression) else {
-                return Ok(expression);
-            };
-            let value = cell.cdr();
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                return Ok(expression);
-            }
-            if value.kind() == SexpType::Promise {
-                // A promise whose code is itself a promise, such as a replacement method's
-                // `value`, stands for the innermost promise's code.
-                let mut code = value.cdr();
-                while code.kind() == SexpType::Promise {
-                    code = code.cdr();
-                }
-                return Ok(code);
-            }
-            if value.kind() == SexpType::Dots {
-                return Ok(expression);
-            }
-            Ok(value)
+pub fn substitute<'s>(
+    context: &mut Cx<'s>,
+    expression: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let mut code = expression.read(context);
+    while let Some(promise) = code.downcast::<Promise>() {
+        code = promise.code();
+    }
+    if let Some(symbol) = code.downcast::<Symbol>() {
+        let value = substituted_symbol(context, symbol, environment);
+        if value.is(expression) {
+            return Ok(expression);
         }
-        SexpType::Language => {
-            let substituted = substitute_list(expression, env)?;
-            Ok(substituted)
+        return Ok(context.root(value));
+    }
+    if code.r_type() == SexpType::Language {
+        let call = context.root(code);
+        return substitute_list(context, call, environment);
+    }
+    if code.is(expression) {
+        return Ok(expression);
+    }
+    Ok(context.root(code))
+}
+
+/// What `symbol` stands for in an expression `substitute` rebuilds in `environment`: the code
+/// of a promise bound to it, the value of another binding, or the symbol itself.
+fn substituted_symbol<'a>(
+    context: &'a Cx<'_>,
+    symbol: Gc<'a, Symbol>,
+    environment: Local<'_, Environment>,
+) -> Gc<'a> {
+    let itself = symbol.value();
+    if environment.is(handles::global_environment()) || environment.is(handles::empty_environment())
+    {
+        return itself;
+    }
+    let Some(binding) = handles::frame_binding(context, environment, symbol) else {
+        return itself;
+    };
+    if binding.is_active() {
+        return itself;
+    }
+    let value = binding.content();
+    if let Some(promise) = value.downcast::<Promise>() {
+        // A promise whose code is itself a promise, such as a replacement method's `value`,
+        // stands for the innermost promise's code.
+        let mut code = promise.code();
+        while let Some(inner) = code.downcast::<Promise>() {
+            code = inner.code();
         }
-        _ => Ok(expression),
+        return code;
+    }
+    if value.r_type() == SexpType::Dots {
+        return itself;
+    }
+    value
+}
+
+/// What `...` splices into a call that `substitute` rebuilds in `environment`.
+enum Splice<'a> {
+    /// The first cell of the arguments `...` holds.
+    Cells(Gc<'a>),
+    /// Nothing, since `...` holds no arguments.
+    Nothing,
+    /// `...` itself, which the frame does not bind to arguments.
+    Itself,
+}
+
+fn spliced_dots<'a>(context: &'a Cx<'_>, environment: Local<'_, Environment>) -> Splice<'a> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    match handles::frame_binding(context, environment, dots).map(|binding| binding.content()) {
+        Some(value) if value.r_type() == SexpType::Dots => Splice::Cells(value),
+        Some(value) if value.is(handles::missing_argument()) => Splice::Nothing,
+        _ => Splice::Itself,
+    }
+}
+
+/// The expression a cell of `...` was passed as: a promise's code, or the value itself.
+fn dots_code(cell: Gc<'_>) -> Gc<'_> {
+    let Some((value, _, _)) = handles::cell_fields(cell) else {
+        return cell;
+    };
+    match value.downcast::<Promise>() {
+        Some(promise) => promise.code(),
+        None => value,
     }
 }
 
 /// Substitutes each element of a call, splicing `...`.
-pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
-    let dots = symbols().dots;
-    let mut items: Vec<(Sexp, Sexp)> = Vec::new();
+fn substitute_list<'s>(
+    context: &mut Cx<'s>,
+    list: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let splices = !environment.is(handles::global_environment());
     // GNU R reuses the spliced dots cells, so a call whose head comes from `...` becomes a
     // pairlist: `substitute(...())` is how code captures the dots unevaluated.
-    let mut kind = list.kind();
+    let head_spliced = splices
+        && matches!(handles::cell_fields(list.read(context)), Some((head, _, _)) if head.is(dots))
+        && matches!(spliced_dots(context, environment), Splice::Cells(_));
+    let kind = if head_spliced {
+        SexpType::Pairlist
+    } else {
+        list.r_type()
+    };
+    let mut cells = Cells::new(kind);
     let mut cell = list;
-    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
-        let element = cell.car();
-        if element == dots && env != values::global_env() {
-            let value = crate::heap().frame_cell(env, dots).map(|cell| cell.cdr());
-            match value {
-                Some(value) if value.kind() == SexpType::Dots => {
-                    if items.is_empty() {
-                        kind = SexpType::Pairlist;
+    while let Some((element, tag, rest)) = handles::cell_fields(cell.read(context)) {
+        let (element, tag, rest) = (context.root(element), context.root(tag), context.root(rest));
+        cell = rest;
+        if splices && element.is(dots) {
+            let spliced: SmallVec<[(Local<'s>, Local<'s>); 4]> =
+                match spliced_dots(context, environment) {
+                    Splice::Cells(first) => {
+                        let mut items = SmallVec::new();
+                        let mut dot = first;
+                        while let Some((_, tag, rest)) = handles::cell_fields(dot) {
+                            items.push((context.root(tag), context.root(dots_code(dot))));
+                            dot = rest;
+                        }
+                        items
                     }
-                    let mut dot = value;
-                    while dot.kind() == SexpType::Dots {
-                        let code = if dot.car().kind() == SexpType::Promise {
-                            dot.car().cdr()
-                        } else {
-                            dot.car()
-                        };
-                        items.push((dot.tag(), code));
-                        dot = dot.cdr();
-                    }
-                }
-                Some(value) if value == missing_arg() => {}
-                _ => items.push((cell.tag(), element)),
+                    Splice::Nothing => SmallVec::new(),
+                    Splice::Itself => [(tag, element)].into_iter().collect(),
+                };
+            for (tag, code) in spliced {
+                cells.push(context, tag, code)?;
             }
         } else {
-            let value = substitute(element, env)?;
-            items.push((cell.tag(), value));
+            let value = substitute(context, element, environment)?;
+            cells.push(context, tag, value)?;
         }
-        cell = cell.cdr();
     }
-    let result = values::pairlist(&items, kind)?;
-    if result != nil() && list.attrib() != nil() {
-        crate::heap().set_attrib(result, list.attrib());
+    let attributes = list.attributes(context);
+    if attributes.r_type() != SexpType::Nil {
+        let attributes = context.root(attributes);
+        cells.set_first_attributes(context, attributes);
     }
-    Ok(result)
+    Ok(cells
+        .finish()
+        .map_or_else(handles::null, |result| result.finish().value()))
 }
 
 // Assignment.

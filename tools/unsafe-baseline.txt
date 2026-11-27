@@ -36,12 +36,12 @@
 11 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
 127 crates/interp/src/envir.rs
-269 crates/interp/src/eval.rs
+234 crates/interp/src/eval.rs
 10 crates/interp/src/extensions.rs
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-196 crates/interp/src/handles.rs
+219 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 24 crates/interp/src/interp.rs
@@ -49,7 +49,7 @@
 5 crates/interp/src/latex.rs
 113 crates/interp/src/linalg.rs
 40 crates/interp/src/lower.rs
-60 crates/interp/src/methods.rs
+59 crates/interp/src/methods.rs
 137 crates/interp/src/methods_core.rs
 30 crates/interp/src/moves.rs
 27 crates/interp/src/native.rs

@@ -179,7 +179,13 @@ unsafe fn settle_lazy(object: Sexp) -> R<()> {
 /// Whether `value` is a ry value R code cannot read: a record, tuple, tag, dictionary or set, or
 /// an `I64` or `List<I64>`.
 pub unsafe fn is_native(value: Sexp) -> bool {
-    matches!(value.kind(), SexpType::Record | SexpType::I64)
+    is_native_type(value.kind())
+}
+
+/// Whether a value of type `kind` is one of ry's native values: a record or a 64-bit vector.
+#[inline]
+pub fn is_native_type(kind: SexpType) -> bool {
+    matches!(kind, SexpType::Record | SexpType::I64)
 }
 
 /// The error a builtin that does not understand native values raises for `value`, naming the
