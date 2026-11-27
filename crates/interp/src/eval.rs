@@ -5383,17 +5383,14 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let mut first = true;
     loop {
         let frame = &mut interp().frames[depth - 1];
-        let expressions: SmallVec<[Sexp; 4]> = std::mem::take(&mut frame.on_exit)
-            .iter()
-            .map(Held::raw)
-            .collect();
+        let expressions = std::mem::take(&mut frame.on_exit);
         if expressions.is_empty() {
             break;
         }
         // The frame no longer holds the code it handed over, and making its environment
         // allocates.
-        for &expression in &expressions {
-            crate::heap().root(expression);
+        for expression in &expressions {
+            crate::heap().root(expression.raw());
         }
         // A slot frame keeps exit code compiled for its slots, which runs there without an
         // environment; only an expression that did not compile needs one.
@@ -5403,7 +5400,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         let env = if frame.env.raw() != nil()
             || expressions
                 .iter()
-                .all(|expression| expression.kind() == SexpType::Bytecode)
+                .all(|expression| expression.raw().kind() == SexpType::Bytecode)
         {
             frame.env.raw()
         } else {
@@ -5437,10 +5434,11 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             }
         }
         let mut jumped = false;
-        for (position, &expression) in expressions.iter().enumerate() {
+        for (position, expression) in expressions.iter().enumerate() {
+            let expression = expression.raw();
             interp().frames[depth - 1].on_exit = expressions[position + 1..]
                 .iter()
-                .map(|&expression| Held::adopt(expression))
+                .map(|expression| Held::adopt(expression.raw()))
                 .collect();
             // A handler stack that a condition left in place must not run the exit code.
             let saved_handlers = interp().handlers.clone();
