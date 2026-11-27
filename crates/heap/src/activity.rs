@@ -445,6 +445,7 @@ pub fn record(counter: Counter) {
 }
 
 /// [`count`] for `events` events at once.
+#[inline(always)]
 pub fn count_by(counter: Counter, events: u64) {
     if enabled() {
         let slot = &COUNTERS[counter as usize];

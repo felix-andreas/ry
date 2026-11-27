@@ -9268,7 +9268,7 @@ unsafe fn call_fast<
         values::get_attr(function, symbols().srcref)
     };
     if promised != 0
-        && let Err(unwind) = eval::default_promises(depth, function, header, promised)
+        && let Err(unwind) = eval::default_promises(depth, promised)
     {
         let result = eval::leave(depth + 1, Err(unwind));
         return Some(call_fast_left(state, at, references, result));
@@ -15027,7 +15027,11 @@ fn subscript_value<'s>(
     let Some(symbol) = index.downcast::<Symbol>() else {
         return Ok(Some(index));
     };
-    if handles::is_missing_in(context, symbol, environment)? {
+    if eval::expression_is_missing(
+        context,
+        symbol.read(context).value(),
+        environment.read(context),
+    )? {
         return Ok(None);
     }
     Ok(Some(eval::symbol_value(context, symbol, environment)?))

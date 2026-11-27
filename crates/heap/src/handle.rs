@@ -131,6 +131,70 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// A new function frame (`gp::FUNCTION_FRAME`) enclosed by `enclosure` with room for
+    /// `bindings` cells, made without a collection check: it follows a [`Cx::reserve`] that
+    /// covers it. It takes `&self` because an allocation that cannot collect frees and moves
+    /// nothing.
+    #[inline]
+    pub fn new_function_frame_uncollected<'a>(
+        &'a self,
+        enclosure: impl Pointer<Environment>,
+        bindings: usize,
+    ) -> HeapResult<Gc<'a, Environment>> {
+        // SAFETY: the heap and the enclosure are live, the allocation collects nothing, and the
+        // new environment lives until the next safepoint, which `'a` ends before.
+        unsafe {
+            let environment =
+                (*self.heap.as_ptr()).alloc_environment_uncollected(enclosure.raw(), bindings)?;
+            environment.set_gp_bits(gp::FUNCTION_FRAME, true);
+            Ok(Gc::adopt(environment))
+        }
+    }
+
+    /// A new unforced promise of `code` in `environment`, made without a collection check: it
+    /// follows a [`Cx::reserve`] that covers it.
+    #[inline]
+    pub fn new_promise_uncollected<'a>(
+        &'a self,
+        code: impl Pointer<Value>,
+        environment: impl Pointer<Environment>,
+    ) -> HeapResult<Gc<'a, Promise>> {
+        // SAFETY: the heap, the code and the environment are live, the allocation collects
+        // nothing, and the promise lives until the next safepoint, which `'a` ends before.
+        unsafe {
+            let heap = &mut *self.heap.as_ptr();
+            let unbound = heap.known.unbound;
+            let promise = heap.alloc_triple_uncollected(
+                SexpType::Promise,
+                unbound,
+                code.raw(),
+                environment.raw(),
+            )?;
+            Ok(Gc::adopt(promise))
+        }
+    }
+
+    /// Binds the formals `bindings` in the new function frame `environment`, which binds
+    /// nothing yet, without a collection check ([`Heap::define_formals_uncollected`]), and
+    /// marks them as its formals, which its listing puts last.
+    pub fn define_formals_uncollected(
+        &self,
+        environment: impl Pointer<Environment>,
+        bindings: &[LocalBinding<'_>],
+    ) -> HeapResult<()> {
+        // SAFETY: as in `define_locals_uncollected`.
+        unsafe {
+            let formals = std::slice::from_raw_parts(
+                bindings.as_ptr().cast::<crate::Formal>(),
+                bindings.len(),
+            );
+            let heap = &mut *self.heap.as_ptr();
+            heap.define_formals_uncollected(environment.raw(), formals)?;
+            heap.mark_frame_formals(environment.raw());
+            Ok(())
+        }
+    }
+
     /// Binds `bindings`, none of which the function frame `environment` binds yet, without a
     /// collection check ([`Heap::define_locals_uncollected`]). It takes `&self` because the
     /// cells it makes cannot collect: the caller has reserved room or inhibited collection.
@@ -183,6 +247,43 @@ impl<'s> Cx<'s> {
             }
             environment.set_gp_bits(gp::SLOT_FRAME, false);
         }
+    }
+
+    /// Gives up what the environment of a returning slot frame holds once nothing outlives the
+    /// frame through it ([`Heap::discard_frame`]). It frees nothing at once, so `value`, which
+    /// the frame returns, stays valid.
+    #[inline]
+    pub fn discard_frame(
+        &self,
+        environment: impl Pointer<Environment>,
+        value: impl Pointer<Value>,
+    ) {
+        // SAFETY: the heap and both objects are live, and releasing references frees nothing
+        // by itself.
+        unsafe { (*self.heap.as_ptr()).discard_frame(environment.raw(), value.raw()) }
+    }
+
+    /// Binds `symbol` to `value` in `environment`'s own frame, making the binding when the
+    /// frame has none ([`Heap::define`]).
+    pub fn define(
+        &mut self,
+        environment: impl Pointer<Environment>,
+        symbol: impl Pointer<Symbol>,
+        value: impl Pointer<Value>,
+    ) -> HeapResult<()> {
+        // SAFETY: the heap and the three objects are live, and `&mut self` means no `Gc` of this
+        // context is in use while a new binding allocates.
+        unsafe { (*self.heap.as_ptr()).define(environment.raw(), symbol.raw(), value.raw()) }
+    }
+
+    /// Stores `value` in `binding` ([`Heap::set_binding_value`]).
+    pub fn set_binding_value(
+        &mut self,
+        binding: impl Pointer<Binding>,
+        value: impl Pointer<Value>,
+    ) -> HeapResult<()> {
+        // SAFETY: the heap and both objects are live, and `&mut self` covers the write barrier.
+        unsafe { (*self.heap.as_ptr()).set_binding_value(binding.raw(), value.raw()) }
     }
 
     /// Tells a method's slot frame environment the names of its dispatch variables
@@ -828,6 +929,24 @@ impl<'a> Gc<'a, Environment> {
             (enclosure.kind() == SexpType::Environment).then(|| Gc::adopt(enclosure))
         }
     }
+
+    /// Whether the environment's own frame may bind `symbol` ([`crate::Heap::may_bind`]):
+    /// `false` proves it does not, and `true` asks for a search of its cells or slots.
+    #[inline(always)]
+    pub fn may_bind(self, symbol: impl Pointer<Symbol>) -> bool {
+        // SAFETY: the environment is live for `'a`, and the test reads its frame's filter.
+        unsafe { (*self.raw.frame_ptr()).may_bind(symbol.raw()) }
+    }
+
+    /// Clears the flag that says compiled code's registers may hold the frame's values
+    /// (`gp::COMPILED_FRAME`), once the frame's body has returned. The frame flags that decide
+    /// where its variables live are set only by the heap's frame operations.
+    #[inline]
+    pub fn clear_compiled_frame(self) {
+        // SAFETY: the environment is live for `'a`, and the flag is a bit of its header that no
+        // reader keeps across a change.
+        unsafe { self.raw.set_gp_bits(gp::COMPILED_FRAME, false) }
+    }
 }
 
 impl<'a> Gc<'a, Binding> {
@@ -1088,6 +1207,19 @@ impl<T: Kind> Held<T> {
     #[inline]
     pub fn raw(&self) -> Sexp {
         self.raw
+    }
+}
+
+impl Held<Value> {
+    /// `NULL`, which lives as long as the heap, so it needs no root source.
+    #[inline]
+    pub fn null(cx: &Cx<'_>) -> Held<Value> {
+        // SAFETY: the context's heap outlives every borrow of it.
+        let raw = unsafe { (*cx.heap.as_ptr()).nil() };
+        Held {
+            raw,
+            kind: PhantomData,
+        }
     }
 }
 
