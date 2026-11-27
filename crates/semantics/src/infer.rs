@@ -6,6 +6,7 @@ use {
     crate::{
         Db, TypeDefinitions,
         annotations::NamedDefinition,
+        check::comparison_operand_shape,
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
@@ -2599,6 +2600,20 @@ pub(crate) fn constraint_rejects<'db>(
         };
         return (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
     }
+    // A ry nominal compares as its representation does, so `type Count = I64` compares with a
+    // number.
+    if matches!(
+        constraint,
+        Constraint::ComparableOrNumber | Constraint::ComparableOrOrdered
+    ) && let TyKind::Named(name, _) = ty.kind(db)
+        && let Some(definition) = table
+            .definitions
+            .and_then(|definitions| definitions.get(db, *name))
+        && is_ry_value_type(db, definition.body)
+    {
+        return constraint_rejects(db, table, constraint, definition.body)
+            .map(|_| UnifyError::ConstraintRejected(constraint, ty));
+    }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // A constraint of both families admits what either half admits, since no type is on
@@ -2606,7 +2621,9 @@ pub(crate) fn constraint_rejects<'db>(
         Constraint::Num
         | Constraint::ArithmeticOrNumber
         | Constraint::ArithmeticOrF64
-        | Constraint::NumericOrF64 => match (ty.kind(db), constraint.families()) {
+        | Constraint::NumericOrF64
+        | Constraint::ComparableOrNumber
+        | Constraint::ComparableOrOrdered => match (ty.kind(db), constraint.families()) {
             (TyKind::Rigid(name), _) if binder_implies(name) => true,
             (_, Some((r_half, ry_half))) => {
                 constraint_rejects(db, table, r_half, ty).is_none()
@@ -2699,6 +2716,25 @@ pub(crate) fn constraint_rejects<'db>(
             TyKind::Function(_) => false,
             TyKind::Rigid(name) => binder_implies(name),
             _ => true,
+        },
+        Constraint::Comparable => match ty.kind(db) {
+            TyKind::Any | TyKind::Unknown | TyKind::Frame(..) => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            // A class compares through R's `Ops` methods; a ry nominal is a ry value.
+            TyKind::Named(name, _) => {
+                !is_ry_value_type(db, ty)
+                    && !table
+                        .definitions
+                        .and_then(|definitions| definitions.get(db, *name))
+                        .is_some_and(|definition| is_ry_value_type(db, definition.body))
+            }
+            _ => comparison_operand_shape(db, ty).is_some(),
+        },
+        Constraint::Ordered => match ty.kind(db) {
+            TyKind::Native(native) => native.is_number() || *native == NativeScalar::Str,
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
         },
         Constraint::WholeLiteral { integer } => match ty.kind(db) {
             TyKind::Native(native) => native.is_number(),
