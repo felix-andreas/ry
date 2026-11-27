@@ -1700,7 +1700,12 @@ fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
                         }
                         let symbol = handles::install_name_at(context, names, index)?;
                         let value = context.root(list.get(context, index));
-                        handles::define(context, context.root(symbol), value, environment)?;
+                        crate::eval::define_variable(
+                            context,
+                            context.root(symbol),
+                            value,
+                            environment,
+                        )?;
                     }
                 }
             } else {
@@ -1710,7 +1715,7 @@ fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
                     let tag = tag.map(|tag| context.root(tag));
                     cell = context.root(rest);
                     if let Some(symbol) = tag {
-                        handles::define(context, symbol, value, environment)?;
+                        crate::eval::define_variable(context, symbol, value, environment)?;
                     }
                 }
             }

@@ -4964,7 +4964,7 @@ pub(crate) fn assign_subset2<'s>(
             ));
         };
         let symbol = handles::install_element(context, name, 0)?;
-        handles::define(context, symbol, value, environment)?;
+        crate::eval::define_variable(context, symbol, value, environment)?;
         return Ok(object);
     }
     if indices.is_empty()
@@ -5481,7 +5481,7 @@ pub(crate) fn assign_dollar<'s>(
     if let Some(environment) = object.downcast::<handles::Environment>() {
         handles::reaching_environment(context)?;
         let symbol = handles::install(context, name)?;
-        handles::define(context, symbol, value, environment)?;
+        crate::eval::define_variable(context, symbol, value, environment)?;
         return Ok(object);
     }
     let kind = object.r_type();
@@ -5493,7 +5493,7 @@ pub(crate) fn assign_dollar<'s>(
         };
         handles::reaching_environment(context)?;
         let symbol = handles::install(context, name)?;
-        handles::define(context, symbol, value, environment)?;
+        crate::eval::define_variable(context, symbol, value, environment)?;
         return Ok(object);
     }
     // GNU R interns the name as a symbol, which rejects an empty one and spells `NA` out.

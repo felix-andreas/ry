@@ -36,7 +36,7 @@
 11 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
 127 crates/interp/src/envir.rs
-206 crates/interp/src/eval.rs
+204 crates/interp/src/eval.rs
 10 crates/interp/src/extensions.rs
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs

@@ -14282,7 +14282,9 @@ fn assign_enclosed_element<'s>(
     (whole, setter_call): (Local<'s>, Local<'s>),
 ) -> R<bool> {
     let enclosure = frame.enclosure(context);
-    let Some((home, binding)) = handles::enclosing_binding(context, variable, enclosure) else {
+    let Some((home, binding)) =
+        eval::enclosing_binding(context, variable.read(context), enclosure.read(context))
+    else {
         return Ok(false);
     };
     if binding.is_active() || binding.is_locked() {
@@ -14317,7 +14319,7 @@ fn assign_enclosed_element<'s>(
         };
         let held = match slot.map(|slot| frame.read(context, slot)) {
             Some(held) if held.raw() != unbound() => held,
-            _ => match handles::visible_binding(context, symbol, from) {
+            _ => match eval::visible_binding(context, symbol.read(context), from.read(context)) {
                 Some(cell) if !cell.is_active() => cell.content(),
                 _ => return Ok(false),
             },
@@ -14331,8 +14333,12 @@ fn assign_enclosed_element<'s>(
                 // replaces.
                 let read = handles::force_holding(context, promise, target)?;
                 rebound = forces
-                    && (!handles::enclosing_binding(context, variable, enclosure)
-                        .is_some_and(|(found, cell)| found.is(home) && cell.is(binding))
+                    && (!eval::enclosing_binding(
+                        context,
+                        variable.read(context),
+                        enclosure.read(context),
+                    )
+                    .is_some_and(|(found, cell)| found.is(home) && cell.is(binding))
                         || !binding.read(context).content().is(current));
                 read
             }
@@ -14355,7 +14361,7 @@ fn assign_enclosed_element<'s>(
     })?;
     if let Some(result) = stored {
         if rebound {
-            handles::assign_outward(context, variable, result, enclosure)?;
+            eval::assign_outward(context, variable, result, enclosure)?;
         } else if !result.is(current) {
             handles::assign_local(context, variable, result, home, Some(binding))?;
         }
@@ -14377,7 +14383,7 @@ fn assign_enclosed_element<'s>(
     };
     let result = replace_element(context, kind, object, (index, value), (whole, setter_call))?;
     // A warning's calling handler may have rebound the variable, so `<<-` finds it again.
-    handles::assign_outward(context, variable, result, enclosure)?;
+    eval::assign_outward(context, variable, result, enclosure)?;
     Ok(true)
 }
 
@@ -15024,7 +15030,7 @@ fn subscript_value<'s>(
     if handles::is_missing_in(context, symbol, environment)? {
         return Ok(None);
     }
-    Ok(Some(handles::symbol_value(context, symbol, environment)?))
+    Ok(Some(eval::symbol_value(context, symbol, environment)?))
 }
 
 /// Where [`replace_variable`]'s variable lives: its binding in the frame's environment, or a
