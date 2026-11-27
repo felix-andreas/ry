@@ -25,7 +25,9 @@
 
 use {
     crate::{
-        RError, conditions, interp,
+        RError, conditions,
+        handles::{self, Bytecode, Closure, Gc},
+        interp,
         unwind::{ErrorClass, R},
         values::{self, nil},
     },
@@ -605,13 +607,25 @@ fn plain_admits(mask: Mask, kind: SexpType) -> bool {
 /// Whether `function`'s definition may carry a signature: one bit test, which [`declared_formals`]
 /// and the checks confirm.
 pub unsafe fn is_typed(function: Sexp) -> bool {
-    let formals = function.car();
-    let key = if formals.kind() == SexpType::Pairlist {
+    typed_closure(Gc::adopt(function))
+}
+
+/// [`is_typed`] on a closure handle.
+pub fn typed_closure(function: Gc<'_, Closure>) -> bool {
+    let formals = function.formals();
+    let key = if formals.r_type() == SexpType::Pairlist {
         formals
     } else {
-        crate::bytecode::closure_body(function)
+        let body = function.body();
+        body.downcast::<Bytecode>()
+            .and_then(|code| {
+                handles::constants(code)?
+                    .get(crate::bytecode::SOURCE)
+                    .copied()
+            })
+            .unwrap_or(body)
     };
-    key.has_gp(gp::TYPED_DEFINITION)
+    key.has_flag(gp::TYPED_DEFINITION)
 }
 
 /// Whether `RY_TYPED_LOG` asks for the typed core's decisions on standard error.

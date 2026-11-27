@@ -8,15 +8,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Binding, Chars, Complex, Cx, Elements, Enclosing, Environment, Exact, Expression,
-    Fresh, Gc, I64, Identity, Integer, Item, Kind, Language, List, Local, Logical, Owned, Pairlist,
-    Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
+    Alt, Atomic, Binding, Bytecode, Chars, Closure, Complex, Cx, Elements, Enclosing, Environment,
+    Exact, Expression, Fresh, Gc, I64, Identity, Integer, Item, Kind, Language, List, Local,
+    Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
     crate::{
         TaskCallbackRoutine,
         builtin_libraries::NativeCall,
         builtins::{Arg, Call},
+        bytecode,
         coerce::coerce_vector,
         conditions, connections,
         unwind::{R, Unwind, error},
@@ -1645,7 +1646,7 @@ impl<'s> Args<'_, 's> {
 
     /// [`Args::matched`] that keeps the empty argument a call passed, for the builtins GNU R
     /// lets read one as a value.
-    #[inline]
+    #[inline(always)]
     pub fn matched_as_passed<const N: usize>(
         &self,
         _context: &mut Cx<'s>,
@@ -3275,7 +3276,7 @@ pub fn language<'s>(
         tag: null(),
         value: head.value(),
     };
-    let call = cells::<true>(context, &[head], rest)?;
+    let call = cells::<CALL_CELLS>(context, &[head], rest)?;
     call.downcast::<Language>()
         .ok_or_else(|| error("internal error: a call cell is not a call"))
 }
@@ -3291,18 +3292,29 @@ pub fn cons<'s, 'a>(
         tag: tag.value(),
         value: value.value(),
     };
-    cells::<false>(context, &[item], rest)
+    cells::<PAIRLIST_CELLS>(context, &[item], rest)
 }
 
 /// The pairlist of `items` in order, continued by the cells of `rest`.
 pub fn chain<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>], rest: Local<'_>) -> R<Local<'s>> {
-    cells::<false>(context, items, rest)
+    cells::<PAIRLIST_CELLS>(context, items, rest)
 }
 
-/// The cells of `items` before `rest`, the first one a call cell under `CALL`. They are built
-/// back to front, so each is complete when it allocates and none is written through a barrier
-/// afterwards. The cell types are constants, so each allocation's size is too.
-fn cells<'s, const CALL: bool>(
+/// The `...` list of `items` in order, `NULL` when there are none.
+pub fn dots<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>]) -> R<Local<'s>> {
+    cells::<DOTS_CELLS>(context, items, null())
+}
+
+/// The cells [`cells`] builds: a pairlist, a call (a pairlist whose first cell is a call
+/// cell), or `...`.
+const PAIRLIST_CELLS: u8 = 0;
+const CALL_CELLS: u8 = 1;
+const DOTS_CELLS: u8 = 2;
+
+/// The cells of `items` before `rest`, of the kind `KIND` names. They are built back to front,
+/// so each is complete when it allocates and none is written through a barrier afterwards. The
+/// cell types are constants, so each allocation's size is too.
+fn cells<'s, const KIND: u8>(
     context: &mut Cx<'s>,
     items: &[Tagged<'_>],
     rest: Local<'_>,
@@ -3315,13 +3327,18 @@ fn cells<'s, const CALL: bool>(
         let Some((first, others)) = items.split_first() else {
             return Ok(rooted(context, list));
         };
-        for item in others.iter().rev() {
-            list = heap.alloc_triple(SexpType::Pairlist, item.value.raw(), list, item.tag.raw())?;
-        }
-        let kind = if CALL {
-            SexpType::Language
+        let rest_kind = if KIND == DOTS_CELLS {
+            SexpType::Dots
         } else {
             SexpType::Pairlist
+        };
+        for item in others.iter().rev() {
+            list = heap.alloc_triple(rest_kind, item.value.raw(), list, item.tag.raw())?;
+        }
+        let kind = match KIND {
+            CALL_CELLS => SexpType::Language,
+            DOTS_CELLS => SexpType::Dots,
+            _ => SexpType::Pairlist,
         };
         let list = heap.alloc_triple(kind, first.value.raw(), list, first.tag.raw())?;
         Ok(rooted(context, list))
@@ -4210,6 +4227,185 @@ const _: () = {
     assert!(offset_of!(Tagged<'static>, tag) == offset_of!(Arg, tag));
     assert!(offset_of!(Tagged<'static>, value) == offset_of!(Arg, value));
 };
+
+/// The arguments `args` as handles of the context's scope, without a root of the scope's own.
+///
+/// # Safety
+///
+/// Each argument's tag and value are live objects that a root of the caller's keeps alive until
+/// the context's scope ends, as [`held`] asks of one object.
+#[inline]
+pub unsafe fn tagged<'a, 's>(_context: &Cx<'s>, args: &'a [Arg]) -> &'a [Tagged<'s>] {
+    // SAFETY: `Tagged` has `Arg`'s layout, and the caller's contract keeps both fields alive.
+    unsafe { std::slice::from_raw_parts(args.as_ptr().cast::<Tagged<'s>>(), args.len()) }
+}
+
+/// A slot frame's registers while a call binds its formals: the header register, one slot per
+/// name of the body's slot table, then the body's own registers. The call stores the formals'
+/// values in order and then closes the window, which leaves the other slots unbound. A window
+/// dropped unclosed gives back the references the stores counted and the registers.
+///
+/// The window borrows the context, so nothing allocates or runs R code while it is open: no
+/// code can release its registers under it or collect a value read for a slot.
+#[must_use]
+pub struct Window<'c> {
+    header: usize,
+    /// The first slot. The register file's buffer never reallocates, so the address stays valid
+    /// while the window's registers are reserved.
+    slots: *mut Sexp,
+    slot_count: usize,
+    written: usize,
+    context: PhantomData<&'c ()>,
+}
+
+impl<'c> Window<'c> {
+    /// A window of `slots` slots and `registers` registers at the top of the register file.
+    /// Growing the file allocates no object, so nothing read through the context is lost.
+    #[inline]
+    pub fn open(_context: &'c Cx<'_>, slots: usize, registers: usize) -> R<Window<'c>> {
+        let header = bytecode::register_top();
+        bytecode::reserve_registers(header + 1 + slots + registers)?;
+        Ok(Window {
+            header,
+            slots: bytecode::register_address(header + 1),
+            slot_count: slots,
+            written: 0,
+            context: PhantomData,
+        })
+    }
+
+    /// The header register, which the frame is entered with.
+    #[inline]
+    pub fn header(&self) -> usize {
+        self.header
+    }
+
+    /// The value in `register`, below the window, which a frame under the new one holds: a
+    /// value, a promise, `R_MissingArg` or the unbound marker. `None` at the window or above.
+    #[inline]
+    pub fn under(&self, register: usize) -> Option<Gc<'c>> {
+        if register >= self.header {
+            return None;
+        }
+        // SAFETY: the register is in the file below the window, which is traced and which only
+        // running code writes, and no code runs while the window borrows the context.
+        Some(unsafe { Gc::adopt(*bytecode::register_address(register)) })
+    }
+
+    /// Stores `value` in the next slot, which counts a reference to it.
+    #[inline]
+    pub fn push(&mut self, value: impl Pointer<Value>) {
+        assert!(
+            self.written < self.slot_count,
+            "a slot window holds more values than slots"
+        );
+        let raw = value.raw();
+        // SAFETY: the slot is one of the window's reserved registers, the value is live, as
+        // any pointer is while it can be used, and the register file is traced, so the slot
+        // keeps it alive from here on.
+        unsafe {
+            self.slots.add(self.written).write(raw);
+            raw.increment_refcount();
+        }
+        self.written += 1;
+    }
+
+    /// Leaves the slots no value was stored in unbound and returns the header register.
+    #[inline]
+    pub fn close(self) -> usize {
+        let window = std::mem::ManuallyDrop::new(self);
+        // SAFETY: the slots past those written are reserved registers of the window.
+        let rest = unsafe {
+            std::slice::from_raw_parts_mut(
+                window.slots.add(window.written),
+                window.slot_count - window.written,
+            )
+        };
+        rest.fill(values::unbound());
+        window.header
+    }
+}
+
+impl Drop for Window<'_> {
+    /// The values are the caller's arguments and defaults, which the call goes on to bind
+    /// elsewhere, so none is released as a slot frame releases its slots, which would empty a
+    /// promise.
+    #[cold]
+    fn drop(&mut self) {
+        for index in 0..self.written {
+            // SAFETY: each store counted a reference to the value in its slot, which this
+            // gives back.
+            unsafe { (*self.slots.add(index)).decrement_refcount() };
+        }
+        bytecode::release_registers(self.header);
+    }
+}
+
+/// Stores `value` as entry `index` of the constant pool of `function`'s compiled body, one of the
+/// tables the interpreter keeps there (`bytecode::MATCHES`). `false` when the body is not
+/// compiled or its pool has no such entry.
+pub fn set_body_constant(
+    context: &mut Cx<'_>,
+    function: Local<'_, Closure>,
+    index: usize,
+    value: Local<'_>,
+) -> bool {
+    let Some(code) = function.read(context).body().downcast::<Bytecode>() else {
+        return false;
+    };
+    let Some(constants) = code.constants().standard::<List>() else {
+        return false;
+    };
+    if index >= constants.len() {
+        return false;
+    }
+    // SAFETY: the pool is a live list with the entry, and the store runs the write barrier.
+    unsafe { crate::heap().set_element(constants.raw(), index, value.raw()) };
+    true
+}
+
+/// The argument list of an "unused argument" error, each argument deparsed and named as it
+/// was passed, a promise as its code (`deparse::unused_arguments`).
+pub fn unused_arguments(context: &mut Cx<'_>, arguments: &[(Option<&str>, Local<'_>)]) -> String {
+    let arguments: SmallVec<[(Option<&str>, Sexp); 4]> = arguments
+        .iter()
+        .map(|&(name, value)| {
+            let value = value.read(context);
+            let code = value
+                .downcast::<Promise>()
+                .map_or(value, |promise| promise.code());
+            (name, code.raw())
+        })
+        .collect();
+    // SAFETY: the values are rooted, and deparsing reads them and runs no R code.
+    unsafe { crate::deparse::unused_arguments(&arguments) }
+}
+
+/// Builds and keeps the defaults of `function`'s formals that run on its slot frame
+/// (`bytecode::slot_defaults`), which `function`'s slot table then holds with its formals.
+/// A closure whose body is not compiled with a slot table has none to keep.
+pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -> R<()> {
+    if slot_table(context, function.read(context)).is_none() {
+        return Ok(());
+    }
+    // SAFETY: the closure is rooted and its body is compiled with a slot table, and building
+    // the list allocates, which `&mut Cx` permits.
+    unsafe { bytecode::slot_defaults(function.raw()).map(drop) }
+}
+
+/// The slot table of `function`'s compiled body (`bytecode::SLOTS`), or `None` when the body
+/// is not compiled or is compiled without one. Entry 1 is the slot names, the formals first.
+#[inline]
+pub fn slot_table<'a>(_context: &Cx<'_>, function: Gc<'a, Closure>) -> Option<Gc<'a, List>> {
+    let code = function.body().downcast::<Bytecode>()?;
+    constants(code)?.get(bytecode::SLOTS)?.standard::<List>()
+}
+
+/// The constant pool of `code`, or `None` when it is not a list with its own storage (ALTREP).
+#[inline]
+pub fn constants(code: Gc<'_, Bytecode>) -> Option<&[Gc<'_>]> {
+    Some(code.constants().standard::<List>()?.elements())
+}
 
 /// `setter_call` as the call a replacement closure is applied by: `*tmp*` in place of its
 /// target and `value_code` in place of its value, with its other arguments and every tag as

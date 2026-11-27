@@ -290,7 +290,9 @@ unsafe impl Reroot for crate::HeapError {
 }
 
 /// A pointer read from the heap and not rooted. It borrows the context it was read through, so
-/// it ends at the next safepoint.
+/// it ends at the next safepoint. It is laid out as the pointer, so a vector's element storage
+/// reads as a slice of them ([`Gc::elements`]).
+#[repr(transparent)]
 pub struct Gc<'a, T: Kind = Value> {
     raw: Sexp,
     borrow: PhantomData<&'a ()>,
@@ -336,6 +338,13 @@ impl<'a, T: Kind> Gc<'a, T> {
     pub fn r_type(self) -> SexpType {
         // SAFETY: the object is live for `'a`.
         unsafe { self.raw.kind() }
+    }
+
+    /// Whether any of the flags `bits` (`object::gp`) is set in the object's header.
+    #[inline]
+    pub fn has_flag(self, bits: u16) -> bool {
+        // SAFETY: the object is live for `'a`, and the test reads its header.
+        unsafe { self.raw.has_gp(bits) }
     }
 
     /// Whether this and `other` are one object. Strings have no such test, because one text
@@ -395,6 +404,17 @@ impl<'a, T: Atomic> Gc<'a, T> {
 }
 
 impl<'a, T: Elements> Gc<'a, T> {
+    /// The elements, which live as long as the borrow that keeps the vector from collection.
+    #[inline]
+    pub fn elements(self) -> &'a [Gc<'a, T::Element>] {
+        // SAFETY: `Gc` is laid out as a `Sexp`, and a standard vector of pointers stores
+        // `length` live objects of the element kind, which no store replaces while the context
+        // is borrowed shared.
+        unsafe {
+            std::slice::from_raw_parts(self.raw.data() as *const Gc<'a, T::Element>, self.len())
+        }
+    }
+
     #[inline]
     pub fn get(self, index: usize) -> Gc<'a, T::Element> {
         assert!(index < self.len(), "element index out of bounds");
@@ -499,6 +519,32 @@ impl<'a> Gc<'a, Promise> {
     }
 }
 
+impl<'a> Gc<'a, Closure> {
+    /// The formals: a pairlist of defaults, each tagged with its formal's name, or `NULL`.
+    #[inline]
+    pub fn formals(self) -> Gc<'a> {
+        // SAFETY: the closure is live for `'a` and keeps its formals alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+
+    /// The body: the expression the closure was defined with, or the code it compiled to.
+    #[inline]
+    pub fn body(self) -> Gc<'a> {
+        // SAFETY: the closure is live for `'a` and keeps its body alive.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
+impl<'a> Gc<'a, Bytecode> {
+    /// The constant pool, a list whose leading entries the interpreter reserves for the code's
+    /// own tables.
+    #[inline]
+    pub fn constants(self) -> Gc<'a> {
+        // SAFETY: the code object is live for `'a` and keeps its constants alive.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
 impl<'a> Gc<'a, Environment> {
     /// The environment that encloses this one, which lookups continue in, or `None` for the
     /// empty environment, whose enclosure is `NULL`.
@@ -510,13 +556,6 @@ impl<'a> Gc<'a, Environment> {
             let enclosure = self.raw.enclosure();
             (enclosure.kind() == SexpType::Environment).then(|| Gc::adopt(enclosure))
         }
-    }
-
-    /// Whether any of the flags `bits` (`object::gp`) is set on the environment.
-    #[inline]
-    pub fn has_flag(self, bits: u16) -> bool {
-        // SAFETY: the environment is live, and the test reads its header.
-        unsafe { self.raw.has_gp(bits) }
     }
 }
 
@@ -1294,6 +1333,7 @@ impl Exact for Symbol {}
 impl Exact for Pairlist {}
 impl Exact for Language {}
 impl Exact for Closure {}
+impl Exact for Bytecode {}
 impl Exact for Environment {}
 impl Exact for Promise {}
 impl Exact for Binding {}
@@ -1316,6 +1356,8 @@ kinds! {
     Pairlist = Pairlist, |_altrep| true;
     Language = Language, |_altrep| true;
     Closure = Closure, |_altrep| true;
+    /// A compiled body.
+    Bytecode = Bytecode, |_altrep| true;
     Environment = Environment, |_altrep| true;
     Promise = Promise, |_altrep| true;
     /// A variable's binding cell in an environment's frame.
