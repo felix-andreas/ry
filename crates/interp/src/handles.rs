@@ -4242,23 +4242,27 @@ pub unsafe fn tagged<'a, 's>(_context: &Cx<'s>, args: &'a [Arg]) -> &'a [Tagged<
 
 /// A slot frame's registers while a call binds its formals: the header register, one slot per
 /// name of the body's slot table, then the body's own registers. The call stores the formals'
-/// values in order and then closes the window, which leaves the other slots unbound, or abandons
-/// it, which gives back the references the stores counted and the registers.
+/// values in order and then closes the window, which leaves the other slots unbound. A window
+/// dropped unclosed gives back the references the stores counted and the registers.
+///
+/// The window borrows the context, so nothing allocates or runs R code while it is open: no
+/// code can release its registers under it or collect a value read for a slot.
 #[must_use]
-pub struct Window {
+pub struct Window<'c> {
     header: usize,
     /// The first slot. The register file's buffer never reallocates, so the address stays valid
     /// while the window's registers are reserved.
     slots: *mut Sexp,
     slot_count: usize,
     written: usize,
+    context: PhantomData<&'c ()>,
 }
 
-impl Window {
+impl<'c> Window<'c> {
     /// A window of `slots` slots and `registers` registers at the top of the register file.
     /// Growing the file allocates no object, so nothing read through the context is lost.
     #[inline]
-    pub fn open(_context: &Cx<'_>, slots: usize, registers: usize) -> R<Window> {
+    pub fn open(_context: &'c Cx<'_>, slots: usize, registers: usize) -> R<Window<'c>> {
         let header = bytecode::register_top();
         bytecode::reserve_registers(header + 1 + slots + registers)?;
         Ok(Window {
@@ -4266,6 +4270,7 @@ impl Window {
             slots: bytecode::register_address(header + 1),
             slot_count: slots,
             written: 0,
+            context: PhantomData,
         })
     }
 
@@ -4296,22 +4301,25 @@ impl Window {
     /// Leaves the slots no value was stored in unbound and returns the header register.
     #[inline]
     pub fn close(self) -> usize {
+        let window = std::mem::ManuallyDrop::new(self);
         // SAFETY: the slots past those written are reserved registers of the window.
         let rest = unsafe {
             std::slice::from_raw_parts_mut(
-                self.slots.add(self.written),
-                self.slot_count - self.written,
+                window.slots.add(window.written),
+                window.slot_count - window.written,
             )
         };
         rest.fill(values::unbound());
-        self.header
+        window.header
     }
+}
 
-    /// Gives back the references the stores counted, and the registers. The values are the
-    /// caller's arguments and defaults, which the call goes on to bind elsewhere, so none is
-    /// released as a slot frame releases its slots, which would empty a promise.
+impl Drop for Window<'_> {
+    /// The values are the caller's arguments and defaults, which the call goes on to bind
+    /// elsewhere, so none is released as a slot frame releases its slots, which would empty a
+    /// promise.
     #[cold]
-    pub fn abandon(self) {
+    fn drop(&mut self) {
         for index in 0..self.written {
             // SAFETY: each store counted a reference to the value in its slot, which this
             // gives back.
@@ -4360,7 +4368,6 @@ pub fn set_body_constant(
 /// The argument list of an "unused argument" error, each argument deparsed and named as it
 /// was passed, a promise as its code (`deparse::unused_arguments`).
 pub fn unused_arguments(context: &mut Cx<'_>, arguments: &[(Option<&str>, Local<'_>)]) -> String {
-    // A promise reports the code it was passed as.
     let arguments: SmallVec<[(Option<&str>, Sexp); 4]> = arguments
         .iter()
         .map(|&(name, value)| {

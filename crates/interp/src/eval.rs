@@ -2890,19 +2890,32 @@ fn bind_formals<'s>(
     };
     let slot_count = names.len();
     let _activity = activity::enter(Activity::CallSetup, 0);
+    let missing_value = handles::missing_argument();
     // One walk settles what binding by position needs: every formal has the slot the body's
     // code reads it from, none is `...`, and there is a formal for each argument. A closure
     // whose formals were replaced keeps the body's code, whose table names the formals it was
-    // compiled with.
+    // compiled with. The same walk finds the formals a positional call leaves out whose default
+    // is code.
     let dots = handles::symbol(|symbols| symbols.dots);
+    let positional = |index: usize| args.get(index).map_or(missing_value, |arg| arg.value);
     let mut formal_count = 0;
     let mut by_position = true;
+    let mut code_defaults = 0u64;
     let mut formal = closure.formals();
-    while let Some((_, name, rest)) = handles::cell_fields(formal) {
-        if formal_count >= slot_count || !names.get(formal_count).is(name) {
+    while let Some((default, name, rest)) = handles::cell_fields(formal) {
+        if formal_count >= slot_count
+            || formal_count >= bytecode::MAX_SLOT_FORMALS
+            || !names.get(formal_count).is(name)
+        {
             return Ok(None);
         }
         by_position &= !name.is(dots);
+        if handles::is_missing_argument(positional(formal_count))
+            && !default.is(missing_value)
+            && !is_literal(default)
+        {
+            code_defaults |= 1 << formal_count;
+        }
         formal_count += 1;
         formal = rest;
     }
@@ -2913,30 +2926,37 @@ fn bind_formals<'s>(
         None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        Some(match_args_cached(context, function, args, call)?)
+        let actuals = match_args_cached(context, function, args, call)?;
+        code_defaults = 0;
+        let mut formal = function.read(context).formals();
+        for index in 0..formal_count {
+            let Some((default, _, rest)) = handles::cell_fields(formal) else {
+                break;
+            };
+            let actual = actuals.get(index).copied().unwrap_or(missing_value);
+            if handles::is_missing_argument(actual)
+                && !default.is(missing_value)
+                && !is_literal(default)
+            {
+                code_defaults |= 1 << index;
+            }
+            formal = rest;
+        }
+        Some(actuals)
     };
-    let missing_value = handles::missing_argument();
     let actual = |index: usize| match &actuals {
         Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
-        None => args.get(index).map_or(missing_value, |arg| arg.value),
+        None => positional(index),
     };
     // A left-out formal whose default is code needs the defaults compiled to run on the slots,
     // which allocates, so that happens before the window opens.
-    let mut formal = function.read(context).formals();
-    let needs_defaults = (0..formal_count).any(|index| {
-        let Some((default, _, rest)) = handles::cell_fields(formal) else {
-            return false;
-        };
-        formal = rest;
-        handles::is_missing_argument(actual(index))
-            && !default.is(missing_value)
-            && !is_literal(default)
-    });
-    if needs_defaults {
-        handles::build_slot_defaults(context, function)?;
+    if code_defaults != 0 {
+        keep_slot_defaults(context, function)?;
     }
     let closure = function.read(context);
-    let defaults = slot_defaults(context, closure, needs_defaults);
+    let defaults = (code_defaults != 0)
+        .then(|| slot_defaults(context, closure))
+        .flatten();
     let mut window = handles::Window::open(context, slot_count, registers)?;
     let (mut missing, mut promised) = (0u64, 0u64);
     let mut formal = closure.formals();
@@ -2944,11 +2964,10 @@ fn bind_formals<'s>(
         let Some((default, _, rest)) = handles::cell_fields(formal) else {
             break;
         };
-        let actual = actual(index).read(context);
-        let value = if actual.is(missing_value) && !default.is(missing_value) {
-            if !is_literal(default) {
+        let value = actual(index).read(context);
+        let value = if value.is(missing_value) && !default.is(missing_value) {
+            if code_defaults & (1 << index) != 0 {
                 if !default_fits(defaults, index) {
-                    window.abandon();
                     return Ok(None);
                 }
                 promised |= 1 << index;
@@ -2956,7 +2975,7 @@ fn bind_formals<'s>(
             missing |= 1 << index;
             default
         } else {
-            actual
+            value
         };
         window.push(value);
         formal = rest;
@@ -2971,14 +2990,14 @@ fn bind_formals<'s>(
 /// The slot names of `function`'s compiled body, the formals first, and how many registers its
 /// code uses after them, when the body is compiled with a slot table.
 fn slot_layout<'a>(
-    context: &'a Cx<'_>,
+    _context: &'a Cx<'_>,
     function: Gc<'a, Closure>,
 ) -> Option<(Gc<'a, List>, usize)> {
-    let table = handles::slot_table(context, function)?;
+    let code = function.body().downcast::<Bytecode>()?;
+    let table = handles::constant(code, bytecode::SLOTS)?.standard::<List>()?;
     let names = (table.len() > 1)
         .then(|| table.get(1))?
         .standard::<List>()?;
-    let code = function.body().downcast::<Bytecode>()?;
     let registers = handles::constant(code, bytecode::REGISTERS)?.standard::<Integer>()?;
     let registers = usize::try_from(*registers.as_slice().first()?).ok()?;
     Some((names, registers))
@@ -2989,17 +3008,19 @@ fn is_literal(default: Gc<'_>) -> bool {
     default.r_type().is_atomic() || default.r_type() == SexpType::Nil
 }
 
-/// The defaults of `function`'s formals that run on its slot frame, as
-/// [`handles::build_slot_defaults`] keeps them in its slot table, when `built` says they were
-/// built for this call and they are for its formals.
-fn slot_defaults<'a>(
-    context: &'a Cx<'_>,
-    function: Gc<'a, Closure>,
-    built: bool,
-) -> Option<Gc<'a, List>> {
-    if !built {
-        return None;
+/// Builds and keeps the defaults of `function`'s formals that run on its slot frame unless its
+/// slot table holds them already ([`handles::build_slot_defaults`]).
+fn keep_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -> R<()> {
+    if slot_defaults(context, function.read(context)).is_none() {
+        handles::build_slot_defaults(context, function)?;
     }
+    Ok(())
+}
+
+/// The defaults of `function`'s formals that run on its slot frame, as
+/// [`handles::build_slot_defaults`] keeps them in its slot table, when they are kept for its
+/// formals.
+fn slot_defaults<'a>(context: &'a Cx<'_>, function: Gc<'a, Closure>) -> Option<Gc<'a, List>> {
     let table = handles::slot_table(context, function)?;
     let kept = (table.len() > 2).then(|| table.get(2))?;
     let (formals, _, defaults) = handles::cell_fields(kept)?;
@@ -3128,7 +3149,8 @@ fn bind_method_formals(
         let Some(held) = handles::slot(context, source, index) else {
             return Ok(None);
         };
-        if index >= slot_count || index >= 64 || !names.get(index).is(name) {
+        if index >= slot_count || index >= bytecode::MAX_SLOT_FORMALS || !names.get(index).is(name)
+        {
             return Ok(None);
         }
         let left_out = source_missing & (1 << index) != 0;
@@ -3149,23 +3171,23 @@ fn bind_method_formals(
         index += 1;
     }
     if needs_defaults {
-        handles::build_slot_defaults(context, method)?;
+        keep_slot_defaults(context, method)?;
     }
     let closure = method.read(context);
-    let defaults = slot_defaults(context, closure, needs_defaults);
+    let defaults = needs_defaults
+        .then(|| slot_defaults(context, closure))
+        .flatten();
     let mut window = handles::Window::open(context, slot_count, registers)?;
     let (mut missing, mut promised) = (0u64, 0u64);
     let mut formal = closure.formals();
     let mut index = 0;
     while let Some((default, _, rest)) = handles::cell_fields(formal) {
         let Some(held) = handles::slot(context, source, index) else {
-            window.abandon();
             return Ok(None);
         };
         let value = if takes_default & (1 << index) != 0 {
             if !is_literal(default) {
                 if !default_fits(defaults, index) {
-                    window.abandon();
                     return Ok(None);
                 }
                 promised |= 1 << index;
@@ -3207,48 +3229,41 @@ pub const PROMISED_DEFAULT: i32 = -5;
 /// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
 /// leaves out has a default whose promise would capture the frame.
 pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> {
-    // The caller holds the closure and the call while it plans.
+    // The caller holds the closure and the call while it plans, and the call holds its cells'
+    // tags and expressions.
     handles::with(|context| {
         let call = handles::held(context, call);
         let Some(function) = handles::held(context, function).downcast::<Closure>() else {
             return Ok(None);
         };
-        site_sources(context, function, call)
-    })
-}
-
-fn site_sources(
-    context: &mut Cx<'_>,
-    function: Local<'_, Closure>,
-    call: Local<'_>,
-) -> R<Option<CallPlan>> {
-    let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
-        return Ok(None);
-    };
-    let dots = handles::symbol(|symbols| symbols.dots);
-    let mut args: SmallVec<[Tagged<'_>; 8]> = SmallVec::new();
-    let mut forwards_dots = false;
-    let Some((_, _, mut cell)) = handles::cell_fields(call.read(context)) else {
-        return Ok(None);
-    };
-    while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
-        if let Some(symbol) = expression.downcast::<Symbol>() {
-            if symbol.is(dots) {
-                forwards_dots = true;
-            } else if dot_dot_position(symbol.name().bytes()).is_some() {
-                return Ok(None);
+        let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
+            return Ok(None);
+        };
+        let dots = handles::symbol(|symbols| symbols.dots);
+        let mut args: SmallVec<[Tagged<'_>; 8]> = SmallVec::new();
+        let mut forwards_dots = false;
+        let Some((_, _, mut cell)) = handles::cell_fields(call.read(context)) else {
+            return Ok(None);
+        };
+        while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
+            if let Some(symbol) = expression.downcast::<Symbol>() {
+                if symbol.is(dots) {
+                    forwards_dots = true;
+                } else if dot_dot_position(symbol.name().bytes()).is_some() {
+                    return Ok(None);
+                }
             }
+            args.push(Tagged {
+                tag: handles::held(context, tag.raw()),
+                value: handles::held(context, expression.raw()),
+            });
+            cell = rest;
         }
-        args.push(Tagged {
-            tag: context.root(tag),
-            value: context.root(expression),
-        });
-        cell = rest;
-    }
-    if forwards_dots {
-        return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
-    }
-    plan_sources(context, function, shape, dots_index, &args, call)
+        if forwards_dots {
+            return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
+        }
+        plan_sources(context, function, shape, dots_index, &args, call)
+    })
 }
 
 /// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the
@@ -3316,7 +3331,7 @@ fn plan_sources(
     let formal_count = shape.formals as usize;
     // A call whose arguments do not match plans nothing: the generic path reports the error
     // when the call runs.
-    let Ok(plan) = match_plan(context, Formals::Closure(function), args, call) else {
+    let Ok(Ok(plan)) = plan_or_unused(context, Formals::Closure(function), args, call) else {
         return Ok(None);
     };
     let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
@@ -3342,10 +3357,12 @@ fn plan_sources(
         source == -1 && !default.is(missing_value) && !is_literal(default)
     });
     if needs_defaults {
-        handles::build_slot_defaults(context, function)?;
+        keep_slot_defaults(context, function)?;
     }
     let closure = function.read(context);
-    let defaults = slot_defaults(context, closure, needs_defaults);
+    let defaults = needs_defaults
+        .then(|| slot_defaults(context, closure))
+        .flatten();
     let mut formal = closure.formals();
     for (index, source) in sources[..formal_count].iter_mut().enumerate() {
         let Some((default, _, rest)) = handles::cell_fields(formal) else {
@@ -5206,14 +5223,14 @@ fn cached_plan(
     )
 }
 
+fn is_named(context: &Cx<'_>, arg: &Tagged<'_>) -> bool {
+    argument_name(context, arg).is_some()
+}
+
 /// The name an argument is passed by, or `None` for a positional one.
 fn argument_name<'a, 's: 'a>(context: &'a Cx<'_>, arg: &Tagged<'s>) -> Option<&'a [u8]> {
     let name = arg.tag.read(context).downcast::<Symbol>()?.name().bytes();
     (!name.is_empty()).then_some(name)
-}
-
-fn is_named(context: &Cx<'_>, arg: &Tagged<'_>) -> bool {
-    argument_name(context, arg).is_some()
 }
 
 fn match_plan(
