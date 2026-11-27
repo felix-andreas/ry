@@ -772,7 +772,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
-            if names_ry_type(db, node) {
+            if names_ry_type(node) {
                 roles |= SiteRole::RyTypeAnnotation.bit();
             }
         }
@@ -794,16 +794,19 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
 
 /// Whether the inline annotation `node` names one of ry's own types: a ry number, `Str`, `Bool`,
 /// a standard library collection or `Result`, a `Record{...}` or `Tuple{...}`, or a tag. R's
-/// `list{...}` shares the record's syntax, so the head's name decides.
-fn names_ry_type(db: &dyn Db, node: NodeRef<'_>) -> bool {
-    node.any_element(|kind, token| match kind {
+/// `list{...}` shares the record's syntax and an R class may be called `Record`, so a record or
+/// tuple counts by its head. Names count by spelling alone, which keeps this a syntax fact that
+/// no attached package or stub edit invalidates.
+fn names_ry_type(node: NodeRef<'_>) -> bool {
+    node.descendants().any(|child| match child.kind() {
         SyntaxKind::TYPE_TAG => true,
-        SyntaxKind::IDENT => token.is_some_and(|token| {
-            let name = token.text();
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE => child
+            .first_token()
+            .is_some_and(|head| matches!(head.text(), "Record" | "Tuple")),
+        SyntaxKind::TYPE_REF | SyntaxKind::TYPE_APPLY => child.first_token().is_some_and(|head| {
+            let name = head.text();
             NativeScalar::from_name(name).is_some()
-                || matches!(name, "Record" | "Tuple")
-                || (matches!(name, "List" | "Dict" | "Set" | "Result")
-                    && stubs::is_ry_type(db, name))
+                || matches!(name, "List" | "Dict" | "Set" | "Result")
         }),
         _ => false,
     })
