@@ -1662,6 +1662,7 @@ impl<'s> Args<'_, 's> {
     }
 
     /// The environment the call was made from, which a slot frame makes on demand.
+    #[inline]
     pub fn environment(&self, context: &mut Cx<'s>) -> R<Local<'s, Environment>> {
         // SAFETY: making the frame's environment allocates, which `&mut Cx` permits, and the
         // result is live until the next allocation.
@@ -3270,29 +3271,39 @@ pub fn language<'s>(
     head: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s, Language>> {
-    let head = Tagged { tag: null(), value: head.value() };
-    let call = chain(context, SexpType::Language, &[head], rest)?;
+    let head = Tagged {
+        tag: null(),
+        value: head.value(),
+    };
+    let call = cells::<true>(context, &[head], rest)?;
     call.downcast::<Language>()
         .ok_or_else(|| error("internal error: a call cell is not a call"))
 }
 
 /// The pairlist that starts with `value`, tagged `tag`, and continues with the cells of `rest`.
-pub fn cons<'s>(
+pub fn cons<'s, 'a>(
     context: &mut Cx<'s>,
-    tag: Local<'_>,
-    value: Local<'_>,
+    tag: Local<'a>,
+    value: Local<'a>,
     rest: Local<'_>,
 ) -> R<Local<'s>> {
-    let item = Tagged { tag: tag.value(), value: value.value() };
-    chain(context, SexpType::Pairlist, &[item], rest)
+    let item = Tagged {
+        tag: tag.value(),
+        value: value.value(),
+    };
+    cells::<false>(context, &[item], rest)
 }
 
-/// The cells of `items` in order, continued by the cells of `rest`: a call when `kind` is
-/// [`SexpType::Language`]. The cells are built back to front, so each is complete when it
-/// allocates and none is written through a barrier afterwards.
-pub fn chain<'s>(
+/// The pairlist of `items` in order, continued by the cells of `rest`.
+pub fn chain<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>], rest: Local<'_>) -> R<Local<'s>> {
+    cells::<false>(context, items, rest)
+}
+
+/// The cells of `items` before `rest`, the first one a call cell under `CALL`. They are built
+/// back to front, so each is complete when it allocates and none is written through a barrier
+/// afterwards. The cell types are constants, so each allocation's size is too.
+fn cells<'s, const CALL: bool>(
     context: &mut Cx<'s>,
-    kind: SexpType,
     items: &[Tagged<'_>],
     rest: Local<'_>,
 ) -> R<Local<'s>> {
@@ -3301,14 +3312,18 @@ pub fn chain<'s>(
     // its arguments, so the cells built so far survive the next one's allocation.
     unsafe {
         let mut list = rest.raw();
-        for (position, item) in items.iter().enumerate().rev() {
-            let cell_kind = if position == 0 {
-                kind
-            } else {
-                SexpType::Pairlist
-            };
-            list = heap.alloc_triple(cell_kind, item.value.raw(), list, item.tag.raw())?;
+        let Some((first, others)) = items.split_first() else {
+            return Ok(rooted(context, list));
+        };
+        for item in others.iter().rev() {
+            list = heap.alloc_triple(SexpType::Pairlist, item.value.raw(), list, item.tag.raw())?;
         }
+        let kind = if CALL {
+            SexpType::Language
+        } else {
+            SexpType::Pairlist
+        };
+        let list = heap.alloc_triple(kind, first.value.raw(), list, first.tag.raw())?;
         Ok(rooted(context, list))
     }
 }
@@ -3491,6 +3506,7 @@ pub fn evaluate_in_context<'s>(
 }
 
 /// The symbol of the replacement function for `name`, `name<-`.
+#[inline]
 pub fn replacement_symbol<'s>(
     context: &mut Cx<'s>,
     name: Local<'_, Symbol>,

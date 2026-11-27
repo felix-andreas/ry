@@ -7783,15 +7783,17 @@ pub fn complex_assign<'s>(
             "target of assignment expands to non-language object",
         ));
     };
-    let enclosure = enclosure_of(context, environment);
-    let lookup_environment = if superassign { enclosure } else { environment };
+    let lookup_environment = match superassign {
+        true => enclosure_of(context, environment),
+        false => environment,
+    };
     let mut base = handles::variable(context, inner, lookup_environment)?;
     if handles::is_missing_argument(base) {
         // GNU R reads the name in the frame when the frame binds it and in the enclosure
         // otherwise, and the error names the call of the environment the read started in.
         let reader = if superassign || handles::frame_binding(context, environment, inner).is_none()
         {
-            enclosure
+            enclosure_of(context, environment)
         } else {
             environment
         };
@@ -7802,7 +7804,7 @@ pub fn complex_assign<'s>(
     if base.raw() == unbound() {
         // GNU R evaluates the name in the enclosure and names the call whose frame that is, or
         // no call when the enclosure is not a frame's.
-        let call = handles::owning_call(context, enclosure);
+        let call = handles::owning_call(context, enclosure_of(context, environment));
         let name = handles::text(inner.read(context).name());
         return Err(handles::error_in(
             call,
@@ -7975,11 +7977,11 @@ fn replace_levels<'s>(
                 value,
             };
             let items = [
-                untagged(assign),
                 untagged(getter.value()),
                 untagged(handles::permanent_symbol(|s| s.vtmp).value()),
             ];
-            handles::chain(context, SexpType::Language, &items, handles::null())?
+            let arguments = handles::chain(context, &items, handles::null())?;
+            handles::language(context, assign, arguments)?.value()
         };
         if primitive {
             // The level's target stands for the replacement call, which only an error that
@@ -8040,7 +8042,7 @@ fn replace_levels<'s>(
             value: value_promise.value(),
         };
         items.push(value_item);
-        let setter_call = handles::chain(context, SexpType::Pairlist, &items, handles::null())?;
+        let setter_call = handles::chain(context, &items, handles::null())?;
         let indices = &items[1..items.len() - 1];
         // The arguments after `*tmp*` are the call's own cells.
         let tail = handles::cell_fields(setter_call.read(context))
@@ -8057,7 +8059,7 @@ fn replace_levels<'s>(
                     })
                     .collect();
                 arguments.push(value_item);
-                handles::chain(context, SexpType::Pairlist, &arguments, handles::null())?
+                handles::chain(context, &arguments, handles::null())?
             } else {
                 tail
             };
