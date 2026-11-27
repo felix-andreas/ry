@@ -181,3 +181,25 @@ file order.R
 run ry run order.R
 expect exit 1
 expect stderr "expected `I64`, found `Str`"
+
+# A file's own definition after its `source()` call beats the file it sources, as it runs later.
+file order/p1.R
+| g <- function(x: I64) -> I64 x
+file order/p.R
+| source("order/p1.R")
+| g <- function(x: I64) -> Str "s"
+file parent.R
+| source("order/p.R")
+| y: I64 <- g(1i64)
+run ry run parent.R
+expect exit 1
+expect stderr "expected `I64`, found `Str`"
+
+# `sys.source()` without kept source runs the text unelaborated, so strict code may not call
+# what it defines.
+file sys.R
+| sys.source("lib/util.R", envir = globalenv())
+| print(triple(2i64))
+run ry run sys.R
+expect exit 1
+expect stderr "triple"

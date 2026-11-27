@@ -19,7 +19,7 @@ use {
     semantics::{
         DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        file_source_calls, has_ry_syntax, is_ry_syntax, normalize_relative_path, session,
+        file_source_calls, has_ry_syntax, is_absolute_path, is_ry_syntax, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
@@ -780,10 +780,10 @@ fn direct_targets(
     let literals = on_analysis_stack(move || file_source_calls(&analysis, file).clone());
     let mut targets = Vec::new();
     for literal in literals {
-        let Some(relative) = normalize_relative_path(&literal) else {
+        if is_absolute_path(&literal) {
             continue;
-        };
-        let Ok(canonical) = fs::canonicalize(follow.root.join(relative)) else {
+        }
+        let Ok(canonical) = fs::canonicalize(follow.root.join(&literal)) else {
             continue;
         };
         if follow.stack.contains(&canonical) {

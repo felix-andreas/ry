@@ -1757,6 +1757,8 @@ pub struct SourcePaths {
 /// environment, in source order. A call inside a function counts too, because `source()`
 /// evaluates into the global environment unless told otherwise; a call told to evaluate
 /// elsewhere does not, because nothing it defines is visible from the global environment.
+/// `sys.source()` counts only with `keep.source = TRUE`, because without a source reference the
+/// runtime runs its text unelaborated, which the file's typed signatures do not describe.
 #[salsa::tracked(returns(ref))]
 pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     let mut paths = Vec::new();
@@ -1778,20 +1780,30 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
                 } if package == "base" => *name,
                 _ => continue,
             };
-            let formals = match callee.as_str() {
-                "source" => SOURCE_FORMALS,
-                "sys.source" => SYS_SOURCE_FORMALS,
+            let (formals, keep_source) = match callee.as_str() {
+                "source" => (SOURCE_FORMALS, None),
+                "sys.source" => (SYS_SOURCE_FORMALS, Some(SYS_SOURCE_KEEP_SOURCE)),
                 _ => continue,
             };
-            let [path, environment] =
-                match_file_and_environment(module, &module[arguments], formals);
-            let Some(path) = path else {
+            let values = match_arguments(module, &module[arguments], formals);
+            if let Some(keep_source) = keep_source {
+                let kept = values[keep_source].is_some_and(|value| {
+                    matches!(
+                        module.kind(value),
+                        ExpressionKind::Literal(hir::LiteralKind::Logical(true))
+                    ) || matches!(module.kind(value), ExpressionKind::NameRef(name) if name == "T")
+                });
+                if !kept {
+                    continue;
+                }
+            }
+            let Some(path) = values[0] else {
                 continue;
             };
             let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path) else {
                 continue;
             };
-            let global = match environment.map(|value| environment_kind(module, value)) {
+            let global = match values[1].map(|value| environment_kind(module, value)) {
                 None | Some(EnvironmentKind::Global) => true,
                 Some(EnvironmentKind::Caller) => {
                     let inside = in_function.get_or_insert_with(|| function_bodies(module));
@@ -1810,8 +1822,8 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     paths
 }
 
-/// The formals of `source()` and `sys.source()` up to the ones a call's `file` and environment
-/// argument match, in R's order, for R's partial matching of argument names.
+/// Every formal of `source()` and `sys.source()` in R's order, which partial matching of argument
+/// names needs: the file is the first, the environment the second.
 const SOURCE_FORMALS: &[&str] = &[
     "file",
     "local",
@@ -1839,14 +1851,15 @@ const SYS_SOURCE_FORMALS: &[&str] = &[
     "keep.parse.data",
     "toplevel.env",
 ];
+const SYS_SOURCE_KEEP_SOURCE: usize = 3;
 
-/// The values a call passes for the first two formals, the file and the environment, matched
-/// as R matches them: exact names, then unique prefixes, then position.
-fn match_file_and_environment(
+/// The value a call passes for each formal, matched as R matches them: exact names, then unique
+/// prefixes, then position.
+fn match_arguments(
     module: &hir::Module,
     arguments: &[hir::Argument],
     formals: &[&str],
-) -> [Option<hir::ExprId>; 2] {
+) -> Vec<Option<hir::ExprId>> {
     let mut matched: Vec<Option<usize>> = vec![None; arguments.len()];
     let mut taken = vec![false; formals.len()];
     for (argument, slot) in arguments.iter().zip(&mut matched) {
@@ -1881,21 +1894,20 @@ fn match_file_and_environment(
             *slot = free.next();
         }
     }
-    let value = |formal: usize| {
-        arguments
-            .iter()
-            .zip(&matched)
-            .find(|(_, slot)| **slot == Some(formal))
-            .and_then(|(argument, _)| argument.value)
-    };
-    [value(0), value(1)]
+    let mut values = vec![None; formals.len()];
+    for (argument, slot) in arguments.iter().zip(&matched) {
+        if let Some(formal) = *slot {
+            values[formal] = argument.value;
+        }
+    }
+    values
 }
 
 enum EnvironmentKind {
     /// An environment a read of the global one sees: `FALSE`, the global or the base one.
     Global,
-    /// The caller's own, as `TRUE`, `environment()` and `parent.frame()` name it: the global
-    /// environment at the top level, a function's frame inside one.
+    /// What `TRUE`, `environment()` and `parent.frame()` name: the global environment at the top
+    /// level, and inside a function its frame or its caller's, which the check does not know.
     Caller,
     Other,
 }
@@ -1986,9 +1998,11 @@ fn walk_sources(
     reversed: &mut Vec<SourceFile>,
 ) {
     for target in direct_sources(db, paths, file).into_iter().rev() {
+        // Pushing a file before what it sources lists, once reversed, each file after the files
+        // it sources, as they finish running, so its own later definitions win.
         if visited.insert(target) {
-            walk_sources(db, paths, target, visited, reversed);
             reversed.push(target);
+            walk_sources(db, paths, target, visited, reversed);
         }
     }
 }

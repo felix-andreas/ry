@@ -1750,14 +1750,17 @@ A file parsed on ry's runtime, by `source()`, `parse(file = )` or a parse whose 
 elaborated the same way, and the check prints its annotation warnings, once per session for the
 same file and text. The check of a script, of a console command and of a sourced file reads the
 files it `source()`s by a literal path, resolved against the working directory as R resolves it,
-so strict code may call what they define, and a later console command sees what the file defined
-when the command that sourced it ran. When a name is defined in several sourced files, the file
-that runs last defines it. The check does not follow an absolute or home path, such as
-`/lib.R` or `~/lib.R`, or a call that evaluates into another environment, such as
+so strict code may call what they define. It reads them when the code is checked, before it
+runs, so a later console command sees what the file defined then, and a script that writes a
+file before sourcing it is checked against the file's earlier text. When a name is defined in
+several sourced files, the file that finishes running last defines it, and a definition in the
+sourcing file itself takes precedence over a sourced one. The check does not follow an absolute
+or home path, such as `/lib.R` or `~/lib.R`, `sys.source()` without `keep.source = TRUE`, which
+runs the text unelaborated, or a call that evaluates into another environment, such as
 `source("lib.R", local = new.env())` or `source("lib.R", local = TRUE)` inside a function,
 because nothing it defines is visible globally. `ry check` and the editor do not know the
 working directory the code will run in, so they try the sourcing file's own directory first and
-then the project root. Strict mode
+then the project root, and follow no path that leaves the project. Strict mode
 applies to a sourced file only when the file turns it on itself
 (`# typing: strict`), because the project's strict mode belongs to the script that sources it. A
 file with no ry syntax and no `# typing:` directive is not analyzed and reads no `ry.toml`, and its
