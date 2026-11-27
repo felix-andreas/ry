@@ -93,6 +93,9 @@ pub enum NativeBlockerKind {
     RLiteral,
     /// Legitimate ry that sends the function to the interpreter until the typed core compiles it.
     Uncompiled(Uncompiled),
+    /// A default native code cannot compute at the call, which sends a call that leaves the
+    /// parameter out to the interpreter.
+    LazyDefault,
 }
 
 /// Why a callee counts as an R function.
@@ -281,6 +284,12 @@ impl NativeBlockerKind {
                 "this function runs in the interpreter, because {}",
                 construct.reason()
             ),
+            NativeBlockerKind::LazyDefault => String::from(
+                "a call that leaves out this parameter runs in the interpreter, because R \
+                 computes a default where the body first reads it, and native code computes one \
+                 at the call only when it is made of constants, operators, standard library \
+                 calls and names the body does not set. Compute the value in the body instead",
+            ),
         }
     }
 
@@ -288,7 +297,10 @@ impl NativeBlockerKind {
     /// an error. A construct the typed core does not compile yet is the compiler's gap, not the
     /// program's, so it is a warning that says where native code ends.
     pub fn is_error(&self) -> bool {
-        !matches!(self, NativeBlockerKind::Uncompiled(_))
+        !matches!(
+            self,
+            NativeBlockerKind::Uncompiled(_) | NativeBlockerKind::LazyDefault
+        )
     }
 
     pub fn code(&self) -> &'static str {
@@ -357,7 +369,8 @@ impl Uncompiled {
             ),
             Uncompiled::ArgumentCount(function) => format!(
                 "this call of `{function}` leaves out a parameter without a default, or passes an \
-                 argument that matches no parameter, which {YET}. Pass one argument per parameter"
+                 argument that matches no parameter, which {YET}. Pass each parameter without a \
+                 default, by position or by its name"
             ),
             Uncompiled::StdFunction(name) => format!(
                 "`{name}` {YET}. Write the step with a loop or another standard library \
@@ -1175,6 +1188,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             self.scope.push((parameter.name, slot));
         }
+        self.defaults(&module[parameters], body);
         if let Some(invisible) = self.invisible_tail(body) {
             self.uncompiled(invisible, Uncompiled::InvisibleResult);
             self.invisible = Some(invisible);
@@ -1188,6 +1202,72 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.local_function(local);
         }
         self.scope.clear();
+    }
+
+    /// Reports each default of `parameters` that native code cannot compute at the call: R
+    /// computes a default where the body first reads it, so a call that leaves out such a
+    /// parameter runs in the interpreter.
+    fn defaults(&mut self, parameters: &[Parameter], body: ExprId) {
+        for parameter in parameters {
+            if let Some(default) = parameter.default
+                && !self.computed_ahead(default, body)
+            {
+                self.block(default, NativeBlockerKind::LazyDefault);
+            }
+        }
+    }
+
+    /// Whether the default `default` of a function whose body is `body` has the same value and
+    /// effect computed at the call as where the body first reads it, which is how native code
+    /// takes a default (`computed_ahead` in `typed::lower`): it is made of constants, names the
+    /// body does not set and that hold no function, operators, ry literals and calls of the
+    /// standard library.
+    fn computed_ahead(&self, default: ExprId, body: ExprId) -> bool {
+        let module = self.judged.module;
+        let db = self.judged.db;
+        let ahead = |expression: ExprId| self.computed_ahead(expression, body);
+        match *module.kind(default) {
+            ExpressionKind::Literal(_) => true,
+            ExpressionKind::NameRef(name) => {
+                !assigns_name(module, body, name)
+                    && !self
+                        .ty(default)
+                        .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_)))
+            }
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
+                operand,
+            } => ahead(operand),
+            ExpressionKind::Binary {
+                operator,
+                lhs,
+                rhs,
+                ..
+            } => {
+                !matches!(
+                    operator,
+                    BinaryOperator::Special
+                        | BinaryOperator::Sequence
+                        | BinaryOperator::Pipe
+                        | BinaryOperator::Tilde
+                        | BinaryOperator::Help
+                ) && ahead(lhs)
+                    && ahead(rhs)
+            }
+            ExpressionKind::Paren(inner) => ahead(inner),
+            ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => {
+                module[items].iter().all(|&item| ahead(item))
+            }
+            ExpressionKind::Record(fields) => module[fields].iter().all(|field| ahead(field.value)),
+            ExpressionKind::Tag { payload, .. } => payload.is_none_or(ahead),
+            ExpressionKind::Call { callee, arguments } => {
+                matches!(self.callee(callee), Callee::Std(name) if COMPILED_STD.contains(&name.as_str()))
+                    && module[arguments]
+                        .iter()
+                        .all(|argument| argument.value.is_some_and(ahead))
+            }
+            _ => false,
+        }
     }
 
     /// Walks the body of a local function the first time something runs it.
@@ -2335,6 +2415,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             self.scope.push((parameter.name, Slot::Parameter(None)));
         }
+        self.defaults(&module[parameters], body);
         let control_depth = std::mem::replace(&mut self.control_depth, 0);
         let r_arguments = self.r_arguments.take();
         let hoist = self.hoist.take();
@@ -2479,6 +2560,15 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
             }
             Callee::FunctionParameter => {
+                if named {
+                    self.uncompiled(
+                        id,
+                        Uncompiled::Advised(
+                            "a call of a function parameter with named arguments",
+                            "Pass the arguments by position",
+                        ),
+                    );
+                }
                 for &(_, value) in arguments {
                     self.function_argument(value);
                 }
@@ -2858,7 +2948,6 @@ fn defers_arguments(name: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
-/// What a name of R, of a package or of ry's own library calls.
 /// Whether a call passing `arguments` matches them to `parameters` as R does (by exact name, then
 /// by a prefix that fits one parameter, then by position) and leaves out only parameters with a
 /// default, which is how native code calls a local function.
@@ -2909,6 +2998,7 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
         .all(|(index, parameter)| filled & bit(index) != 0 || parameter.default.is_some())
 }
 
+/// What a name of R, of a package or of ry's own library calls.
 fn library_callee(name: Symbol) -> Callee {
     let text = name.as_str();
     match text {

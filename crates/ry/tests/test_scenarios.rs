@@ -1135,8 +1135,12 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
 /// falling back fails the test, so the list only shrinks.
 const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 0] = [];
 
-/// How the typed core says that a function it calls is the one it could not compile.
-const CALLEE_REFUSED: &str = "a typed function it calls does not compile";
+/// How the typed core says that a function it calls is the one it could not compile, or that
+/// the call leaves out a parameter whose default the callee's finding is about.
+const CALLEE_REFUSED: [&str; 2] = [
+    "a typed function it calls does not compile",
+    "runs code other than operators and the standard library",
+];
 
 /// One strict typed program of the corpus `native_diagnostics_agree_with_the_typed_core` runs.
 struct NativeProgram {
@@ -1399,7 +1403,7 @@ fn native_diagnostics_agree_with_the_typed_core() {
                 .and_then(|(_, owner)| *owner)
                 .unwrap_or(function);
             // A function falls back with its callee, which is the one that has the finding.
-            let calls_blocked = reason.contains(CALLEE_REFUSED)
+            let calls_blocked = CALLEE_REFUSED.iter().any(|refused| reason.contains(refused))
                 && lines.iter().zip(&owners).any(|(line, owner)| {
                     *owner == Some(function)
                         && blocked.iter().any(|callee| {

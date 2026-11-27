@@ -290,7 +290,50 @@ cat(shifted(3), "\n")
 shifted: fn(x: F64) -> F64
 NULL
 107..112 error[type-mismatch] this call leaves out `b`, which the function requires
-107..115 warning[interpreted] this function runs in the interpreter, because this call of `minus` leaves out a parameter without a default, or passes an argument that matches no parameter, which is not compiled natively yet. Pass one argument per parameter
+107..115 warning[interpreted] this function runs in the interpreter, because this call of `minus` leaves out a parameter without a default, or passes an argument that matches no parameter, which is not compiled natively yet. Pass each parameter without a default, by position or by its name
+
+#---- default_that_the_body_changes
+#~~~~ script.R
+offset <- function(a: F64, b: F64 = a * 2.0) -> F64 {
+  a <- a + 1.0
+  a + b
+}
+cat(offset(1, 1), "\n")
+#++++
+== script.R
+offset: fn(a: F64, [b]: F64) -> F64
+NULL
+36..43 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and names the body does not set. Compute the value in the body instead
+
+#---- default_that_calls_r
+#~~~~ script.R
+noisy <- function(a: F64, b: F64 = { cat("default\n"); a }) -> F64 a + b
+cat(noisy(1, 2), "\n")
+#++++
+== script.R
+noisy: fn(a: F64, [b]: F64) -> F64
+NULL
+35..58 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and names the body does not set. Compute the value in the body instead
+
+#---- default_of_standard_library_calls
+#~~~~ script.R
+clamped <- function(x: F64, low: F64 = Num.min(x, 0.0), high: F64 = -low + 1.0) -> F64 Num.max(Num.min(x, high), low)
+cat(clamped(3), "\n")
+#++++
+== script.R
+clamped: fn(x: F64, [low]: F64, [high]: F64) -> F64
+NULL
+
+#---- function_parameter_called_with_named_arguments
+#~~~~ script.R
+# blocked: twice
+twice <- function(f: fn(v: F64) -> F64, x: F64) -> F64 f(v = f(x))
+cat(twice(function(v: F64) -> F64 v + 1, 1), "\n")
+#++++
+== script.R
+twice: fn(f: fn(v: F64) -> F64, x: F64) -> F64
+NULL
+72..83 warning[interpreted] this function runs in the interpreter, because a call of a function parameter with named arguments is not compiled natively yet. Pass the arguments by position
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
