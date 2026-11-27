@@ -848,6 +848,39 @@ gap: <T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>
 g: I64
 d: double
 
+#---- a_family_result_takes_r_outcome_where_only_r_values_fit
+tested <- function(x) if (x * 2) 1L else 2L
+negated <- function(x) !(x / 2)
+picked <- function(x) { z <- x * 2; z[1] }
+combined <- function(x) c(x * 2, 1)
+looped <- function(x) { for (i in x * 2) print(i); NULL }
+flags <- function(x) (x > 0) & TRUE
+kept <- function(x) { y <- x * 2; y }
+held <- function(x) list(value = x * 2)
+k <- kept(3i64)
+h <- held(3i64)
+#++++
+tested: <T: arithmetic> fn(x: T) -> integer
+negated: <T: arithmetic> fn(x: T) -> logical
+picked: <T: arithmetic> fn(x: T) -> double
+combined: <T: arithmetic> fn(x: T) -> double[]
+looped: <T: arithmetic> fn(x: T) -> NULL
+flags: <T> fn(x: T) -> logical
+kept: <T: arithmetic or number> fn(x: T) -> Promoted<T>
+held: <T: arithmetic or number> fn(x: T) -> list{value: Promoted<T>}
+k: I64
+h: list{value: I64}
+
+#---- a_comparison_over_a_nominal_number_is_bool
+type Count = I64
+pos <- function(a) a > 0
+n <- @Count(3i64)
+b <- pos(n)
+#++++
+pos: <T> fn(a: T) -> Compared<T>
+n: Count
+b: Bool
+
 #---- a_num_parameter_takes_both_families
 #: <T: num> fn(a: T, b: T) -> T
 add <- function(a, b) a + b

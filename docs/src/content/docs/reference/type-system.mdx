@@ -784,8 +784,7 @@ The last four join an R constraint and a ry one, and they are what
 | `Compared<T>` | `Bool` | `logical` |
 
 So `function(x) x * 2` is `<T: arithmetic or number> fn(x: T) -> Promoted<T>`: it gives an `I64`
-for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer` or a `Date`, as R
-does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
+for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer`, as R does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call, and the message names the
@@ -2793,10 +2792,14 @@ A whole literal is one with no fractional part, so `2.0` counts as whole and `2.
 class such as `Date` adds a number but not another value of its own, so two operands of one type
 take `num` under `+`. A difference `a - b` is the exception, because R subtracts two dates or two
 times: it asks only `arithmetic` on the R side, and the difference of two dates is a `difftime`,
-so its R result is `double`, the representation every arithmetic class shares. Where only an R
-value fits, such as an argument to an overloaded base function (`abs(x - y)`), a condition or an
-operand beside another open value, `Promoted<T>` is `double` and `Compared<T>` is `logical`. A value tested as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes `numeric`,
-because a condition reads R's truth of a number, which a ry number lacks.
+so its R result is `double`, the representation every arithmetic class shares.
+
+A family result keeps both outcomes while it is bound, returned, passed to a function, or used as
+another operand. Anywhere only an R value fits, such as a subscript (`(x * 2)[1]`), a `for`
+sequence, `c()`, an overloaded base function (`abs(x - y)`), or an operand beside another open
+value, `Promoted<T>` is `double`, `Compared<T>` is `logical`, and the operand takes its
+constraint's R half. A value tested as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes R's half
+the same way, because a condition reads R's truth of a number, which a ry number lacks.
 
 - `function(x) x + 1L` is `<T: arithmetic or number> fn(x: T) -> T`, and calling it with `"oops"`
   is a type error. Calling it with an `I64` is an `I64`.

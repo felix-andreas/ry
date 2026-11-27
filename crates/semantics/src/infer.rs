@@ -281,16 +281,22 @@ impl<'db> InferenceTable<'db> {
     pub fn family(&self, db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
         let operand = self.shallow_resolve(db, operand);
         let constraint = match operand.kind(db) {
-            TyKind::Var(var) => match self.entries[self.find(*var).0 as usize] {
-                Entry::Unbound { constraint, .. } => Some(constraint),
-                _ => None,
-            },
-            TyKind::Rigid(name) => Some(
-                self.rigid_constraints
-                    .get(name)
-                    .copied()
-                    .unwrap_or(Constraint::Unconstrained),
-            ),
+            TyKind::Var(_) | TyKind::Rigid(_) => Some(self.family_operand_constraint(db, operand)),
+            // A nominal or alias over a ry number (`type Count = I64`) computes as the number.
+            TyKind::Named(name, arguments) => {
+                let expanded = self.resolve(db, operand);
+                if expanded != operand {
+                    return self.family(db, result, expanded);
+                }
+                return match self.representation(db, *name, arguments) {
+                    Some(representation)
+                        if matches!(representation.kind(db), TyKind::Native(_)) =>
+                    {
+                        result.ry_outcome(db, operand)
+                    }
+                    _ => result.r_outcome(db),
+                };
+            }
             _ => None,
         };
         match constraint {

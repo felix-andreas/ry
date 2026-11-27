@@ -309,8 +309,8 @@ pub enum TyKind<'db> {
     Rigid(Name<'db>),
     /// The result of an operator whose operand is still open: `Promoted<T>` is `T` for a ry
     /// number and `double` for an R one, and `Compared<T>` is `Bool` for a ry value and
-    /// `logical` for an R one. The operand is always a type variable or parameter, because
-    /// `family_result` decides the outcome as soon as the operand is known.
+    /// `logical` for an R one. The operand is a type variable or parameter, or a union holding
+    /// one, because `family_result` decides the outcome as soon as the operand is known.
     Family(FamilyResult, Ty<'db>),
 }
 
@@ -361,13 +361,20 @@ impl FamilyResult {
 
 /// The result of `result` over `operand`, decided as far as the operand allows: a ry
 /// scalar gives the ry outcome, a known R type the R one, and an open operand keeps the
-/// family. Inference decides an open operand by its constraint (`Table::reduce_family`).
+/// family. Inference decides an open operand by its constraint (`InferenceTable::family`).
 pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
     match operand.kind(db) {
         TyKind::Native(_) => result.ry_outcome(db, operand),
         TyKind::Family(_, inner) => family_result(db, result, *inner),
-        TyKind::Var(_) | TyKind::Rigid(_) => Ty::new(db, TyKind::Family(result, operand)),
+        // A nominal type may stand for a ry number, which only the definitions in scope tell.
+        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Named(..) => {
+            Ty::new(db, TyKind::Family(result, operand))
+        }
         TyKind::Unknown | TyKind::Any => operand,
+        // R's arithmetic and comparisons keep a vector's shape.
+        TyKind::Vector(_) | TyKind::NamedVector(_) => {
+            Ty::new(db, TyKind::Vector(result.r_outcome(db)))
+        }
         TyKind::Union(members)
             if members
                 .iter()

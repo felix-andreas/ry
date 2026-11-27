@@ -4478,7 +4478,22 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.errors.push(TypeError { range, kind });
     }
 
+    /// The type of `id` where only R's values fit, so a family result (`Promoted<T>`) takes its
+    /// R outcome. Positions that keep a family for a ry number (operands, bindings, results,
+    /// items and arguments) call `infer_open` instead.
     fn infer(&mut self, id: ExprId) -> Ty<'db> {
+        let ty = self.infer_open(id);
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Family(..) | TyKind::Union(_) => {
+                let narrowed = self.r_side_of_family(self.blame_range(id), resolved);
+                if narrowed == resolved { ty } else { narrowed }
+            }
+            _ => ty,
+        }
+    }
+
+    fn infer_open(&mut self, id: ExprId) -> Ty<'db> {
         let module = self.module;
         let expression = id;
         let range = module.range(expression);
@@ -4590,7 +4605,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                             .literal_leaves(value, self.binds_ry_value())
                                             .is_some() =>
                                 {
-                                    self.infer(value);
+                                    self.infer_open(value);
                                     let native = self.binds_ry_value();
                                     // `infer` leaves these leaves as the guard saw them.
                                     let (constraint, leaves) =
@@ -4619,7 +4634,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     if self.expression_annotations.contains_key(id) =>
                                 {
                                     let fresh = self.literal_reads.insert(value);
-                                    let ty = self.infer(value);
+                                    let ty = self.infer_open(value);
                                     if fresh {
                                         self.literal_reads.remove(value);
                                     }
@@ -4636,7 +4651,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     ) =>
                                 {
                                     let fresh = self.literal_reads.insert(value);
-                                    let ty = self.infer(value);
+                                    let ty = self.infer_open(value);
                                     if fresh {
                                         self.literal_reads.remove(value);
                                     }
@@ -4652,14 +4667,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     && let Some(scalar) =
                                         literal_value_scalar(self.module, value) =>
                                 {
-                                    let ty = self.infer(value);
+                                    let ty = self.infer_open(value);
                                     let target = native_scalar(self.db, scalar);
                                     match self.adapt_literal(value, target) {
                                         LiteralFit::Fits => self.record(value, target),
                                         _ => ty,
                                     }
                                 }
-                                _ => self.infer(value),
+                                _ => self.infer_open(value),
                             },
                         };
                         if binds_name {
@@ -4950,7 +4965,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     // Inferred only now: a default may read its own and earlier parameters' slots.
                     if let Some(default) = parameter.default {
-                        let default_ty = self.infer(default);
+                        let default_ty = self.infer_open(default);
                         named[entry].default = Some(default_ty);
                         // A default naming a function ry cannot type (bit64's `timefun =
                         // repeat.time`, from a package without stubs) is what the body calls
@@ -5130,7 +5145,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let body = *body;
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
-                let value = self.infer(body);
+                let value = self.infer_open(body);
                 self.environment.rollback(mark);
                 self.reapply_enclosing_writes(pending_mark);
                 value
@@ -5145,11 +5160,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     {
                         self.discarded_if = Some(statement);
                     }
-                    last = self.infer(statement);
+                    last = self.infer_open(statement);
                 }
                 last
             }
-            ExpressionKind::Paren(inner) => self.infer(*inner),
+            ExpressionKind::Paren(inner) => self.infer_open(*inner),
             ExpressionKind::Break | ExpressionKind::Next => {
                 if let Some(mark) = self.loop_jumps.last().map(|jumps| jumps.mark) {
                     let state = self.environment.writes_since(mark);
@@ -7095,7 +7110,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.apply_refinements(&guard.true_edge);
         }
         let pending_before = self.pending_reads();
-        let then_ty = self.infer(then_branch);
+        let then_ty = self.infer_open(then_branch);
         let then_pending = self.pending_reads() != pending_before;
         let then_diverges = self.diverges(then_branch);
         let mut then_writes = self.environment.writes_since(mark);
@@ -7129,7 +7144,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let pending_before = self.pending_reads();
         let (else_ty, else_diverges) = match else_branch {
-            Some(else_branch) => (self.infer(else_branch), self.diverges(else_branch)),
+            Some(else_branch) => (self.infer_open(else_branch), self.diverges(else_branch)),
             None => (null(self.db), false),
         };
         let else_pending = self.pending_reads() != pending_before;
@@ -7299,7 +7314,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             if let Some(guard) = arm.guard {
                 self.expect_scalar_logical(guard, ConditionSite::Operand);
             }
-            let value = self.infer(arm.body);
+            let value = self.infer_open(arm.body);
             all_values.push((arm.body, value));
             if !self.diverges(arm.body) {
                 values.push((arm.body, value));
@@ -7859,7 +7874,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// `if (c) 0.1 else 3.0` or `1 + 2`, is a ry value like a lone literal item, taking the ry
     /// scalar its literals are written as.
     fn infer_list_item(&mut self, item: ExprId) -> Ty<'db> {
-        let ty = self.infer(item);
+        let ty = self.infer_open(item);
         let Some(scalar) = literal_value_scalar(self.module, item) else {
             return ty;
         };
@@ -8089,7 +8104,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let constraint = match module.kind(inner) {
                 ExpressionKind::Literal(LiteralKind::String(_)) => Constraint::StrLiteral,
                 ExpressionKind::Literal(LiteralKind::Logical(_)) => Constraint::BoolLiteral,
-                _ => return self.infer(value),
+                _ => return self.infer_open(value),
             };
             let ty = self.fresh_literal(constraint, native);
             self.record(inner, ty)
@@ -8197,7 +8212,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved = self.table.resolve(self.db, inferred);
         if self.refuse_hidden_representation(base, inferred) {
             for field in fields {
-                self.infer(field.value);
+                self.infer_open(field.value);
             }
             return unknown(self.db);
         }
@@ -8208,7 +8223,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Unknown | TyKind::Any | TyKind::Var(_) => None,
             _ => {
                 for field in fields {
-                    self.infer(field.value);
+                    self.infer_open(field.value);
                 }
                 self.errors.push(TypeError {
                     range: base_range,
@@ -8219,7 +8234,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         for field in fields {
             let value_range = self.blame_range(field.value);
-            let value = self.infer(field.value);
+            let value = self.infer_open(field.value);
             let Some(native) = &native else { continue };
             let name = field.name.as_str();
             match native
@@ -9409,7 +9424,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// A top-level `return` (an R runtime error) still checks its value but joins no frame.
     fn infer_return(&mut self, range: TextRange, arguments: &[Argument]) -> Ty<'db> {
         let value_ty = match arguments.first().and_then(|argument| argument.value) {
-            Some(value) => self.infer(value),
+            Some(value) => self.infer_open(value),
             None => null(self.db),
         };
         for argument in arguments.iter().skip(1) {
@@ -10352,7 +10367,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let literal_ty = self.literal_ty(literal);
                 self.record(operand, literal_ty)
             }
-            _ => self.infer(operand),
+            _ => self.infer_open(operand),
         };
         let resolved = self.structural(inferred);
         if let TyKind::Native(native) = resolved.kind(self.db) {
@@ -10503,7 +10518,7 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     fn infer_unary_not(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
-        let inferred = self.infer(operand);
+        let inferred = self.infer_truth(operand);
         let resolved = self.structural(inferred);
         // A DataFrame expression negates into a bigger expression, as `Ops.Expr` does at run time.
         if is_expr_type(self.db, resolved) {
@@ -10654,8 +10669,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // exponential.
                 self.literal_reads.insert(lhs);
                 self.literal_reads.insert(rhs);
-                let mut left = self.infer(lhs);
-                let mut right = self.infer(rhs);
+                let mut left = self.infer_open(lhs);
+                let mut right = self.infer_open(rhs);
                 self.literal_reads.remove(lhs);
                 self.literal_reads.remove(rhs);
                 // Beside a variable written with a literal, a number literal is as undecided as
@@ -11728,8 +11743,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         if in_project && !function.quoted.is_empty() {
             return None;
         }
-        let left = self.infer(lhs);
-        let right = self.infer(rhs);
+        let left = self.infer_open(lhs);
+        let right = self.infer_open(rhs);
         let arguments = [
             self.operand_argument(lhs, left),
             self.operand_argument(rhs, right),
@@ -12055,7 +12070,7 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     fn expect_scalar_logical(&mut self, condition: ExprId, site: ConditionSite) {
         let condition_range = self.blame_range(condition);
-        let inferred = self.infer(condition);
+        let inferred = self.infer_truth(condition);
         let resolved = self.structural(inferred);
         self.narrow_condition_number(condition_range, resolved);
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
@@ -12212,13 +12227,25 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// The type of a tested value. A comparison's result is a truth value on either side of the
+    /// divide (`Bool` or `logical`), so it stays open, while a number's truth exists only in R,
+    /// so an arithmetic result takes its R outcome.
+    fn infer_truth(&mut self, id: ExprId) -> Ty<'db> {
+        let ty = self.infer_open(id);
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Family(FamilyResult::Comparison, _) => ty,
+            TyKind::Family(..) | TyKind::Union(_) => {
+                let narrowed = self.r_side_of_family(self.blame_range(id), resolved);
+                if narrowed == resolved { ty } else { narrowed }
+            }
+            _ => ty,
+        }
+    }
+
     /// A condition reads a number's truth as R does, which a ry number lacks, so an open value
     /// that `num` admits takes R's numbers only once it is tested.
     fn narrow_condition_number(&mut self, range: TextRange, ty: Ty<'db>) {
-        if let TyKind::Family(FamilyResult::Arithmetic, _) = ty.kind(self.db) {
-            self.r_side_of_family(range, ty);
-            return;
-        }
         if let Some(constraint) = self.table.open_constraint(self.db, ty)
             && constraint.families().is_some()
         {
@@ -12241,7 +12268,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .any(|member| matches!(member.kind(self.db), TyKind::Family(..))) =>
             {
-                let members: Vec<Ty<'db>> = members.iter().copied().collect();
+                let members: Vec<Ty<'db>> = members.to_vec();
                 let members: Vec<Ty<'db>> = members
                     .into_iter()
                     .map(|member| self.r_side_of_family(range, member))
@@ -12268,7 +12295,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut right = self.table.shallow_resolve(self.db, rhs_ty);
         // A union holding a family result (`NULL | Promoted<T>`) computes as R's value.
         let (mut lhs_ty, mut rhs_ty) = (lhs_ty, rhs_ty);
-        for (side, given, own) in [(&mut left, &mut lhs_ty, lhs), (&mut right, &mut rhs_ty, rhs)] {
+        for (side, given, own) in [
+            (&mut left, &mut lhs_ty, lhs),
+            (&mut right, &mut rhs_ty, rhs),
+        ] {
             if let TyKind::Union(_) = side.kind(self.db) {
                 let narrowed = self.r_side_of_family(self.blame_range(own), *side);
                 if narrowed != *side {
@@ -13220,7 +13250,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // it is for a function literal passed to a call.
                 let hinted = declared && self.hint_from_declared_function(default, parameter_ty);
                 let errors_before = self.errors.len();
-                let default_ty = self.infer(default);
+                let default_ty = self.infer_open(default);
                 if hinted {
                     self.name_contextual_parameters(default, errors_before, LambdaContext::Default);
                 }
@@ -14153,7 +14183,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut superassigned = Vec::new();
         self.collect_superassigned(body, &mut superassigned);
         self.seed_superassigned_reads(&superassigned);
-        let mut trailing_ty = self.infer(body);
+        let mut trailing_ty = self.infer_open(body);
         let range = self.body_range;
         let before = self.late_triggers.len();
         self.late_triggers.retain(|read| !range.contains(*read));
@@ -14169,7 +14199,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.capture_repass_needed = false;
             self.superassign_seeds.clear();
             self.seed_superassigned_reads(&superassigned);
-            trailing_ty = self.infer(body);
+            trailing_ty = self.infer_open(body);
             self.late_triggers.retain(|read| !range.contains(*read));
         }
         // A write the body never reached leaves its seed open; it must not generalize.
@@ -17878,7 +17908,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let mut items = Vec::with_capacity(arguments.len());
             for argument in arguments {
                 if let Some(value) = argument.value {
-                    let inferred = self.infer(value);
+                    let inferred = self.infer_open(value);
                     items.push(self.table.resolve(self.db, inferred));
                 }
             }
@@ -17889,7 +17919,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         for argument in arguments {
             let ty = match argument.value {
                 Some(value) => {
-                    let inferred = self.infer(value);
+                    let inferred = self.infer_open(value);
                     self.table.resolve(self.db, inferred)
                 }
                 None => unknown(self.db),
@@ -17953,7 +17983,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             labels.clear();
             // The arm's narrowing is a refinement of the test, not a write the arm makes.
             let arm_mark = self.environment.mark();
-            let ty = self.infer(value);
+            let ty = self.infer_open(value);
             members.push(self.table.resolve(self.db, ty));
             if !self.diverges(value) {
                 branch_writes.push(self.environment.writes_since(arm_mark));
@@ -19014,7 +19044,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 Some(self.infer_splice(value, operand))
             } else {
                 argument.value.map(|value| {
-                    let ty = self.infer(value);
+                    let ty = self.infer_open(value);
                     match self.template_call == Some(range)
                         && matches!(
                             self.table.resolve(self.db, ty).kind(self.db),
@@ -19063,7 +19093,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if let Some(hint) = &hint {
                     self.parameter_hints.insert(value, hint.clone());
                 }
-                let ty = self.infer(value);
+                let ty = self.infer_open(value);
                 call_arguments[index].ty = Some(ty);
                 if passes >= ACCUMULATOR_PASS_CAP {
                     break;
