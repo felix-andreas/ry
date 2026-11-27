@@ -1383,7 +1383,7 @@ fn pending_of<'c>(context: &'c Cx<'_>, owner: usize) -> Gc<'c, Environment> {
 }
 
 /// Moves the variables in `slots` of the slot frame at `owner` into binding cells of its
-/// environment, each as [`bind_arguments`] and the assignments since would have bound it: a
+/// environment, each as [`bind_environment`] and the assignments since would have bound it: a
 /// formal with its missing flag, an argument reference as the promise it stands for
 /// ([`detach_reference`]), since a cell can be read after the call that made the reference
 /// returns. A slot that binds nothing is skipped. The slots give up their references and read
@@ -3818,11 +3818,22 @@ pub enum CallFrame {
 
 /// A slot frame at `header` whose left-out formals are `missing`, of which `promised` have a
 /// default that is code, not a literal ([`CallShape`]).
+///
+/// Only the binder makes one, so a slot frame's header always names registers it filled.
 #[derive(Clone, Copy)]
 pub struct SlotFrame {
-    pub header: u32,
-    pub missing: u64,
-    pub promised: u64,
+    header: u32,
+    missing: u64,
+    promised: u64,
+}
+
+impl SlotFrame {
+    /// The header register, the missing formals and the promised ones, for a raw entry that
+    /// pushes the frame itself ([`enter`]).
+    #[inline(always)]
+    pub fn parts(self) -> (u32, u64, u64) {
+        (self.header, self.missing, self.promised)
+    }
 }
 
 /// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
@@ -4597,15 +4608,16 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.pending.raw() != nil() && !activity::enabled() {
         return Ok(frame.pending.raw());
     }
-    reify_frame_environment(index, cause)
+    handles::in_caller_scope(|context| reify_frame_environment(context, index, cause))
 }
 
 /// The environment [`frame_env`] makes for the slot frame at `index`, out of line so that
-/// the fast reads of [`frame_env`] and [`frame_sys_parent`] inline into their callers.
+/// the fast reads of [`frame_env`] and [`frame_sys_parent`] inline into their callers. The
+/// frame holds it.
 #[cold]
 #[inline(never)]
-unsafe fn reify_frame_environment(index: usize, cause: Reify) -> R<Sexp> {
-    handles::in_caller_scope(|context| Ok(reified_environment(context, index, cause)?.raw()))
+fn reify_frame_environment(context: &mut Cx<'_>, index: usize, cause: Reify) -> R<Sexp> {
+    Ok(reified_environment(context, index, cause)?.raw())
 }
 
 /// [`frame_env`] for code on the handle types: `NULL` for a frame that has no environment of
@@ -4872,7 +4884,7 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if fields.pending.raw() != nil() && !activity::enabled() {
         return Ok(fields.pending.raw());
     }
-    reify_frame_environment(caller, cause)
+    handles::in_caller_scope(|context| reify_frame_environment(context, caller, cause))
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -5315,20 +5327,20 @@ unsafe fn run_frame_general(
 }
 
 /// A closure call on the general path ([`run_general`]).
-struct GeneralFrame<'a, 's> {
-    call: Local<'s>,
-    function: Local<'s, Closure>,
-    body: BodyFrame<'s>,
+pub struct GeneralFrame<'a, 's> {
+    pub call: Local<'s>,
+    pub function: Local<'s, Closure>,
+    pub body: BodyFrame<'s>,
     /// The environment the call was made from, or `NULL` when the caller is the frame below
     /// this one and has no environment yet.
-    sys_parent: Local<'s>,
-    args: &'a [Tagged<'s>],
-    method_vars: handles::MethodVariables<'a, 's>,
+    pub sys_parent: Local<'s>,
+    pub args: &'a [Tagged<'s>],
+    pub method_vars: handles::MethodVariables<'a, 's>,
 }
 
 /// Where the body of a call on the general path runs: [`CallFrame`] on the handle types.
 #[derive(Clone, Copy)]
-enum BodyFrame<'s> {
+pub enum BodyFrame<'s> {
     Environment(Local<'s, Environment>),
     Slots(SlotFrame),
 }
@@ -5355,16 +5367,12 @@ fn run_general<'s>(
         function,
         body,
         sys_parent,
-        args,
         method_vars,
+        ..
     } = frame;
-    let (environment, slots, missing, promised) = match body {
-        BodyFrame::Environment(environment) => (Some(environment), crate::NO_SLOTS, 0, 0),
-        BodyFrame::Slots(SlotFrame {
-            header,
-            missing,
-            promised,
-        }) => (None, header, missing, promised),
+    let (environment, slots, promised) = match body {
+        BodyFrame::Environment(environment) => (Some(environment), crate::NO_SLOTS, 0),
+        BodyFrame::Slots(slot_frame) => (None, slot_frame.header, slot_frame.promised),
     };
     let _window = SlotWindow(slots, interp().references_used);
     let _activity = activity::enter(Activity::CallSetup, 0);
@@ -5383,48 +5391,32 @@ fn run_general<'s>(
     if state.frames.len() as u32 >= state.max_depth {
         return Err(crate::unwind::expression_stack_overflow());
     }
-    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
-    let caller = if sys_parent.is(handles::null()) {
-        state.slot_owner
-    } else {
-        crate::NO_SLOTS
-    };
     if !state.object_systems {
-        let sys_parent = if caller != crate::NO_SLOTS {
+        // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+        let sys_parent = if sys_parent.is(handles::null()) {
             let site = Reify::Site(Site::ObjectSystemCheck);
-            context.root_answer(|context| frame_environment_of(context, caller as usize, site))?
+            let caller = state.slot_owner as usize;
+            context.root_answer(|context| frame_environment_of(context, caller, site))?
         } else {
             sys_parent
         };
         handles::refuse_object_system(context, call, function, sys_parent)?;
     }
-    let entry = handles::FrameEntry {
-        call,
-        function,
-        environment,
-        sys_parent,
-        args,
-        method_vars,
-        slots,
-        missing,
-        caller,
-    };
-    let (depth, sampled) = handles::push_frame(context, &entry);
+    let (pushed, sampled) = handles::push_frame(context, frame);
+    let depth = pushed.depth();
     if let Err(unwind) = sampled {
         pop_frame(context, depth, None);
         return Err(unwind);
     }
     let closure = function.read(context);
     if interp().debugger.is_some() && closure.has_flag(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
-        closure.set_flags(gp::CLOSURE_STEP, false);
+        closure.clear_step();
         crate::debugger::debugged_call(depth);
     }
     let signature = match (environment, signature) {
         // A slot frame's closure is never typed (`bind_slots`).
         (None, _) => promise_defaults(context, depth - 1, promised).map(|()| None),
-        (Some(environment), Signature::Unchecked) => {
-            handles::check_arguments(context, call, function, environment, depth)
-        }
+        (Some(_), Signature::Unchecked) => handles::check_arguments(context, call, &pushed),
         (Some(_), Signature::Checked(signature)) => Ok(signature),
     };
     // Ends the namespace load however the call exits, a panic included, so a load that never
@@ -5442,10 +5434,7 @@ fn run_general<'s>(
         NamespaceLoad
     });
     let (signature, result) = match signature {
-        Ok(signature) => (
-            signature,
-            handles::run_closure_body(context, function, environment, slots, depth),
-        ),
+        Ok(signature) => (signature, handles::run_closure_body(context, &pushed)),
         Err(unwind) => (None, Err(unwind)),
     };
     let loaded = namespace_load.is_some();

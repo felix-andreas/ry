@@ -4316,7 +4316,7 @@ pub fn replace_pooled_reference(
             promise: reference,
             target,
         };
-        // The pool grows only at its end: `index` is the count of references in use.
+        // The pool grows only at its end, so `index` is at most one past its last position.
         debug_assert!(index <= references.len());
         let Some(pooled) = references.get_mut(index) else {
             references.push(replacement);
@@ -5330,47 +5330,68 @@ unsafe fn long_replacement_call<'s>(
     }
 }
 
-/// What a closure call's frame records as [`push_frame`] pushes it.
-pub struct FrameEntry<'a, 's> {
-    pub call: Local<'s>,
-    pub function: Local<'s, Closure>,
-    /// The frame's environment, or `None` for a slot frame.
-    pub environment: Option<Local<'s, Environment>>,
-    /// The environment the call was made from, or `NULL` for a call from the slots of the
-    /// frame at `caller`.
-    pub sys_parent: Local<'s>,
-    pub args: &'a [Tagged<'s>],
-    pub method_vars: MethodVariables<'a, 's>,
-    /// The header register of a slot frame, or [`crate::NO_SLOTS`].
-    pub slots: u32,
-    /// The formals a slot frame's call left missing, one bit each.
-    pub missing: u64,
-    pub caller: u32,
+/// A frame [`push_frame`] pushed, which the calls that run in it take, so that a depth or a
+/// slot frame they read is one a push made.
+pub struct PushedFrame<'s> {
+    depth: usize,
+    slots: u32,
+    function: Local<'s, Closure>,
+    environment: Option<Local<'s, Environment>>,
 }
 
-/// Pushes the frame `entry` describes and returns its depth, with what the push owes a
-/// profile, which may fail; the frame is pushed all the same (`eval::push_frame`).
+impl PushedFrame<'_> {
+    /// The frame's depth: one more than its index in the frame stack.
+    #[inline(always)]
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+/// Pushes the frame of the call `frame` describes, with what the push owes a profile, which
+/// may fail; the frame is pushed all the same (`eval::push_frame`).
 #[inline(always)]
-pub fn push_frame(_context: &mut Cx<'_>, entry: &FrameEntry<'_, '_>) -> (usize, R<()>) {
-    let environment = entry.environment.map_or_else(values::nil, Local::raw);
+pub fn push_frame<'s>(
+    _context: &mut Cx<'s>,
+    frame: &crate::eval::GeneralFrame<'_, 's>,
+) -> (PushedFrame<'s>, R<()>) {
+    let (environment, slots, missing) = match frame.body {
+        crate::eval::BodyFrame::Environment(environment) => (Some(environment), crate::NO_SLOTS, 0),
+        crate::eval::BodyFrame::Slots(slot_frame) => {
+            let (header, missing, _) = slot_frame.parts();
+            (None, header, missing)
+        }
+    };
+    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+    let caller = if frame.sys_parent.is(null()) {
+        crate::interp().slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
     // SAFETY: the frame holds what it records from here on, and until then the caller's scope
     // does. A profile sample may run R code, which `&mut Cx` permits. `Tagged` has `Arg`'s
-    // layout.
-    unsafe {
-        let args = std::slice::from_raw_parts(entry.args.as_ptr().cast::<Arg>(), entry.args.len());
+    // layout, and a slot frame's header names the registers its binder filled.
+    let (depth, sampled) = unsafe {
+        let args = std::slice::from_raw_parts(frame.args.as_ptr().cast::<Arg>(), frame.args.len());
         crate::eval::push_frame(
-            entry.call.raw(),
-            entry.function.raw(),
-            environment,
-            entry.sys_parent.raw(),
+            frame.call.raw(),
+            frame.function.raw(),
+            environment.map_or_else(values::nil, Local::raw),
+            frame.sys_parent.raw(),
             args,
-            entry.method_vars.pairs,
-            entry.slots,
-            entry.missing,
-            entry.caller,
+            frame.method_vars.pairs,
+            slots,
+            missing,
+            caller,
             true,
         )
-    }
+    };
+    let pushed = PushedFrame {
+        depth,
+        slots,
+        function: frame.function,
+        environment,
+    };
+    (pushed, sampled)
 }
 
 /// Records the call `call` of the closure `function` for the boundary-call recorder while it
@@ -5419,40 +5440,44 @@ pub fn refuse_object_system(
     unsafe { crate::eval::refuse_object_system(call.raw(), function.raw(), sys_parent.raw()) }
 }
 
-/// The signature of the closure `function` once the arguments its frame `environment`, at
-/// `depth`, binds meet it, or `None` for an untyped closure (`annotations::enter`).
+/// The signature of the closure of `frame`, made by `call`, once the arguments its environment
+/// binds meet it, or `None` for an untyped closure or a slot frame (`annotations::enter`).
 #[inline]
 pub fn check_arguments<'s>(
     context: &mut Cx<'s>,
     call: Local<'_>,
-    function: Local<'_, Closure>,
-    environment: Local<'_, Environment>,
-    depth: usize,
+    frame: &PushedFrame<'_>,
 ) -> R<Option<Local<'s>>> {
+    let Some(environment) = frame.environment else {
+        return Ok(None);
+    };
     // SAFETY: everything is rooted, the checks may force promises, which `&mut Cx` permits,
     // and the signature is rooted before anything else runs.
     unsafe {
-        let signature =
-            crate::annotations::enter(call.raw(), function.raw(), environment.raw(), depth)?;
+        let signature = crate::annotations::enter(
+            call.raw(),
+            frame.function.raw(),
+            environment.raw(),
+            frame.depth,
+        )?;
         Ok(signature.map(|signature| rooted(context, signature)))
     }
 }
 
-/// Runs the body of `function` in its frame at `depth`, on the slot frame at `slots` or else
-/// in `environment` (`eval::run_closure_body`).
+/// Runs the body of the closure of `frame` in it, on its slot frame or else in its
+/// environment (`eval::run_closure_body`).
 #[inline(always)]
-pub fn run_closure_body<'s>(
-    _context: &mut Cx<'s>,
-    function: Local<'_, Closure>,
-    environment: Option<Local<'_, Environment>>,
-    slots: u32,
-    depth: usize,
-) -> R<Local<'s>> {
-    let environment = environment.map_or_else(values::nil, Local::raw);
+pub fn run_closure_body<'s>(_context: &mut Cx<'s>, frame: &PushedFrame<'_>) -> R<Local<'s>> {
+    let environment = frame.environment.map_or_else(values::nil, Local::raw);
     // SAFETY: the frame holds the function and its environment, the body runs any R code,
     // which `&mut Cx` permits, and its value is rooted in the context's scope.
     unsafe {
-        let value = crate::eval::run_closure_body(function.raw(), environment, slots, depth)?;
+        let value = crate::eval::run_closure_body(
+            frame.function.raw(),
+            environment,
+            frame.slots,
+            frame.depth,
+        )?;
         Ok(Local::adopt(value))
     }
 }

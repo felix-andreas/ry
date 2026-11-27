@@ -1367,7 +1367,7 @@ unsafe fn dispatch_argument(function: Sexp, args: &[Arg]) -> R<Sexp> {
 }
 
 /// `owned` says the promises in `args` were made for this call alone and are not read again,
-/// so the call releases them once it returns ([`eval::apply_closure_owning`]).
+/// so a builtin method releases them once it returns.
 unsafe fn apply_method(
     call: Sexp,
     method: Sexp,
@@ -1377,9 +1377,6 @@ unsafe fn apply_method(
     owned: bool,
 ) -> R<Sexp> {
     match method.kind() {
-        SexpType::Closure if owned => {
-            eval::apply_closure(call, method, args, sys_parent, Some(vars))
-        }
         SexpType::Closure => apply_closure(call, method, args, sys_parent, Some(vars)),
         SexpType::Builtin => {
             let definition = eval::builtin_def(method)?;

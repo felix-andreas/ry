@@ -16,7 +16,7 @@ use {
         Jump,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         conditions::{Handler, calling_established, make_condition, new_handler},
-        eval::{self, Entering, Reify, Site, SlotFrame},
+        eval::{self, Entering, Reify, Site},
         handles::{self, Held},
         interp,
         session::{FNV_OFFSET, stable_hash},
@@ -4232,14 +4232,10 @@ unsafe fn push_levels(
 /// [`try_catch_chain`] has checked that such a call gets a slot frame.
 unsafe fn push_frame(call: Sexp, function: Sexp, caller: usize, args: [Sexp; 4]) -> R<usize> {
     let args = args.map(|value| Arg { tag: nil(), value });
-    let Some(SlotFrame {
-        header,
-        missing,
-        promised,
-    }) = eval::bind_slots(call, function, &args)?
-    else {
+    let Some(frame) = eval::bind_slots(call, function, &args)? else {
         return Err(error("internal error: a frame of tryCatch got no slots"));
     };
+    let (header, missing, promised) = frame.parts();
     let state = interp();
     let sys_parent = state.frames[caller].env.raw();
     if sys_parent == nil() {

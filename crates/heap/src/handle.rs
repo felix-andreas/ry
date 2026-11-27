@@ -889,13 +889,12 @@ impl<'a> Gc<'a, Promise> {
 }
 
 impl<'a> Gc<'a, Closure> {
-    /// Sets or clears the interpreter's flags `bits` of the closure: its debugging state, which
-    /// only the interpreter reads.
+    /// Clears the debugger's single-step flag ([`gp::CLOSURE_STEP`]) of the closure.
     #[inline]
-    pub fn set_flags(self, bits: u16, on: bool) {
-        // SAFETY: the closure is live for `'a`, and the flags are bits of its header that no
-        // reader keeps across a change.
-        unsafe { self.raw.set_gp_bits(bits, on) }
+    pub fn clear_step(self) {
+        // SAFETY: the closure is live for `'a`, and the flag is a bit of its header that only
+        // the debugger reads, never across a change.
+        unsafe { self.raw.set_gp_bits(gp::CLOSURE_STEP, false) }
     }
 
     /// The formals: a pairlist of defaults, each tagged with its formal's name, or `NULL`.
