@@ -3876,7 +3876,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint:
                 constraint @ (Constraint::ArithmeticOrNumber
                 | Constraint::ArithmeticOrF64
-                | Constraint::NumericOrF64),
+                | Constraint::NumericOrF64
+                | Constraint::ComparableOrNumber
+                | Constraint::ComparableOrOrdered),
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
             let found = renderer.render(db, *found);
@@ -4894,6 +4896,16 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Int => "an `I64`",
         Constraint::Frac => "an `F64`",
         Constraint::Eq => "a value `==` can compare (anything but a function)",
+        Constraint::Comparable => {
+            "a comparable R value (a numeric, `character` or `logical` value, or a class)"
+        }
+        Constraint::Ordered => "an ordered ry value (`I64`, `F64` or `Str`)",
+        Constraint::ComparableOrNumber => {
+            "a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`)"
+        }
+        Constraint::ComparableOrOrdered => {
+            "a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`)"
+        }
         Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
         Constraint::StrLiteral => "a string",
         Constraint::BoolLiteral => "`TRUE` or `FALSE`",

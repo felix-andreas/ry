@@ -41,7 +41,7 @@ half: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 #---- comparison_leaves_the_operand_open
 positive <- function(x) x > 0L
 #++++
-positive: <T> fn(x: T) -> Compared<T>
+positive: <T: comparable or number> fn(x: T) -> Compared<T>
 
 #---- two_flexible_comparison_stays_unconstrained
 cmp <- function(a, b) a < b

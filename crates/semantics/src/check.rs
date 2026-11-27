@@ -1888,6 +1888,10 @@ fn erase_residual_vars_at<'db>(
             | Constraint::Int
             | Constraint::Frac
             | Constraint::Eq
+            | Constraint::Comparable
+            | Constraint::Ordered
+            | Constraint::ComparableOrNumber
+            | Constraint::ComparableOrOrdered
             | Constraint::Unconstrained => unknown(db),
         };
     }
@@ -2424,7 +2428,7 @@ pub const DEFAULT_SEARCH_PATH: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperandShape {
+pub(crate) enum OperandShape {
     Scalar,
     Vector,
 }
@@ -3580,9 +3584,9 @@ fn comparison_operand_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<Op
     }
 }
 
-/// A comparison coerces across atomic types, so an operand only needs to be atomic, and an
-/// open one (a variable, or a vector of one) constrains nothing.
-fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
+/// A comparison coerces across atomic types, so an operand only needs to be atomic. An open
+/// operand (a variable, or a vector of one) passes here, and `Checker::infer_compare` constrains it.
+pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
     match ty.kind(db) {
         TyKind::Var(_) | TyKind::Rigid(_) => Some(OperandShape::Scalar),
         TyKind::Scalar(atomic) => comparable_atomic(*atomic).then_some(OperandShape::Scalar),
@@ -11828,7 +11832,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         use BinaryOperator::*;
         match operator {
             Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
-                self.infer_compare(lhs, rhs, left, right)
+                self.infer_compare(operator, lhs, rhs, left, right)
             }
             // `/` and `^` always produce doubles.
             _ => self.infer_binary_numeric(range, operator, lhs, rhs, left, right),
@@ -12828,6 +12832,7 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     fn infer_compare(
         &mut self,
+        operator: BinaryOperator,
         lhs: ExprId,
         rhs: ExprId,
         lhs_ty: Ty<'db>,
@@ -12843,19 +12848,31 @@ impl<'db, 'a> Checker<'db, 'a> {
             return unknown(self.db);
         }
         // An open operand compared with a number literal, or with itself, gives `Bool` for a ry
-        // value and `logical` for an R one.
+        // value and `logical` for an R one. R compares any atomic value, while ry compares a
+        // number with a number literal, any value but a function with itself under `==`, and
+        // only numbers and strings in order.
         let open_operand = |ty: Ty<'db>| match ty.kind(self.db) {
             TyKind::Var(_) | TyKind::Rigid(_) => Some(ty),
             TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
             _ => None,
         };
+        let itself = if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+            Constraint::Eq
+        } else {
+            Constraint::ComparableOrOrdered
+        };
         let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
-            (Some(left), Some(right)) if left == right => Some(left),
-            (Some(left), None) if literal_operand(self.module, rhs).is_some() => Some(left),
-            (None, Some(right)) if literal_operand(self.module, lhs).is_some() => Some(right),
+            (Some(left), Some(right)) if left == right => Some((left, lhs_range, itself)),
+            (Some(left), None) if literal_operand(self.module, rhs).is_some() => {
+                Some((left, lhs_range, Constraint::ComparableOrNumber))
+            }
+            (None, Some(right)) if literal_operand(self.module, lhs).is_some() => {
+                Some((right, rhs_range, Constraint::ComparableOrNumber))
+            }
             _ => None,
         };
-        if let Some(operand) = compared {
+        if let Some((operand, range, constraint)) = compared {
+            self.constrain_operand(range, operand, constraint);
             return self
                 .table
                 .family(self.db, FamilyResult::Comparison, operand);

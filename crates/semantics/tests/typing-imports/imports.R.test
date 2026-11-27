@@ -842,7 +842,7 @@ mpfr: <T, U> fn([x]: T, [precBits]: U, ...: Any) -> Any
 mpfr.default: <T> fn(x: T, ...: Any) -> T
 mpfr_from_bigz: <T, U> fn(x: T, [precBits]: U, ...: Any) -> T
 mpfr_from_text: <T> fn(text: T, ...: Any) -> T
-mpfr.is.0: <T> fn(x: T) -> Compared<T>
+mpfr.is.0: <T: comparable or number> fn(x: T) -> Compared<T>
 298..302 warning[s3-method-signature] this method of `mpfr` takes `text` where the generic takes `x`, so a call that passes `x` by name fails for this class. Rename it to `x`
 
 #---- rlang_exprs_quotes_its_arguments

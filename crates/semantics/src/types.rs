@@ -392,6 +392,8 @@ pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db
                 FamilyResult::Comparison => result.ry_outcome(db, operand),
             }
         }
+        // `==` compares two ry records or lists as ry does.
+        _ if is_ry_value_type(db, operand) => result.ry_outcome(db, operand),
         _ => result.r_outcome(db),
     }
 }
@@ -813,6 +815,18 @@ pub enum Constraint {
     Frac,
     /// Every ry type but a function, the values `==` compares structurally.
     Eq,
+    /// An R value a comparison takes: an atomic value other than `complex` or `raw` in any
+    /// vector shape, a list (compared element by element) or a class, which R's `Ops` methods
+    /// compare.
+    Comparable,
+    /// A ry value with an order: `I64`, `F64` or `Str`.
+    Ordered,
+    /// What `comparable` admits and the ry numbers: what `x > 0` asks of `x`, because R compares
+    /// any atomic value with a number while ry compares only a number with one.
+    ComparableOrNumber,
+    /// What `comparable` admits and what `ordered` does: what `a < b` asks of two values of one
+    /// type.
+    ComparableOrOrdered,
     /// The type of a variable written with a whole-number literal (`total <- 0`), decided by its
     /// first use: a ry integer or fraction type, or R's `double` (`integer` for `0L`).
     WholeLiteral {
@@ -830,7 +844,7 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 12] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 16] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
@@ -843,6 +857,10 @@ impl Constraint {
         ("item", Constraint::ArrayItem),
         ("number", Constraint::Number),
         ("eq", Constraint::Eq),
+        ("comparable", Constraint::Comparable),
+        ("ordered", Constraint::Ordered),
+        ("comparable or number", Constraint::ComparableOrNumber),
+        ("comparable or ordered", Constraint::ComparableOrOrdered),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -868,6 +886,8 @@ impl Constraint {
             ArithmeticOrNumber => (Arithmetic, Number),
             ArithmeticOrF64 => (Arithmetic, Frac),
             NumericOrF64 => (Numeric, Frac),
+            ComparableOrNumber => (Comparable, Number),
+            ComparableOrOrdered => (Comparable, Ordered),
             _ => return None,
         })
     }
@@ -880,6 +900,8 @@ impl Constraint {
             (Some(Arithmetic), Some(Number)) => Some(ArithmeticOrNumber),
             (Some(Arithmetic), Some(Frac)) => Some(ArithmeticOrF64),
             (Some(Numeric), Some(Frac)) => Some(NumericOrF64),
+            (Some(Comparable), Some(Number)) => Some(ComparableOrNumber),
+            (Some(Comparable), Some(Ordered)) => Some(ComparableOrOrdered),
             (Some(r), _) => Some(r),
             (None, ry) => ry,
         }
@@ -907,13 +929,17 @@ impl Constraint {
                 };
                 return match single {
                     Unconstrained | Eq => Some(both),
-                    Number | Int | Frac | ArrayItem => ry.join(single),
+                    Number | Int | Frac | ArrayItem | Ordered => ry.join(single),
                     // Every type a number literal admits is a number, so the literal stays open,
                     // unless only fractions are wanted.
-                    WholeLiteral { .. } | FracLiteral if ry == Number => Some(single),
+                    WholeLiteral { .. } | FracLiteral if matches!(ry, Number | Ordered) => {
+                        Some(single)
+                    }
                     WholeLiteral { .. } | FracLiteral => Some(FracLiteral),
-                    // A value used both ways is an R number. `Key` has no exact meet (a number of
-                    // either family that is a key), so it takes the R side.
+                    // `Key` has no exact meet (a key of either family that the half admits), so it
+                    // takes the R side, where a key is an atomic scalar.
+                    Key => r.join(AtomicElement),
+                    // A value used both ways is an R number.
                     _ => r.join(single),
                 };
             }
@@ -946,6 +972,37 @@ impl Constraint {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,
             (Eq, c) | (c, Eq) => c,
+            // Every R type another R constraint admits is comparable, and every literal's R type
+            // is, so the literal stays open and keeps its default.
+            (
+                Comparable,
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+            )
+            | (
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+                Comparable,
+            ) => c,
+            // A key also admits ry values, which `comparable` does not.
+            (Comparable, Key) | (Key, Comparable) => AtomicElement,
+            (Comparable, _) | (_, Comparable) => return None,
+            (Ordered, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Ordered) => c,
+            (Ordered, ArrayItem | Key) | (ArrayItem | Key, Ordered) => Ordered,
+            (Ordered, WholeLiteral { .. }) | (WholeLiteral { .. }, Ordered) => Number,
+            (Ordered, FracLiteral) | (FracLiteral, Ordered) => Frac,
+            (Ordered, StrLiteral) | (StrLiteral, Ordered) => StrLiteral,
+            (Ordered, _) | (_, Ordered) => return None,
             // An R integer literal and an R double literal have different R types, so they never
             // become one literal: `1L` beside `2.5` would make a `double` that holds `1L`.
             (WholeLiteral { integer: left }, WholeLiteral { integer: right }) if left != right => {

@@ -284,6 +284,7 @@ countdown: <T: numeric> fn(n: T) -> integer
 loose <- function(n) if (n <= 0L) 0L else loose(n - 1L)
 #++++
 loose: <T> fn(n: T) -> integer
+200..201 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `T`. Declare `<T: comparable or number>`
 223..224 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 
 #---- an_atomic_bound_admits_a_vector_element_across_recursion
@@ -310,8 +311,8 @@ two <- function(x) x
 #++++
 one: <T> fn(x: T) -> T
 two: <T> fn(x: T) -> T
-7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
-59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, `eq`, `comparable`, `ordered`, `comparable or number`, or `comparable or ordered`
+59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, `eq`, `comparable`, `ordered`, `comparable or number`, or `comparable or ordered`
 
 #---- value_annotation_checks
 #: integer
@@ -458,7 +459,7 @@ value: integer
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, `eq`, `comparable`, `ordered`, `comparable or number`, or `comparable or ordered`
 
 #---- a_refused_higher_rank_block_carries_no_payload
 # The parser refuses the binder and reads the type as if it were absent, which

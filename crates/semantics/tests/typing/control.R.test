@@ -1367,8 +1367,8 @@ use <- function(limit) {
   out + 1L
 }
 #++++
-check_limit: <T> fn(x: T) -> integer | character
-use: <T> fn(limit: T) -> integer
+check_limit: <T: comparable or number> fn(x: T) -> integer | character
+use: <T: comparable or number> fn(limit: T) -> integer
 
 #==== unknown_branches
 #---- an_unknown_branch_makes_the_if_unknown
