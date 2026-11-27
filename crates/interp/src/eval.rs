@@ -4608,7 +4608,7 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.pending.raw() != nil() && !activity::enabled() {
         return Ok(frame.pending.raw());
     }
-    handles::in_caller_scope(|context| reify_frame_environment(context, index, cause))
+    reify_frame_environment(index, cause)
 }
 
 /// The environment [`frame_env`] makes for the slot frame at `index`, out of line so that
@@ -4616,8 +4616,8 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
 /// frame holds it.
 #[cold]
 #[inline(never)]
-fn reify_frame_environment(context: &mut Cx<'_>, index: usize, cause: Reify) -> R<Sexp> {
-    Ok(reified_environment(context, index, cause)?.raw())
+unsafe fn reify_frame_environment(index: usize, cause: Reify) -> R<Sexp> {
+    handles::in_caller_scope(|context| Ok(reified_environment(context, index, cause)?.raw()))
 }
 
 /// [`frame_env`] for code on the handle types: `NULL` for a frame that has no environment of
@@ -4884,7 +4884,7 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if fields.pending.raw() != nil() && !activity::enabled() {
         return Ok(fields.pending.raw());
     }
-    handles::in_caller_scope(|context| reify_frame_environment(context, caller, cause))
+    reify_frame_environment(caller, cause)
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -10067,11 +10067,4 @@ pub fn value_args(values: &[Sexp]) -> Args {
 
 pub unsafe fn alloc_list(count: usize) -> R<Sexp> {
     alloc(SexpType::List, count)
-}
-
-pub unsafe fn tagged(tag: &str, value: Sexp) -> R<Arg> {
-    Ok(Arg {
-        tag: values::install(tag)?,
-        value,
-    })
 }
