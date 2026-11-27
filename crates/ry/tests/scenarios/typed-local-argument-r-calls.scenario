@@ -1,8 +1,9 @@
 # R evaluates a local function's argument where the body first reads it, so an argument that
 # calls R prints in the same order whether typed code compiles or runs in the interpreter.
 # Native code computes such an argument at the call, so it compiles only when the body reads
-# that formal before anything else that could show (`k`, `w`); otherwise the function runs in
-# the interpreter and `RY_TYPED_LOG` says why.
+# that formal before anything else that could show or fail (`k`, `w`). Otherwise the function
+# runs in the interpreter, and `RY_TYPED_LOG` says why: `r` may return first, and `ov` may
+# overflow first.
 
 requires ry-runtime
 
@@ -28,7 +29,7 @@ file calls.R
 | }
 | print(k(2.0))
 | w <- function(x: F64) -> F64 {
-|   h <- function(a, b) { y <- b * 2.0; if (a > 0.0) y else -y }
+|   h <- function(a, b) { y <- b; if (a > 0.0) y * 2.0 else -y }
 |   h(Num.from_r(side(x)), x)
 | }
 | print(w(2.0))
@@ -37,18 +38,30 @@ file calls.R
 |   h(Num.from_r(side(x)), Num.from_r(side(x + 1.0)))
 | }
 | print(two(2.0))
+| r <- function(x: F64, c: Bool) -> F64 {
+|   h <- function(a) { if (c) return(0.0); a + 1.0 }
+|   h(Num.from_r(side(x)))
+| }
+| print(r(2.0, TRUE))
+| ov <- function(x: F64, n: I64) -> F64 {
+|   h <- function(a) { m <- n * n; a + Num.to_f64(m) }
+|   h(Num.from_r(side(x)))
+| }
+| print(tryCatch(ov(2.0, 3037000500), error = function(e) conditionMessage(e)))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry calls.R
 expect exit 0
-expect stdout "body\nside\n[1] 3\n[1] 5\nside\n[1] 3\nside\n[1] 4\nside\nside\n[1] 5\n"
+expect stdout "body\nside\n[1] 3\n[1] 5\nside\n[1] 3\nside\n[1] 4\nside\nside\n[1] 5\n[1] 0\n[1] \"integer overflow in `*`: the result does not fit I64\"\n"
 expect stderr "typed: `f` runs in the interpreter: no code for [Dbl]: an argument of a local function calls R, which R does where the function first reads the argument: compute the argument into a variable first"
 expect stderr "typed: `g` runs in the interpreter"
 expect stderr "typed: `two` runs in the interpreter"
+expect stderr "typed: `r` runs in the interpreter"
+expect stderr "typed: `ov` runs in the interpreter"
 expect stderr lacks "typed: `k` runs in the interpreter"
 expect stderr lacks "typed: `w` runs in the interpreter"
 
 env RY_JIT off
 run ry run --runtime ry calls.R
 expect exit 0
-expect stdout "body\nside\n[1] 3\n[1] 5\nside\n[1] 3\nside\n[1] 4\nside\nside\n[1] 5\n"
+expect stdout "body\nside\n[1] 3\n[1] 5\nside\n[1] 3\nside\n[1] 4\nside\nside\n[1] 5\n[1] 0\n[1] \"integer overflow in `*`: the result does not fit I64\"\n"

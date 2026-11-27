@@ -12021,9 +12021,9 @@ unsafe fn lazy_r_calls(
 }
 
 /// Whether evaluating `expression` reads `formal` before anything R could observe: `Some(true)`
-/// when the read comes first, `Some(false)` when something else may (a call other than an
-/// operator or a `Num` function, an assignment to the formal, or a read on some paths only),
-/// and `None` when it neither reads the formal nor does anything. A function `body` defines
+/// when the read comes first, `Some(false)` when something else may (any call, an operator or
+/// a `Num` function applied before the read, a `return`, an assignment to the formal, or a read
+/// on some paths only), and `None` when it neither reads the formal nor does anything. A function `body` defines
 /// for itself is a call.
 unsafe fn forced_first(expression: Sexp, formal: Sexp, body: Sexp) -> Option<bool> {
     match expression.kind() {
@@ -12046,10 +12046,15 @@ unsafe fn forced_first(expression: Sexp, formal: Sexp, body: Sexp) -> Option<boo
             .iter()
             .find_map(|&(_, item)| forced_first(item, formal, body))
     };
+    // An operator or a library call can fail (an `I64` overflow, a division by zero), and its
+    // error shows before the read unless one of its operands reads the formal first.
+    let applied = || in_order().or(Some(false));
     let name = rvalues::symbol_name(head);
     match &*name {
-        "{" | "(" | "return" | "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" | "==" | "!=" | "<"
-        | ">" | "<=" | ">=" | "!" | "&" | "|" => in_order(),
+        "{" | "(" => in_order(),
+        "return" => first(0).or(Some(false)),
+        "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" | "==" | "!=" | "<" | ">" | "<=" | ">="
+        | "!" | "&" | "|" => applied(),
         "&&" | "||" => first(0).or_else(|| first(1).map(|_| false)),
         "if" => first(0).or_else(|| match (first(1), first(2)) {
             (None, None) => None,
@@ -12062,7 +12067,7 @@ unsafe fn forced_first(expression: Sexp, formal: Sexp, body: Sexp) -> Option<boo
             }
             _ => Some(false),
         },
-        _ if name.starts_with("Num.") => in_order(),
+        _ if name.starts_with("Num.") => applied(),
         _ => Some(false),
     }
 }
