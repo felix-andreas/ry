@@ -2012,15 +2012,16 @@ pub fn detach_frame_references(context: &mut Cx<'_>, index: usize) -> R<()> {
     if !frame.has_slots() {
         return Ok(());
     }
-    let references: SmallVec<[Local<'_, Promise>; 8]> = frame
-        .arguments()
-        .filter_map(|argument| argument.downcast::<Promise>())
-        .filter(|promise| promise.has_flag(gp::ARGUMENT_REFERENCE))
-        .map(|reference| context.root(reference))
-        .collect();
-    for reference in references {
-        // Forwarding `...` passes one reference as several arguments, and the first detaches it.
-        if reference.read(context).has_flag(gp::ARGUMENT_REFERENCE) {
+    // Detaching changes each promise in place and leaves the argument stack as it is, so each
+    // argument is read afresh and only the one being detached is rooted. Forwarding `...`
+    // passes one reference as several arguments, and the first detaches it.
+    let mut position = 0;
+    while let Some(argument) = handles::live_frame(context, index).argument(position) {
+        position += 1;
+        if let Some(reference) = argument.downcast::<Promise>()
+            && reference.has_flag(gp::ARGUMENT_REFERENCE)
+        {
+            let reference = context.root(reference);
             detach(context, reference)?;
         }
     }
@@ -2816,8 +2817,11 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     let Some(formals) = formals else {
         return Ok(());
     };
-    if formals.iter().any(|formal| formal == "...") {
-        return Ok(());
+    // A loop, where `Iterator::any` shares one out-of-line copy with other callers.
+    for formal in formals {
+        if formal == "..." {
+            return Ok(());
+        }
     }
     for arg in args.iter().filter(|arg| arg.tag != nil()) {
         let name = values::symbol_name(arg.tag);
@@ -4343,9 +4347,8 @@ pub unsafe fn run_inlined(
         if frame.env.raw() != nil() || !frame.on_exit.is_empty() || frame.pending.raw() != nil() {
             finish_raw_frame(call, depth, None, result)
         } else {
-            result
+            pop_raw_frame(depth, result)
         };
-    let result = pop_raw_frame(depth, result);
     hooks.returned(&result);
     result
 }
@@ -4375,6 +4378,7 @@ pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Re
 }
 
 /// The environment that stands for the slot frame at `index`, which `cause` asked for.
+#[inline]
 fn reified_environment<'a>(
     context: &'a mut Cx<'_>,
     index: usize,
@@ -4611,7 +4615,8 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
         return Ok(frame.sys_parent.raw());
     }
-    handles::in_caller_scope(|context| Ok(caller_environment(context, index, cause)?.raw()))
+    let caller = frame.caller as usize;
+    handles::in_caller_scope(|context| Ok(frame_environment_of(context, caller, cause)?.raw()))
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -4986,7 +4991,6 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     }
     state.slot_owner = owner;
     let result = finish_raw_frame(call, depth, None, result);
-    let result = pop_raw_frame(depth, result);
     release_window(header);
     release_frame_references(references);
     result
@@ -5127,7 +5131,6 @@ unsafe fn run_frame_general(
         result => result,
     };
     let result = finish_raw_frame(call, depth, signature, result);
-    let result = pop_raw_frame(depth, result);
     hooks.returned(&result);
     result
 }
@@ -5209,7 +5212,9 @@ fn return_target<'a>(context: &'a Cx<'_>, depth: usize) -> Option<Gc<'a>> {
     frame.pending().map(|pending| pending.value())
 }
 
-/// [`finish_frame`] for raw callers, with the frame's `call` and `signature` held by the frame.
+/// [`finish_frame`] then [`pop_frame`] for raw callers, with the frame's `call` and
+/// `signature` held by the frame. One scope serves both, so the result crosses into handles
+/// and back once.
 unsafe fn finish_raw_frame(
     call: Sexp,
     depth: usize,
@@ -5220,7 +5225,11 @@ unsafe fn finish_raw_frame(
         let call = handles::held(context, call);
         let signature = signature.map(|signature| handles::held(context, signature));
         let result = result.map(|value| handles::adopt(context, value));
-        Ok(finish_frame(context, call, depth, signature, result)?.raw())
+        let result = finish_frame(context, call, depth, signature, result);
+        let context: &Cx<'_> = context;
+        let value = result.as_ref().ok().map(|value| value.read(context));
+        pop_frame(context, depth, value);
+        result.map(Local::raw)
     })
 }
 
@@ -5745,12 +5754,9 @@ fn run_on_exit<'s>(context: &mut Cx<'s>, depth: usize, result: R<Local<'s>>) -> 
         // The value is on its way to the caller and nothing counts it yet, so exit code that
         // modifies a variable holding it would write into the value the caller receives. GNU R
         // counts it for as long as the exit code runs.
-        let outcome = match returned {
-            Some(value) => handles::referenced_while(context, value, |context| {
-                exit_passes(context, depth, pass, result, &mut visible)
-            }),
-            None => exit_passes(context, depth, pass, result, &mut visible),
-        };
+        let outcome = handles::referenced_while(context, returned, |context| {
+            exit_passes(context, depth, pass, result, &mut visible)
+        });
         interp().returned_values.pop();
         outcome
     });
@@ -6928,7 +6934,7 @@ fn run_for<'s>(
     }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
-    handles::referenced_while(context, sequence, |context| {
+    handles::referenced_while(context, Some(sequence), |context| {
         for index in 0..count {
             // Each element is rooted when it is made, and the binding keeps it alive after
             // that, so releasing per iteration stops a long loop from holding every element it

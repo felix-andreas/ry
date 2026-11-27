@@ -3120,18 +3120,24 @@ pub fn compiled_loop<'s>(
     }
 }
 
-/// Counts `value` as referenced while `body` runs, so that a write to a variable bound to it
-/// copies it: the sequence of a `for` loop, whose elements still to come must not change.
+/// Counts `value`, when there is one, as referenced while `body` runs, so that a write to a
+/// variable bound to it copies it: the sequence of a `for` loop, whose elements still to come
+/// must not change.
+#[inline]
 pub fn referenced_while<'s, T>(
     context: &mut Cx<'s>,
-    value: Local<'_>,
+    value: Option<Local<'_>>,
     body: impl FnOnce(&mut Cx<'s>) -> R<T>,
 ) -> R<T> {
-    // SAFETY: the value is rooted, and the count is given back whatever the body does.
-    unsafe { value.raw().increment_refcount() };
+    if let Some(value) = value {
+        // SAFETY: the value is rooted, and the count is given back whatever the body does.
+        unsafe { value.raw().increment_refcount() };
+    }
     let result = body(context);
-    // SAFETY: as above.
-    unsafe { value.raw().decrement_refcount() };
+    if let Some(value) = value {
+        // SAFETY: as above.
+        unsafe { value.raw().decrement_refcount() };
+    }
     result
 }
 
@@ -3908,20 +3914,20 @@ impl<'c, 's> LiveFrame<'c, 's> {
         self.header() + 1 + slot
     }
 
-    /// The arguments the frame was called with, as `sys.call` matched them: the frame's entries
-    /// of the interpreter's argument stack.
-    pub fn arguments(self) -> impl Iterator<Item = Gc<'c>> {
+    /// Argument `position` of those the frame was called with, as `sys.call` matched them: the
+    /// frame's entries of the interpreter's argument stack. `None` past the last.
+    #[inline]
+    pub fn argument(self, position: usize) -> Option<Gc<'c>> {
         let state = crate::interp();
         let start = self.fields().args as usize;
         let end = state
             .frames
             .get(self.index + 1)
             .map_or(state.frame_args.len(), |next| next.args as usize);
+        let argument = state.frame_args.get(start..end)?.get(position)?;
         // SAFETY: the interpreter traces the argument stack, and the borrow of the context lets
-        // nothing pop it before the last value is used.
-        state.frame_args[start..end]
-            .iter()
-            .map(|argument| unsafe { Gc::adopt(argument.value) })
+        // nothing pop it before the value is used.
+        Some(unsafe { Gc::adopt(argument.value) })
     }
 
     /// The register below a slot frame's slots, which holds its environment once it has one.
@@ -4518,7 +4524,7 @@ pub fn force_holding<'s>(
     promise: Local<'s, Promise>,
     held: Local<'_>,
 ) -> R<Local<'s>> {
-    referenced_while(context, held, |context| {
+    referenced_while(context, Some(held), |context| {
         crate::eval::promise_value(context, promise)
     })
 }
