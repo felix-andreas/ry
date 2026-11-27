@@ -796,9 +796,11 @@ impl Constraint {
             (WholeLiteral { .. } | FracLiteral | ArrayItem | Key, Number)
             | (Number, WholeLiteral { .. } | FracLiteral | ArrayItem | Key) => Number,
             (FracLiteral, Int) | (Int, FracLiteral) | (Int, Frac) | (Frac, Int) => return None,
-            // Both members of a literal constraint are keys; any other R constraint makes it an
-            // R value. A text or logical literal is never a number, and the two never meet.
+            // Every literal is a key, so a key keeps the literal open; any other R constraint
+            // makes it an R value. A text or logical literal is never a number, and the two never meet.
             (StrLiteral, Key) | (Key, StrLiteral) => StrLiteral,
+            (literal @ (WholeLiteral { .. } | FracLiteral), Key)
+            | (Key, literal @ (WholeLiteral { .. } | FracLiteral)) => literal,
             (BoolLiteral, Key) | (Key, BoolLiteral) => BoolLiteral,
             (StrLiteral, AtomicElement) | (AtomicElement, StrLiteral) => AtomicElement,
             (BoolLiteral, c @ (AtomicElement | Numeric | ScalarNumeric))
