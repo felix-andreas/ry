@@ -95,10 +95,20 @@ unsourced, as in pkgload), and reloads only when you call it, as devtools' does.
   either runtime. When the check refuses one of them, the load raises
   `<package> was not loaded, because strict mode refused it` before anything runs, so the session
   keeps the code it had. A load that changes nothing skips the check.
-  The first check in a process shares [`ry check`'s record](/reference/cli#the-check-cache) in
-  `.ry_cache/`, so a load after `ry check`, the editor or an earlier load reuses the findings of
-  every file that has not changed and checks only the rest. The first reload builds an analysis
-  that the process keeps, and every reload after it redoes only what the edit affects.
+  On GNU R, the first check in a process shares
+  [`ry check`'s record](/reference/cli#the-check-cache) in `.ry_cache/`, so a load after
+  `ry check`, the editor or an earlier load reuses the findings of every file that has not
+  changed and checks only the rest. On ry's runtime the first check builds the analysis that
+  the load elaborates the package from (below). Either way the process keeps an analysis, and
+  every reload redoes only what the edit affects.
+- **A typed package runs as the checker elaborates it.** On ry's runtime, when a file is strict or
+  holds ry syntax or `#:` annotations, the load and every reload that reads an edited file first
+  analyze the package and run the [elaborated](/reference/type-system) text, so `3` in an
+  `-> I64` function is `3i64` and an empty `List<Str>` keeps its item type, as under `ry run`.
+  An edit of a `#:` annotation alone reloads the code it retypes. Type errors outside strict mode
+  do not stop the load, but when the analysis cannot run (a file cannot be read, say), ry prints
+  why and the load raises `<package> was not loaded, because ry could not elaborate its typed code`.
+  Untyped packages skip the analysis.
 
 ### S4 definitions
 

@@ -2014,15 +2014,17 @@ pub extern "C" fn ry_loader_set_verdict(verdict: crate::loader_backend::Verdict)
     crate::loader_backend::set_verdict(verdict);
 }
 
-/// Makes the package loader ask `check` before a load of a strict package runs anything (see
+/// Makes the package loader ask `check` before a load of a strict package runs anything, and
+/// `elaborate` for the text a load of a typed package runs (see
 /// `crate::loader_backend::set_check`). Every command that runs ry's runtime calls it once, before
 /// [`ry_run`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_loader_set_check(
     strict_config: crate::loader_backend::Check,
     check: crate::loader_backend::Check,
+    elaborate: crate::loader_backend::Elaborate,
 ) {
-    crate::loader_backend::set_check(strict_config, check);
+    crate::loader_backend::set_check(strict_config, check, elaborate);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

@@ -1,0 +1,55 @@
+# A package author writes typed ry in a package and loads it with `ry load`. The load runs the
+# package as the checker elaborates it, as `ry run` runs a script: a literal the checker types
+# `I64` is an `I64`, and an empty list keeps its item type. A reload in the same session
+# elaborates the edited file again, and a file that drops its types runs as plain R. An edit of a
+# `#:` annotation alone retypes the code, and a file with CRLF line endings elaborates too.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file R/shapes.R
+| wrap <- function() -> :Some(I64) | :None {
+|   :Some(3)
+| }
+| pair <- function() -> Record{w: I64, h: I64} {
+|   (w = 2, h = 3)
+| }
+| grow <- function() {
+|   ys: List<I64> <- []
+|   List.append(ys, 5)
+| }
+file reload.R
+| writeLines(c("count <- function() -> I64 {", "  40 + 2", "}"), "R/shapes.R")
+| load_all()
+| print(count())
+| writeLines("count <- function() 42", "R/shapes.R")
+| load_all()
+| print(count())
+| writeLines(c("#: fn() -> double", "three <- function() 3"), "R/shapes.R")
+| load_all()
+| print(three())
+| writeLines(c("#: fn() -> I64", "three <- function() 3"), "R/shapes.R")
+| load_all()
+| print(three())
+| writeLines(c("four <- function() -> I64 {", "  4", "}"), "R/shapes.R", sep = "\r\n")
+| load_all()
+| print(four())
+
+run ry load -e "print(wrap())" -e "print(pair())" -e "print(grow())"
+expect exit 0
+expect stdout ":Some(3i64)"
+expect stdout "(h = 3i64, w = 2i64)"
+expect stdout "[5i64]"
+
+run ry load -f reload.R
+expect exit 0
+expect stdout "42i64"
+expect stdout "[1] 42"
+expect stdout "[1] 3"
+expect stdout "3i64"
+expect stdout "4i64"

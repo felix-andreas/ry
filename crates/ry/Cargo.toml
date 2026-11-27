@@ -45,6 +45,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tree.workspace = true
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 crash = { path = "../crash" }
 format = { path = "../format" }

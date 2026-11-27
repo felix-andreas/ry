@@ -32,6 +32,7 @@ use {
         NodeOrToken, SyntaxKind, SyntaxNode, erase_inline_annotations, erased_lines_end,
         input_is_unfinished, is_inline_annotation,
     },
+    xxhash_rust::xxh3::xxh3_64,
 };
 
 /// Analysis state for one run or one console session. Each accepted command is a file of its
@@ -322,10 +323,15 @@ fn on_analysis_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 /// asked about `R/` alone, so its verdict is the one `ry check` reaches for those files, and
 /// the two share the check cache: a package that `ry check` or the editor last checked loads
 /// without a second analysis. A reload in the same process keeps the analysis it builds in
-/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated. A package that turns
-/// strict mode on nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips
-/// analysis entirely.
-pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
+/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated, and so does the first
+/// check when the runtime `elaborates` the package, because [`elaborate_loaded_package`] then
+/// reads the same analysis. A package that turns strict mode on nowhere, neither in `ry.toml`
+/// nor in a file's `# typing: strict`, skips analysis entirely.
+pub fn check_package(
+    root: &Path,
+    config: &Config,
+    elaborates: bool,
+) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
     // The directive is ASCII, so the bytes answer for a file in any encoding.
     let mentions_strict = |path: &Path| {
@@ -351,7 +357,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     // The first check in a process reads the shared record, which makes a cold load after
     // `ry check` or the editor cheap, but its database replays findings it never derived. A
     // reload builds a database kept for edits instead, so every reload after it is incremental.
-    let first = !checks.contains_key(&key);
+    let first = !elaborates && !checks.contains_key(&key);
     let previous = checks.remove(&key).flatten();
     let check = on_analysis_stack(|| {
         if first {
@@ -467,29 +473,10 @@ pub fn elaborate_package(
             if elaborations.is_empty() {
                 continue;
             }
-            let source = analysis.source(file);
-            let program = elaborate(source.as_bytes(), &elaborations);
-            // The rewrites are ASCII, between tokens or in place of whole ones, so the program
-            // is UTF-8, keeps every line where it was, and parses into as many functions with
-            // as many errors as the source. A rewrite that breaks one of those is a bug in ry,
-            // and installing its output would run code the checker never saw.
-            let shape = |text: &str| {
-                let parsed = syntax::parse(text);
-                let functions = parsed
-                    .syntax_node()
-                    .descendants()
-                    .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
-                    .count();
-                (text.lines().count(), parsed.errors().len(), functions)
-            };
-            let program = String::from_utf8(program)
-                .ok()
-                .filter(|program| shape(program) == shape(source))
-                .and_then(|program| encoding.encode(&program));
-            let Some(program) = program else {
+            let program = elaborated_program(&file.path, analysis.source(file), &elaborations)?;
+            let Some(program) = encoding.encode(&program) else {
                 crate::cli::error(&format!(
-                    "ry's rewrite of {} for its runtime does not read as the file does; this is \
-                     a bug in ry",
+                    "ry's rewrite of {} is not text in the package's encoding; this is a bug in ry",
                     file.path.display()
                 ));
                 return Err(CommandError);
@@ -498,6 +485,107 @@ pub fn elaborate_package(
         }
         Ok(rewritten)
     })
+}
+
+/// The text ry's runtime runs for each file of the package at `root` whose checked types change
+/// how it runs, as `ry load` takes it: the [`elaborate`]d source, by path relative to `root`
+/// with `/` between components, beside the [`xxh3_64`] of the source the checker read, so the
+/// loader takes it only for that text. The analysis is the strict check's, kept in
+/// [`PACKAGE_CHECKS`] for edits, so a reload re-derives only what the edit invalidated.
+pub fn elaborate_loaded_package(
+    root: &Path,
+    config: &Config,
+) -> Result<Vec<(String, u64, String)>, CommandError> {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut checks = PACKAGE_CHECKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let previous = checks.remove(&key).flatten();
+    let elaborated = on_analysis_stack(|| {
+        let check = check_package_code(previous, root, config)?;
+        let analysis = &check.analysis;
+        if analysis.failures > 0 {
+            return Err(CommandError);
+        }
+        let mut files = Vec::new();
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && file.document.is_none())
+        {
+            let elaborations = semantics::file_elaborations(&analysis.db, file.file);
+            if elaborations.is_empty() {
+                continue;
+            }
+            let source = analysis.source(file);
+            let program = elaborated_program(&file.path, source, &elaborations)?;
+            let Some(path) = package_path(root, &key, &file.path) else {
+                continue;
+            };
+            // The loader reads a file with its line endings made `\n`, so the hash and the
+            // text it takes are of that form.
+            let lines = |text: &str| text.replace("\r\n", "\n").replace('\r', "\n");
+            files.push((path, xxh3_64(lines(source).as_bytes()), lines(&program)));
+        }
+        Ok((check, files))
+    });
+    match elaborated {
+        Ok((check, files)) => {
+            checks.insert(key, Some(check));
+            Ok(files)
+        }
+        Err(error) => {
+            checks.insert(key, None);
+            Err(error)
+        }
+    }
+}
+
+/// [`elaborate`]s `source`, the text of the file at `path`. The rewrites are ASCII, between
+/// tokens or in place of whole ones, so the program is UTF-8, keeps every line where it was,
+/// and parses into as many functions with as many errors as the source. A rewrite that breaks
+/// one of those is a bug in ry, and running its output would run code the checker never saw,
+/// so it is reported and refused.
+fn elaborated_program(
+    path: &Path,
+    source: &str,
+    elaborations: &[Elaboration],
+) -> Result<String, CommandError> {
+    let program = elaborate(source.as_bytes(), elaborations);
+    let shape = |text: &str| {
+        let parsed = syntax::parse(text);
+        let functions = parsed
+            .syntax_node()
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
+            .count();
+        (text.lines().count(), parsed.errors().len(), functions)
+    };
+    String::from_utf8(program)
+        .ok()
+        .filter(|program| shape(program) == shape(source))
+        .ok_or_else(|| {
+            crate::cli::error(&format!(
+                "ry's rewrite of {} for its runtime does not read as the file does; this is a \
+                 bug in ry",
+                path.display()
+            ));
+            CommandError
+        })
+}
+
+/// `path` relative to the package root, which the analysis may name through `root` as given or
+/// through its canonical form, with `/` between components as the loader names a file.
+fn package_path(root: &Path, canonical: &Path, path: &Path) -> Option<String> {
+    let relative = path
+        .strip_prefix(root)
+        .or_else(|_| path.strip_prefix(canonical))
+        .ok()?;
+    let parts: Option<Vec<&str>> = relative
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect();
+    Some(parts?.join("/"))
 }
 
 /// `ry build --plain-r`: rewrites every R file in `copy`, a package's build copy, into plain R

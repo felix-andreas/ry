@@ -1297,7 +1297,7 @@ fn run_load(
                 .name("ry-strict-check".to_owned())
                 .spawn(move || {
                     lower_priority();
-                    preflight::check_package(&check_root, &config)
+                    preflight::check_package(&check_root, &config, true)
                 });
             match check {
                 Ok(check) => {
@@ -1324,7 +1324,7 @@ fn run_load(
             }
         }
         Runtime::GnuR => {
-            match preflight::check_package(&root, preflight.config()) {
+            match preflight::check_package(&root, preflight.config(), false) {
                 Ok(Verdict::Run) => {}
                 Ok(Verdict::Refuse) => return ExitCode::from(1),
                 Err(CommandError) => return ExitCode::from(2),
@@ -1404,11 +1404,13 @@ fn runtime_flags(config: &Config, user_profile: bool) -> repl::RuntimeFlags {
 }
 
 /// Makes ry's runtime run strict mode's check before every load of a strict package, as GNU
-/// R's loader in `ry R` does: `load_all()`, a console's reload, and a script's own loads.
+/// R's loader in `ry R` does, and run a typed package as the checker elaborates it:
+/// `load_all()`, a console's reload, and a script's own loads.
 fn checking_loads() -> Result<(), repl::ReplError> {
     repl::set_package_check_on_ry_runtime(
         load::strict_config_on_ry_runtime,
         load::strict_check_on_ry_runtime,
+        load::elaborate_on_ry_runtime,
     )
 }
 
