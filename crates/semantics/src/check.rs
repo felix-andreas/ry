@@ -22160,7 +22160,9 @@ impl<'db, 'a> Checker<'db, 'a> {
 
             open_positionals.is_empty()
                 && open_named.iter().all(|field| field.optional)
-                && self.table.compatible(self.db, actual_callback.ret, ret)
+                && self
+                    .table
+                    .return_compatible(self.db, actual_callback.ret, ret)
                 && actual_callback
                     .compared
                     .iter()
