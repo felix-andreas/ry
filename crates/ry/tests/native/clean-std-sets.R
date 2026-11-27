@@ -21,6 +21,7 @@ mapped <- function(xs: List<I64>) -> List<Str> Set.to_list(Set.map(Set.from_list
 joined <- function(xs: List<I64>) -> List<I64> Set.to_list(Set.join_map(Set.from_list(xs), \(x) Set.from_list([x, x + 10i64])))
 single <- function(x: Str) -> Bool Set.is_empty(Set.remove(Set.single(x), x))
 roomy <- function(xs: List<I64>) -> I64 Set.len(Set.release_excess_capacity(Set.reserve(Set.from_list(xs), 8i64)))
+sized <- function(xs: List<I64>) -> I64 Set.len(List.walk(xs, Set.with_capacity(4i64), \(set, x) Set.insert(set, x)))
 xs <- [1i64, 2i64, 3i64, 2i64, 1i64, 5i64]
 ys <- [3i64, 4i64, 5i64]
 names <- ["a", "b"]
@@ -35,3 +36,4 @@ print(mapped(xs))
 print(joined(xs))
 print(single("a"))
 print(roomy(xs))
+print(sized(xs))

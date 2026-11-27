@@ -593,6 +593,10 @@ pub enum Op {
     Construct(u32, SmallVec<[Local; 4]>),
     /// Field `index` of a box known to have this shape.
     Field(Local, u32, u32),
+    /// [`Op::Field`] of a counted pointer that no later read of the box sees: a uniquely held
+    /// box gives the field up, leaving its slot empty, so the result is unique too and an update
+    /// of it runs in place ([`crate::ownership`]).
+    Take(Local, u32, u32),
     /// The shape id of a box, as an integer.
     ShapeOf(Local),
     /// `Str.count_utf8_bytes`, as an `I64`.
@@ -701,6 +705,7 @@ impl Op {
             | Dup(a)
             | Drop(a)
             | Field(a, _, _)
+            | Take(a, _, _)
             | ShapeOf(a)
             | ByteCount(a)
             | ToUtf8(a)
@@ -830,6 +835,7 @@ impl Op {
             | ItemAt(..)
             | Construct(..)
             | Field(..)
+            | Take(..)
             | ShapeOf(_)
             | ByteCount(_)
             | Split(..)
