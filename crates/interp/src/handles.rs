@@ -5296,6 +5296,149 @@ unsafe fn long_replacement_call<'s>(
     }
 }
 
+/// What a closure call's frame records as [`push_frame`] pushes it.
+pub struct FrameEntry<'a, 's> {
+    pub call: Local<'s>,
+    pub function: Local<'s, Closure>,
+    /// The frame's environment, or `None` for a slot frame.
+    pub environment: Option<Local<'s, Environment>>,
+    /// The environment the call was made from, or `NULL` for a call from the slots of the
+    /// frame at `caller`.
+    pub sys_parent: Local<'s>,
+    pub args: &'a [Tagged<'s>],
+    pub method_vars: &'a [MethodVariable<'s>],
+    /// The header register of a slot frame, or [`crate::NO_SLOTS`].
+    pub slots: u32,
+    /// The formals a slot frame's call left missing, one bit each.
+    pub missing: u64,
+    pub caller: u32,
+}
+
+/// Pushes the frame `entry` describes and returns its depth, with what the push owes a
+/// profile, which may fail; the frame is pushed all the same (`eval::push_frame`).
+#[inline(always)]
+pub fn push_frame(_context: &mut Cx<'_>, entry: &FrameEntry<'_, '_>) -> (usize, R<()>) {
+    let environment = entry.environment.map_or_else(values::nil, Local::raw);
+    let method_vars = entry
+        .method_vars
+        .iter()
+        .map(|variable| (variable.symbol.raw(), variable.value.raw()));
+    // SAFETY: the frame holds what it records from here on, and until then the caller's scope
+    // does. A profile sample may run R code, which `&mut Cx` permits. `Tagged` has `Arg`'s
+    // layout.
+    unsafe {
+        let args = std::slice::from_raw_parts(entry.args.as_ptr().cast::<Arg>(), entry.args.len());
+        crate::eval::push_frame(
+            entry.call.raw(),
+            entry.function.raw(),
+            environment,
+            entry.sys_parent.raw(),
+            args,
+            method_vars,
+            entry.slots,
+            entry.missing,
+            entry.caller,
+            true,
+        )
+    }
+}
+
+/// Records the call `call` of the closure `function` for the boundary-call recorder while it
+/// records (`profile_summary::enter_closure`).
+#[inline(always)]
+pub fn record_closure_entry(
+    _context: &mut Cx<'_>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    sys_parent: Local<'_>,
+    method_vars: &[MethodVariable<'_>],
+    environment: Option<Local<'_, Environment>>,
+) -> crate::profile_summary::ClosureScope {
+    if heap::activity::hooks() & heap::activity::CAPTURE == 0 {
+        return crate::profile_summary::ClosureScope::default();
+    }
+    let method_vars: SmallVec<[(Sexp, Sexp); 4]> = method_vars
+        .iter()
+        .map(|variable| (variable.symbol.raw(), variable.value.raw()))
+        .collect();
+    let environment = environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: everything is rooted, and the recorder may run R code, which `&mut Cx` permits.
+    unsafe {
+        crate::profile_summary::enter_closure(
+            call.raw(),
+            function.raw(),
+            sys_parent.raw(),
+            &method_vars,
+            environment,
+        )
+    }
+}
+
+/// Hands the boundary-call recorder the outcome of the call [`record_closure_entry`] recorded.
+#[inline(always)]
+pub fn closure_returned(scope: &mut crate::profile_summary::ClosureScope, result: &R<Local<'_>>) {
+    // SAFETY: the value is rooted.
+    unsafe { scope.returned(result.as_ref().ok().map(|value| value.raw())) }
+}
+
+/// Refuses the call `call` of `function` from the frame of `sys_parent` when it would define
+/// a class of an object system the session turned off (`eval::refuse_object_system`).
+pub fn refuse_object_system(
+    _context: &mut Cx<'_>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    sys_parent: Local<'_>,
+) -> R<()> {
+    // SAFETY: everything is rooted, and the error allocates, which `&mut Cx` permits.
+    unsafe { crate::eval::refuse_object_system(call.raw(), function.raw(), sys_parent.raw()) }
+}
+
+/// The signature of the closure `function` once the arguments its frame `environment`, at
+/// `depth`, binds meet it, or `None` for an untyped closure (`annotations::enter`).
+#[inline]
+pub fn check_arguments<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    environment: Local<'_, Environment>,
+    depth: usize,
+) -> R<Option<Local<'s>>> {
+    // SAFETY: everything is rooted, the checks may force promises, which `&mut Cx` permits,
+    // and the signature is rooted before anything else runs.
+    unsafe {
+        let signature =
+            crate::annotations::enter(call.raw(), function.raw(), environment.raw(), depth)?;
+        Ok(signature.map(|signature| rooted(context, signature)))
+    }
+}
+
+/// Runs the body of `function` in its frame at `depth`, on the slot frame at `slots` or else
+/// in `environment` (`eval::run_closure_body`).
+#[inline(always)]
+pub fn run_closure_body<'s>(
+    _context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    environment: Option<Local<'_, Environment>>,
+    slots: u32,
+    depth: usize,
+) -> R<Local<'s>> {
+    let environment = environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: the frame holds the function and its environment, the body runs any R code,
+    // which `&mut Cx` permits, and its value is rooted in the context's scope.
+    unsafe {
+        let value = crate::eval::run_closure_body(function.raw(), environment, slots, depth)?;
+        Ok(Local::adopt(value))
+    }
+}
+
+/// Tells the ahead-of-time compiler that a namespace load returned `namespace`
+/// (`ahead::namespace_loaded`).
+pub fn namespace_loaded(_context: &mut Cx<'_>, namespace: Local<'_>) {
+    // SAFETY: the namespace is rooted, and compiling its typed code allocates, which `&mut Cx`
+    // permits.
+    unsafe { crate::ahead::namespace_loaded(namespace.raw()) }
+}
+
 /// The closure `function` applied by `call` to `arguments`, each tagged as the argument of
 /// `call` in its position is, from the frame of `caller`, or from a slot frame that has none.
 /// The closure's frame keeps the arguments (`eval::apply_closure_owning`).

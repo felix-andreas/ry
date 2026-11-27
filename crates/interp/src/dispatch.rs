@@ -1080,13 +1080,12 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // of other names go straight to the enclosure, so a method that sees forwarded locals gets
     // its environment from the start.
     let result = if vars.len() > dispatch_vars && found.method.kind() == SexpType::Closure {
-        let env = eval::bind_arguments(new_call, found.method, &args, Some(&vars))?;
-        eval::run_closure(
+        eval::run_on_heap_frame(
             new_call,
             found.method,
-            env,
-            sys_parent,
             &args,
+            sys_parent,
+            Some(&vars),
             Entry::Unchecked,
         )?
     } else {

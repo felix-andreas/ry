@@ -864,6 +864,15 @@ impl<'a> Gc<'a, Promise> {
 }
 
 impl<'a> Gc<'a, Closure> {
+    /// Sets or clears the interpreter's flags `bits` of the closure: its debugging state, which
+    /// only the interpreter reads.
+    #[inline]
+    pub fn set_flags(self, bits: u16, on: bool) {
+        // SAFETY: the closure is live for `'a`, and the flags are bits of its header that no
+        // reader keeps across a change.
+        unsafe { self.raw.set_gp_bits(bits, on) }
+    }
+
     /// The formals: a pairlist of defaults, each tagged with its formal's name, or `NULL`.
     #[inline]
     pub fn formals(self) -> Gc<'a> {

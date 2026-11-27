@@ -165,7 +165,7 @@ pub unsafe fn browser() -> R<()> {
 
 /// Called when a closure that `debug()` or `debugonce()` flagged is entered, `depth` frames
 /// deep: the adapter stops at the first statement inside it.
-pub unsafe fn debugged_call(depth: usize) {
+pub fn debugged_call(depth: usize) {
     if !crate::system::debugging_enabled() {
         return;
     }
