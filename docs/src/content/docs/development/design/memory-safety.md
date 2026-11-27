@@ -626,8 +626,11 @@ environment (`lift`, `box_slots`); the predicates that ask whether a slot or a r
 missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`); a heap frame's
 binding of its formals and defaults (`bind_environment`, whose default promises are built after
 one `reserve` with the `_uncollected` allocators); the forcing of a typed call's arguments
-(`force_typed_arguments`); and a frame's exit (`catch_return`, `run_on_exit`, `finish_frame`,
-`pop_frame`). Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by
+(`force_typed_arguments`); a frame's exit (`catch_return`, `run_on_exit`, `finish_frame`,
+`pop_frame`); and closure application (`apply_closure_in`): the native entry and the native tier
+it tries first, the checks that choose a slot frame, and the general path that runs a heap frame
+or a frame that must be run whole (`run_heap_frame`, `run_general`, `run_closure_body`), whose raw
+names (`apply_closure`, `run_on_heap_frame`, `run_frame_general`) are thin entries. Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by
 design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark
 `enter` recorded, so no borrow of the context can span it. Both are built from safe pieces, and the
 lexical paths that wrap them take a `Cx`.

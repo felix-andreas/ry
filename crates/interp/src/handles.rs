@@ -4163,26 +4163,52 @@ pub struct MethodVariable<'s> {
     pub value: Local<'s>,
 }
 
+/// The dispatch variables of a method's call, symbols paired with their values, as the caller
+/// holds them: a view that reads each pair as a [`MethodVariable`] of the scope `'s` and hands
+/// the pairs back to the raw frame entry without a copy.
+#[derive(Clone, Copy)]
+pub struct MethodVariables<'a, 's> {
+    pairs: &'a [(Sexp, Sexp)],
+    scope: PhantomData<Local<'s>>,
+}
+
+impl<'a, 's> MethodVariables<'a, 's> {
+    pub fn iter(self) -> impl Iterator<Item = MethodVariable<'s>> + 'a {
+        self.pairs.iter().map(|&(symbol, value)| {
+            // SAFETY: `method_variables` made the view from symbols paired with values that
+            // the caller holds for all of `'s`.
+            unsafe {
+                MethodVariable {
+                    symbol: Local::adopt(symbol),
+                    value: Local::adopt(value),
+                }
+            }
+        })
+    }
+
+    /// The variables as handles of the nested scope `'inner`, which `'s` encloses.
+    pub fn pass<'inner>(self, _enclosing: Enclosing<'s, 'inner>) -> MethodVariables<'a, 'inner> {
+        MethodVariables {
+            pairs: self.pairs,
+            scope: PhantomData,
+        }
+    }
+}
+
 /// The dispatch variables `variables`, symbols paired with their values, as handles of the
 /// caller's scope.
 ///
 /// # Safety
 ///
 /// Each first field is a symbol, and the caller holds every value until the scope ends.
-pub unsafe fn method_variables<'s>(
+pub unsafe fn method_variables<'a, 's>(
     _context: &Cx<'s>,
-    variables: &[(Sexp, Sexp)],
-) -> SmallVec<[MethodVariable<'s>; 4]> {
-    variables
-        .iter()
-        // SAFETY: the caller's contract.
-        .map(|&(symbol, value)| unsafe {
-            MethodVariable {
-                symbol: Local::adopt(symbol),
-                value: Local::adopt(value),
-            }
-        })
-        .collect()
+    variables: &'a [(Sexp, Sexp)],
+) -> MethodVariables<'a, 's> {
+    MethodVariables {
+        pairs: variables,
+        scope: PhantomData,
+    }
 }
 
 /// The live frame at position `index` of the frame stack, `None` past its top.
@@ -5573,12 +5599,9 @@ pub fn run_slot_frame<'s>(
     closure_call: &crate::eval::ClosureCall<'_, 's>,
     frame: crate::eval::SlotFrame,
 ) -> R<Local<'s>> {
-    let method_vars: SmallVec<[(Sexp, Sexp); 4]> = closure_call
+    let method_vars = closure_call
         .supplied
-        .unwrap_or(&[])
-        .iter()
-        .map(|variable| (variable.symbol.raw(), variable.value.raw()))
-        .collect();
+        .map_or(&[][..], |supplied| supplied.pairs);
     // SAFETY: the caller's scope holds the call, the closure, the arguments, the method
     // variables and the caller's environment, the frame holds them once pushed, and the body
     // runs any R code, which `&mut Cx` permits. Its value is rooted before anything else runs.
@@ -5595,7 +5618,7 @@ pub fn run_slot_frame<'s>(
             closure_call.sys_parent.raw(),
             args,
             crate::annotations::Entry::Unchecked,
-            &method_vars,
+            method_vars,
         )?;
         Ok(rooted(context, value))
     }

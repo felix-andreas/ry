@@ -3259,7 +3259,7 @@ pub unsafe fn apply_closure(
     // method variables until the call returns, and releases the handle stack after it.
     handles::in_caller_scope(|context| {
         let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, &supplied)?;
+        let closure_call = held_call(context, call, function, args, sys_parent, supplied)?;
         Ok(apply_closure_in(context, &closure_call)?.raw())
     })
 }
@@ -3276,7 +3276,7 @@ unsafe fn held_call<'a, 's>(
     function: Sexp,
     args: &'a [Arg],
     sys_parent: Sexp,
-    supplied: &'a Option<SmallVec<[handles::MethodVariable<'s>; 4]>>,
+    supplied: Option<handles::MethodVariables<'a, 's>>,
 ) -> R<ClosureCall<'a, 's>> {
     let Some(function) = handles::held(context, function).downcast::<Closure>() else {
         return Err(error(
@@ -3288,7 +3288,7 @@ unsafe fn held_call<'a, 's>(
         function,
         args: handles::tagged(context, args),
         sys_parent: handles::held(context, sys_parent),
-        supplied: supplied.as_deref(),
+        supplied,
     })
 }
 
@@ -3302,7 +3302,7 @@ pub struct ClosureCall<'a, 's> {
     /// has none.
     pub sys_parent: Local<'s>,
     /// The method variables of a dispatched call, which its frame binds.
-    pub supplied: Option<&'a [handles::MethodVariable<'s>]>,
+    pub supplied: Option<handles::MethodVariables<'a, 's>>,
 }
 
 /// Applies a closure ([`apply_closure`]): a native entry or the native tier answers it, or its
@@ -3387,7 +3387,7 @@ pub(crate) unsafe fn run_on_heap_frame(
     // method variables and the signature until the call returns.
     handles::in_caller_scope(|context| {
         let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, &supplied)?;
+        let closure_call = held_call(context, call, function, args, sys_parent, supplied)?;
         let signature = match entry {
             Entry::Unchecked => Signature::Unchecked,
             Entry::Checked(signature) => {
@@ -3422,22 +3422,14 @@ fn run_heap_call<'s>(
                 value: enclosing.pass(arg.value),
             })
             .collect();
-        let supplied: Option<SmallVec<[handles::MethodVariable<'_>; 4]>> =
-            closure_call.supplied.map(|supplied| {
-                supplied
-                    .iter()
-                    .map(|variable| handles::MethodVariable {
-                        symbol: enclosing.pass(variable.symbol),
-                        value: enclosing.pass(variable.value),
-                    })
-                    .collect()
-            });
         let passed = ClosureCall {
             call: enclosing.pass(closure_call.call),
             function: enclosing.pass(closure_call.function),
             args: &args,
             sys_parent: enclosing.pass(closure_call.sys_parent),
-            supplied: supplied.as_deref(),
+            supplied: closure_call
+                .supplied
+                .map(|supplied| supplied.pass(enclosing)),
         };
         let signature = match signature {
             Signature::Unchecked => Signature::Unchecked,
@@ -3488,8 +3480,12 @@ fn run_heap_frame<'s>(
         supplied,
     } = closure_call;
     detach_arguments(context, args)?;
+    let variables: SmallVec<[handles::MethodVariable<'_>; 8]>;
     let arguments = match supplied {
-        Some(supplied) => Arguments::Matched(supplied),
+        Some(supplied) => {
+            variables = supplied.iter().collect();
+            Arguments::Matched(&variables)
+        }
         None => Arguments::Unsupplied,
     };
     let environment = bind_environment(context, call, function, args, arguments)?;
@@ -3640,7 +3636,7 @@ pub unsafe fn apply_closure_entering(
     // method variables until the call returns, and releases the handle stack after it.
     let prepared = handles::in_caller_scope(|context| {
         let held = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, &held)?;
+        let closure_call = held_call(context, call, function, args, sys_parent, held)?;
         Ok(match prepare_closure_call(context, &closure_call)? {
             Prepared::Done(value) => Prepared::Done(value.raw()),
             Prepared::Slots(frame) => Prepared::Slots(frame),
@@ -4574,7 +4570,7 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.pending.raw() != nil() && !activity::enabled() {
         return Ok(frame.pending.raw());
     }
-    handles::in_caller_scope(|context| Ok(frame_environment_of(context, index, cause)?.raw()))
+    handles::in_caller_scope(|context| Ok(reified_environment(context, index, cause)?.raw()))
 }
 
 /// [`frame_env`] for code on the handle types: `NULL` for a frame that has no environment of
@@ -4840,7 +4836,7 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if fields.pending.raw() != nil() && !activity::enabled() {
         return Ok(fields.pending.raw());
     }
-    handles::in_caller_scope(|context| Ok(frame_environment_of(context, caller, cause)?.raw()))
+    handles::in_caller_scope(|context| Ok(reified_environment(context, caller, cause)?.raw()))
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -5263,11 +5259,13 @@ unsafe fn run_frame_general(
         };
         let sys_parent = handles::held(context, sys_parent);
         let args = handles::tagged(context, args);
-        let variables;
+        let variables: SmallVec<[handles::MethodVariable<'_>; 8]>;
         let method_vars: &[handles::MethodVariable<'_>] = if method_vars.is_empty() {
             &[]
         } else {
-            variables = handles::method_variables(context, method_vars);
+            variables = handles::method_variables(context, method_vars)
+                .iter()
+                .collect();
             &variables
         };
         let signature = match entry {
