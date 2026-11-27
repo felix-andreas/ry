@@ -1,0 +1,32 @@
+# An `I64` parameter converts the whole R number it is given, and the conversion belongs to that
+# call alone. An effect-free closure receives its caller's own promise for a variable, and `...`
+# passes the caller's promises on, so the converted value must not reach the caller's variable or
+# the check of an outer typed frame that binds the same promise. Both tiers print the same.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file calls.R
+| outer <- function(x: F64) -> I64 { inner <- function(a: I64) -> I64 a; inner(x) }
+| print(outer(2.0))
+| take <- function(a: I64) -> I64 a
+| untyped <- function(y) { r <- take(y); list(r, y) }
+| r <- untyped(sqrt(4)); print(r[[1]]); print(typeof(r[[2]]))
+| forced <- function(y) { force(y); r <- take(y); list(r, y) }
+| r <- forced(sqrt(4)); print(r[[1]]); print(typeof(r[[2]]))
+| dots <- function(...) { r <- take(...); list(r, ..1) }
+| r <- dots(sqrt(4)); print(r[[1]]); print(typeof(r[[2]]))
+| narrow <- function(x: I64) -> F64 { inner <- function(a: F64) -> F64 a; inner(x) }
+| print(tryCatch(narrow(2.0), error = function(e) conditionMessage(e)))
+| quoted <- function(x: F64) { inner <- function(a: I64) substitute(a); inner(x) }
+| print(quoted(2.0))
+
+run ry run --runtime ry calls.R
+expect stdout "2i64\n2i64\n[1] \"double\"\n2i64\n[1] \"double\"\n2i64\n[1] \"double\"\n[1] \"argument `a` must be `F64`, not `I64`\"\nx"
+
+env RY_JIT off
+run ry run --runtime ry calls.R
+expect stdout "2i64\n2i64\n[1] \"double\"\n2i64\n[1] \"double\"\n2i64\n[1] \"double\"\n[1] \"argument `a` must be `F64`, not `I64`\"\nx"
