@@ -420,8 +420,8 @@ impl Uncompiled {
                  before the branch or loop"
             ),
             Uncompiled::TypeChange(name) => format!(
-                "`{name}` takes a value of another type inside a branch or loop than it holds \
-                 before it, which {YET}. Use a new name for the new value"
+                "`{name}` holds one type before this branch or loop and takes another inside \
+                 it, which {YET}. Use a new name for the new value"
             ),
             Uncompiled::BranchTypes => format!(
                 "the branches give values of different types, which {YET}: a native value has one \
@@ -806,6 +806,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         reported_keyed: false,
         control_depth: 0,
         region_mark: 0,
+        frame_mark: 0,
         probing: 0,
         nested: 0,
         early_reads: Vec::new(),
@@ -1020,6 +1021,9 @@ struct Judge<'a, 'db> {
     /// Where the innermost branch or loop body starts in `scope`: a name bound from there on
     /// leaves scope with it, so it may change type (the assignment arm of [`Judge::walk`]).
     region_mark: usize,
+    /// Where the innermost local function or function literal starts in `scope`: an assignment
+    /// to a name bound before it binds a name of the body's own.
+    frame_mark: usize,
     /// How many loop trials enclose the walk ([`Judge::in_loop`]).
     probing: u32,
     /// How many local functions or function literals enclose the walk inside the judged function.
@@ -1165,6 +1169,8 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.locals.clear();
         self.hidden.clear();
         self.control_depth = 0;
+        self.region_mark = 0;
+        self.frame_mark = 0;
         self.nested = 0;
         self.local_functions.clear();
         self.r_arguments = None;
@@ -1540,8 +1546,14 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.in_loop(body, mark, variable);
             }
             ExpressionKind::While { condition, body } => {
+                // The condition runs on every pass, so it is a region of its own, whose names
+                // stay in scope after it, as the typed core lowers it.
                 let hoist = self.hoist.take();
+                self.control_depth += 1;
+                let region_mark = std::mem::replace(&mut self.region_mark, self.scope.len());
                 self.walk(condition, Use::Value);
+                self.region_mark = region_mark;
+                self.control_depth -= 1;
                 self.hoist = hoist;
                 self.in_loop(body, self.scope.len(), None);
             }
@@ -2359,13 +2371,16 @@ impl<'a, 'db> Judge<'a, 'db> {
                         if let (Some(first), Some(later)) = (first, ty)
                             && self.layout_differs(first, later)
                         {
+                            let index = self.scope.iter().rposition(|&(bound, _)| bound == name);
+                            // A local function's assignment binds a name of its own, as in R,
+                            // so the enclosing function's slot keeps its type.
+                            let enclosing = index.is_some_and(|index| index < self.frame_mark);
                             let bound_here = self.control_depth == 0
-                                || self
-                                    .scope
-                                    .iter()
-                                    .rposition(|&(bound, _)| bound == name)
-                                    .is_some_and(|index| index >= self.region_mark);
-                            if bound_here {
+                                || enclosing
+                                || index.is_some_and(|index| index >= self.region_mark);
+                            if enclosing {
+                                self.scope.push((name, Slot::Value(ty)));
+                            } else if bound_here {
                                 self.bind(name, Slot::Value(ty));
                             } else {
                                 self.uncompiled(id, Uncompiled::TypeChange(name));
@@ -2519,6 +2534,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.scope.push((parameter.name, Slot::Parameter(None)));
         }
         let control_depth = std::mem::replace(&mut self.control_depth, 0);
+        let frame_mark = std::mem::replace(&mut self.frame_mark, mark);
         let r_arguments = self.r_arguments.take();
         let hoist = self.hoist.take();
         self.nested += 1;
@@ -2527,6 +2543,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.hoist = hoist;
         self.r_arguments = r_arguments;
         self.control_depth = control_depth;
+        self.frame_mark = frame_mark;
         self.scope.truncate(mark);
     }
 

@@ -1503,6 +1503,33 @@ in_operand <- function(n: I64) -> I64 {
   x <- n
   if (n > 1 && { x <- "big"; TRUE }) n else 0
 }
+in_condition <- function(n: I64) -> I64 {
+  x <- 0.5
+  i <- 0
+  while ({ x <- Num.to_str(i); i < n }) {
+    i <- i + 1
+  }
+  i
+}
+after_local <- function(n: I64) -> I64 {
+  x <- n
+  g <- function() -> I64 {
+    x <- "inner"
+    Str.count_utf8_bytes(x)
+  }
+  if (n > 1) {
+    x <- "big"
+  }
+  g()
+}
+in_local <- function(n: I64) -> I64 {
+  x <- n
+  g <- function() -> I64 {
+    x <- "inner"
+    Str.count_utf8_bytes(x)
+  }
+  g() + x
+}
 bound_inside <- function(n: I64) -> Str {
   if (n > 1) {
     label <- n * 10
@@ -1517,6 +1544,9 @@ bound_inside <- function(n: I64) -> Str {
 in_branch: fn(n: I64) -> I64
 in_loop: fn(xs: List<I64>) -> I64
 in_operand: fn(n: I64) -> I64
+in_condition: fn(n: I64) -> I64
+after_local: fn(n: I64) -> I64
+in_local: fn(n: I64) -> I64
 bound_inside: fn(n: I64) -> Str
 0..9 warning[unused] `in_branch` is assigned but never used
 41..42 warning[unused] `x` is assigned but never used
@@ -1527,10 +1557,19 @@ bound_inside: fn(n: I64) -> Str
 217..227 warning[unused] `in_operand` is assigned but never used
 259..260 warning[unused] `x` is assigned but never used
 283..284 warning[unused] `x` is assigned but never used
-314..326 warning[unused] `bound_inside` is assigned but never used
-67..85 warning[interpreted] this function runs in the interpreter, because `x` takes a value of another type inside a branch or loop than it holds before it, which is not compiled natively yet. Use a new name for the new value
-174..195 warning[interpreted] this function runs in the interpreter, because `last` takes a value of another type inside a branch or loop than it holds before it, which is not compiled natively yet. Use a new name for the new value
-283..293 warning[interpreted] this function runs in the interpreter, because `x` takes a value of another type inside a branch or loop than it holds before it, which is not compiled natively yet. Use a new name for the new value
+314..326 warning[unused] `in_condition` is assigned but never used
+358..359 warning[unused] `x` is assigned but never used
+387..388 warning[unused] `x` is assigned but never used
+443..454 warning[unused] `after_local` is assigned but never used
+486..487 warning[unused] `x` is assigned but never used
+588..589 warning[unused] `x` is assigned but never used
+611..619 warning[unused] `in_local` is assigned but never used
+746..758 warning[unused] `bound_inside` is assigned but never used
+67..85 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+174..195 warning[interpreted] this function runs in the interpreter, because `last` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+283..293 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+387..405 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+588..598 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
 
 #---- branches_that_disagree_on_a_type
 #~~~~ script.R

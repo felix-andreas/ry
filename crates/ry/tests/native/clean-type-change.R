@@ -51,6 +51,21 @@ branch_local <- function(n: I64) -> Str {
     "small"
   }
 }
+in_local <- function(n: I64) -> I64 {
+  x <- n
+  g <- function() -> I64 {
+    x <- "inner"
+    Str.count_utf8_bytes(x)
+  }
+  g() + x
+}
+condition_local <- function(n: I64) -> I64 {
+  i <- 0
+  while ({ y <- i * 2; y <- Num.to_str(y); i < n }) {
+    i <- i + 1
+  }
+  Str.count_utf8_bytes(y)
+}
 same_type <- function(n: I64) -> I64 {
   n <- n + 1
   n
@@ -58,4 +73,4 @@ same_type <- function(n: I64) -> I64 {
 xs <- [1, 2, 3]
 cat(widened(2), Num.to_r(from_record(2)), Num.to_r(from_null(2)), Num.to_r(nested(xs)), "\n")
 cat(parameter(3), loop_variable(xs), loop_local(xs), Num.to_r(same_type(2)), "\n")
-cat(branch_local(3), branch_local(1), "\n")
+cat(branch_local(3), branch_local(1), Num.to_r(in_local(2)), Num.to_r(condition_local(3)), "\n")

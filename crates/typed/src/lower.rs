@@ -1130,6 +1130,10 @@ impl Lowering<'_> {
     /// [`Lowering::leave_loop`]).
     fn leave_control(&mut self, region: usize) -> Created {
         self.control -= 1;
+        debug_assert!(
+            region + 1 == self.regions.len(),
+            "regions leave in nesting order"
+        );
         let saved = self
             .regions
             .get_mut(region)
@@ -1749,9 +1753,9 @@ impl Lowering<'_> {
                 return Ok(variable);
             }
             // A value of another type goes into a variable of its own type, which is sound
-            // wherever no code after it can read the name's old variable: outside any branch or
-            // loop, or for a name the innermost branch or loop body bound, which goes out of
-            // scope as it ends. A tag union that needs more tags restarts wider instead.
+            // wherever no code after it can read the name's old variable: outside any branch,
+            // loop or `while` condition, or for a name the innermost one bound, which goes out
+            // of scope as it ends. A tag union that needs more tags restarts wider instead.
             let widening = matches!(
                 (held_tags(held), held_tags(ty)),
                 (Some(held_union), Some(found_union))
@@ -4045,7 +4049,20 @@ impl Lowering<'_> {
         };
         let header = self.loop_header();
         let condition_expression = condition;
-        let condition = self.condition(condition)?;
+        // The condition runs again on every pass, so a name bound before the loop keeps its type
+        // there as in the body. Names the condition creates stay bound after it, since it always
+        // runs.
+        self.control += 1;
+        let names = self
+            .scopes
+            .last()
+            .map(|scope| scope.names.clone())
+            .unwrap_or_default();
+        self.regions.push(names);
+        let condition = self.condition(condition);
+        self.regions.pop();
+        self.control -= 1;
+        let condition = condition?;
         let (body_block, exit) = (self.builder.block(), self.builder.block());
         self.builder.terminate(Terminator::Branch {
             condition,
