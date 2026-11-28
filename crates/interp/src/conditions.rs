@@ -670,11 +670,14 @@ pub unsafe fn condition_message(condition: Sexp) -> R<String> {
         let Some(list) = condition.standard::<List>() else {
             return Ok(String::new());
         };
-        let names = get_attribute(context, list, symbol(|symbols| symbols.names));
-        let position = names.standard::<Str>().and_then(|names| {
+        let names = context.root(get_attribute(
+            context,
+            list,
+            symbol(|symbols| symbols.names),
+        ));
+        let position = dense::<Str>(context, names)?.and_then(|names| {
             names
-                .elements()
-                .iter()
+                .iter(context)
                 .position(|name| name.bytes() == b"message")
         });
         let Some(position) = position else {
