@@ -2560,6 +2560,29 @@ total <- function(x) Reduce(op, x)
 op: character
 total: <T, U> fn(x: list[T] | T[]) -> U
 
+#---- reduce_with_accumulate_gives_every_accumulator
+# R unlists the accumulators when each has length one, so a scalar fold accumulates to a vector,
+# and `simplify = FALSE` keeps the list. With `right = TRUE` the callback takes the element first.
+sums <- Reduce(`+`, 1:3, accumulate = TRUE)
+from_zero <- Reduce(`+`, 1:3, 0, accumulate = TRUE)
+doubled <- Reduce(function(acc, x) acc * 2, 1:3, 1L, accumulate = TRUE)
+kept <- Reduce(`+`, 1:3, accumulate = TRUE, simplify = FALSE)
+words <- Reduce(function(a, b) paste(a, b), c("a", "b", "c"), accumulate = TRUE)
+mixed <- Reduce(`+`, list(1L, 2.5), accumulate = TRUE)
+grown <- Reduce(function(acc, x) acc + x, list(c(1, 2), c(3, 4)), accumulate = TRUE)
+maybe <- function(flag) Reduce(`+`, 1:3, accumulate = flag)
+largest <- Reduce(max, 1:3, right = TRUE)
+#++++
+sums: integer[]
+from_zero: double[]
+doubled: double[]
+kept: list[integer]
+words: character[]
+mixed: double[]
+grown: double[] | list[double[]]
+maybe: fn(flag: logical) -> integer | integer[]
+largest: integer
+
 #---- a_string_is_not_text_for_a_negated_logical_parameter
 neg <- function(x) !x
 from_text <- function() neg("TRUE")

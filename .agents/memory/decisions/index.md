@@ -189,6 +189,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A fold's accumulator rebinds to the type its init gives under arithmetic
 - A fold over an open accumulator gives `Promoted<T>`
 - A file's top-level literals are ry values only when it uses ry's own types or values
+- `Reduce(accumulate = TRUE)` types as the accumulators R unlists (settled)
 
 ## Analysis core
 

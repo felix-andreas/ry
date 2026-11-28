@@ -1233,3 +1233,13 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A record or tuple type counts by its head (`Record{...}`, `Tuple{...}`), so an R class named `Tuple` stays R. Names count by spelling, never by a stub or attached-package read, which keeps the fact a syntax property of the file that no other file's edit invalidates.
 - A `#:` comment annotation never counts: a comment must not change what a file computes, and comment-annotated code is ordinary R for every other tool. `Expr` and `DataFrame` are not on the list.
 - A type that a project's alias hides (`p: Point` with `Point` a record defined in another file) does not count. The file then keeps R's types until it names a ry type, builds a ry value or turns strict.
+
+## `Reduce(accumulate = TRUE)` types as the accumulators R unlists
+
+**Status:** settled. `Checker::infer_reduce`, `Checker::accumulated`.
+
+- The stub's `-> U` is the fold's accumulator. The checker reads `accumulate` and `simplify` as literals and rewrites the result, because R returns `unlist(out, recursive = FALSE)` when every accumulator has length one and the list otherwise (base R's `Reduce` body).
+- An atomic scalar accumulator gives a vector of the `c()` coercion of its members (`integer | double` gives `double[]`). An atomic vector may have another length, so it gives the vector or the list. Anything else gives `Unknown` rather than a guess at `unlist`'s flattening.
+- `simplify = FALSE` gives `list[U]`. A non-literal flag joins both results, and the flags are checked as `logical`, as the stub declares them.
+- `right = TRUE` swaps the callback's arguments in the overload and named-function folds. The stub path cannot swap, so an inline function is checked in the stub's order (backlog).
+- Known approximation: an empty `x` returns `init` or `NULL`, not a list, which the accumulated type does not show, as the plain fold's `U` does not show the `NULL`.

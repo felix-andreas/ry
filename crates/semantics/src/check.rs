@@ -14831,9 +14831,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 "return" => Some(self.infer_return(range, arguments)),
                 "stop" => Some(self.infer_stop(arguments)),
                 "DataFrame" => self.infer_frame_constructor(callee, arguments),
-                family @ ("lapply" | "sapply" | "vapply" | "Reduce") => {
+                family @ ("lapply" | "sapply" | "vapply") => {
                     self.infer_apply(id, callee, family, arguments)
                 }
+                "Reduce" => self.infer_reduce(id, range, callee, arguments),
                 _ => None,
             };
             if let Some(ty) = builtin {
@@ -20924,6 +20925,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             x,
             accumulator,
             element,
+            false,
         ))
     }
 
@@ -23815,7 +23817,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             "lapply" => (&["X", "FUN"], &[]),
             "sapply" => (&["X", "FUN"], &["simplify", "USE.NAMES"]),
             "vapply" => (&["X", "FUN", "FUN.VALUE"], &["USE.NAMES"]),
-            "Reduce" => (&["f", "x", "init", "right", "accumulate", "simplify"], &[]),
+            "Reduce" => (REDUCE_FORMALS, &[]),
             _ => return None,
         };
         let bound = bind_formals(self.module, arguments, formals);
@@ -23835,14 +23837,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         let (elements, named) = element_types(db, x_ty);
 
         if family == "Reduce" {
-            for &extra in &bound.values[2..] {
-                if let Some(extra) = extra {
-                    self.infer(extra);
-                }
+            if let Some(init) = bound.value(2) {
+                self.infer(init);
             }
-            if bound.value(3).is_some() || bound.value(4).is_some() || bound.value(5).is_some() {
+            self.check_reduce_flags(&bound);
+            let Some(right) = literal_flag(self.module, bound.value(3), false) else {
                 return Some(unknown(db));
-            }
+            };
             let element = self.join_all(&elements);
             let start = match bound.value(2) {
                 Some(init) => self
@@ -23861,7 +23862,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                     &callback,
                     &[x, x],
                     &[],
-                    &[vec![accumulator, element]],
+                    &[match right {
+                        true => vec![element, accumulator],
+                        false => vec![accumulator, element],
+                    }],
                 );
                 let (next, findings) = results.into_iter().next()?;
                 self.report_once(findings);
@@ -24130,6 +24134,76 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// `Reduce` from base: the fold's accumulator, or with `accumulate = TRUE` every accumulator
+    /// in turn. `None` when a binding shadows it.
+    fn infer_reduce(
+        &mut self,
+        id: ExprId,
+        range: TextRange,
+        callee: ExprId,
+        arguments: &[Argument],
+    ) -> Option<Ty<'db>> {
+        if !self.calls_base(callee) {
+            return None;
+        }
+        let db = self.db;
+        let bound = bind_formals(self.module, arguments, REDUCE_FORMALS);
+        let fold = match self.infer_apply(id, callee, "Reduce", arguments) {
+            Some(fold) => fold,
+            None => self.infer_ordinary_call(id, range, callee, arguments),
+        };
+        let simplify = literal_flag(self.module, bound.value(5), true);
+        Some(match literal_flag(self.module, bound.value(4), false) {
+            Some(false) => fold,
+            Some(true) => self.accumulated(fold, simplify),
+            None => union_of(db, [fold, self.accumulated(fold, simplify)]),
+        })
+    }
+
+    /// Checks `Reduce`'s `right`, `accumulate` and `simplify` as the logical flags R reads them as.
+    fn check_reduce_flags(&mut self, bound: &BoundFormals) {
+        let logical = scalar(self.db, Atomic::Logical);
+        for &flag in bound.values[3..].iter().flatten() {
+            let ty = self.infer(flag);
+            self.unify_or_report(self.module.range(flag), logical, ty);
+        }
+    }
+
+    /// What `Reduce(accumulate = TRUE)` returns for a fold to `fold`: the list of every
+    /// accumulator, which `simplify` unlists when each has length one. An accumulator that is
+    /// an atomic scalar unlists to a vector; an atomic vector may have another length, so it
+    /// gives the vector or the list.
+    fn accumulated(&self, fold: Ty<'db>, simplify: Option<bool>) -> Ty<'db> {
+        let db = self.db;
+        let list = Ty::new(db, TyKind::List(fold));
+        let resolved = self.table.shallow_resolve(db, fold);
+        let members = match resolved.kind(db) {
+            TyKind::Union(members) => members.to_vec(),
+            _ => vec![resolved],
+        };
+        let simplified = || {
+            let mut highest = None;
+            let mut lengths_vary = false;
+            for member in members {
+                let member = self.table.shallow_resolve(db, member);
+                let atomic = combine_operand_atomic(db, member)?;
+                lengths_vary |= !matches!(member.kind(db), TyKind::Scalar(_) | TyKind::Native(_));
+                highest =
+                    Some(highest.map_or(atomic, |highest| promote_combine_atomic(highest, atomic)));
+            }
+            let vector = Ty::new(db, TyKind::Vector(scalar(db, highest?)));
+            Some(match lengths_vary {
+                true => union_of(db, [vector, list]),
+                false => vector,
+            })
+        };
+        match simplify {
+            Some(false) => list,
+            Some(true) => simplified().unwrap_or_else(|| unknown(db)),
+            None => union_of(db, [simplified().unwrap_or_else(|| unknown(db)), list]),
+        }
+    }
+
     /// `Reduce(f, x)` with a non-overloaded function, named or picked by an `if`. R hands `f` the
     /// accumulator and each element in turn, and the accumulator takes whatever `f` returns, so its
     /// type is the join of the start and every return (`function(x, y) if (identical(x, y)) x`
@@ -24154,9 +24228,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 ExpressionKind::If { then_branch, else_branch: Some(else_branch), .. }
                     if named_function(*then_branch) && named_function(*else_branch)
             );
-        if !eligible || bound.values[3..].iter().any(Option::is_some) {
+        if !eligible {
             return None;
         }
+        let right = literal_flag(module, bound.value(3), false)?;
         let recorded_errors = self.errors.len();
         let recorded_origins = self.strict_origins.len();
         let first_var = self.table.next_var().0;
@@ -24183,6 +24258,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(init) => self.infer(init),
             None => element,
         };
+        self.check_reduce_flags(&bound);
         let range = module.range(id);
         let callee_range = self.blame_range(function);
         Some(self.fold_reduce(
@@ -24194,11 +24270,13 @@ impl<'db, 'a> Checker<'db, 'a> {
             x,
             accumulator,
             element,
+            right,
         ))
     }
 
-    /// Calls the callback with the accumulator and an element until the accumulator stops
-    /// widening. `function` is re-inferred each round so a generic lambda instantiates afresh.
+    /// Calls the callback with the accumulator and an element, or with `right` the element and
+    /// the accumulator, until the accumulator stops widening. `function` is re-inferred each
+    /// round so a generic lambda instantiates afresh.
     #[allow(clippy::too_many_arguments)]
     fn fold_reduce(
         &mut self,
@@ -24210,6 +24288,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         x: ExprId,
         mut accumulator: Ty<'db>,
         element: Ty<'db>,
+        right: bool,
     ) -> Ty<'db> {
         let module = self.module;
         let argument = |value: ExprId, ty: Ty<'db>| CallArgument {
@@ -24228,7 +24307,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         for round in 0..4 {
             let step_errors = self.errors.len();
             let step_origins = self.strict_origins.len();
-            let arguments = [argument(start, accumulator), argument(x, element)];
+            let arguments = match right {
+                true => [argument(x, element), argument(start, accumulator)],
+                false => [argument(start, accumulator), argument(x, element)],
+            };
             let returned = self.dispatch_call(
                 range,
                 callee_range,
@@ -26342,6 +26424,8 @@ fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<&'db [RecordField<
 /// `lapply`'s `X` and `FUN` arguments: by name, or else the first and second positional ones.
 /// The arguments of a call to an R function with these `formals`, bound as R binds them:
 /// exact names first, then the unnamed arguments in order.
+const REDUCE_FORMALS: &[&str] = &["f", "x", "init", "right", "accumulate", "simplify"];
+
 fn bind_formals(module: &Module, arguments: &[Argument], formals: &[&str]) -> BoundFormals {
     let mut values: Vec<Option<ExprId>> = formals
         .iter()
@@ -26414,6 +26498,18 @@ fn simplify_flag(module: &Module, arguments: &[Argument], name: &str) -> Option<
     };
     match argument.value.map(|value| module.kind(value)) {
         Some(ExpressionKind::Literal(LiteralKind::Logical(value))) => Some(*value),
+        _ => None,
+    }
+}
+
+/// A logical argument's value: `default` when it is left out, the literal when it is `TRUE` or
+/// `FALSE`, and `None` when its value is not known.
+fn literal_flag(module: &Module, value: Option<ExprId>, default: bool) -> Option<bool> {
+    let Some(value) = value else {
+        return Some(default);
+    };
+    match module.kind(value) {
+        ExpressionKind::Literal(LiteralKind::Logical(value)) => Some(*value),
         _ => None,
     }
 }
