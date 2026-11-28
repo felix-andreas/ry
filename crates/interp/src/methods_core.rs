@@ -14,7 +14,9 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        dispatch, eval, interp,
+        dispatch, eval,
+        handles::{self, Environment, Local, Symbol},
+        interp,
         session::{FNV_OFFSET, eval_text, stable_hash},
         unwind::R,
         values::{
@@ -326,7 +328,10 @@ unsafe fn do_new(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(slot(definition, symbols().virtual_)?) != 0 {
         return values::scalar_bool(false);
     }
-    let value = crate::methods::new_object_copying(definition, false)?;
+    let value = handles::with_result(|context| {
+        let definition = handles::held(context, definition);
+        crate::methods::new_object_copying(context, definition, false).map(Local::raw)
+    })?;
     eval::define(install("ClassDef")?, definition, frame)?;
     eval::define(symbols().value, value, frame)?;
     values::scalar_bool(true)
@@ -1143,7 +1148,13 @@ unsafe fn cached_class(class: Sexp) -> R<Option<Sexp>> {
     if table.kind() != SexpType::Environment {
         return Ok(None);
     }
-    let definition = crate::methods::cached_class_definition(class, table)?;
+    let definition = handles::with_result(|context| {
+        let class = handles::held(context, class);
+        let Some(table) = handles::held(context, table).downcast::<Environment>() else {
+            return Ok(nil());
+        };
+        crate::methods::cached_class_definition(context, class, table).map(Local::raw)
+    })?;
     // More than one package defines the class: the R code picks one by where it is called from.
     if definition == nil()
         || (definition.kind() == SexpType::List && !definition.has_gp(gp::S4_OBJECT))
@@ -1478,12 +1489,25 @@ unsafe fn methods_generic(name: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let symbol = values::install_charsxp(name.element(0))?;
-    let found = crate::methods::find_generic(symbol, interp().globals.methods_namespace, "")?;
+    let namespace = interp().globals.methods_namespace;
+    let found = handles::with_result(|context| {
+        let Some(symbol) = handles::held(context, symbol).downcast::<Symbol>() else {
+            return Ok(nil());
+        };
+        let symbol = handles::permanent(symbol);
+        let Some(namespace) = handles::held(context, namespace).downcast::<Environment>() else {
+            return Ok(nil());
+        };
+        crate::methods::find_generic(context, symbol, namespace, "").map(Local::raw)
+    })?;
     // GNU R's C lookup skips a primitive's generic and lets `getGeneric()` reach
     // `.BasicFunsList`, whose `.cacheGeneric()` is checked below.
-    let primitive = quiet_value(symbol, values::base_env())?
-        .and_then(|base| crate::dispatch::primitive_methods(base))
-        .is_some_and(|(generic, _)| generic == found);
+    let primitive = quiet_value(symbol, values::base_env())?.is_some_and(|base| {
+        handles::reading(|context| {
+            crate::dispatch::primitive_methods(context, handles::held(context, base))
+                .is_some_and(|(generic, _)| generic.raw() == found)
+        })
+    });
     if found != nil() && !primitive {
         // `.getGeneric()` caches a generic the global environment also binds.
         return Ok(
@@ -2039,7 +2063,16 @@ unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
         bail!(skip, "`where` is not an environment, or is locked");
     }
     let name_symbol = install_text(name.element(0))?;
-    let mut generic = crate::methods::visible_generic(name_symbol, place)?;
+    let mut generic = handles::with_result(|context| {
+        let Some(symbol) = handles::held(context, name_symbol).downcast::<Symbol>() else {
+            return Ok(nil());
+        };
+        let symbol = handles::permanent(symbol);
+        let Some(place) = handles::held(context, place).downcast::<Environment>() else {
+            return Ok(nil());
+        };
+        crate::methods::visible_generic(context, symbol, place).map(Local::raw)
+    })?;
     let visible = visible_function(name_symbol, place)?;
     let primitive = match visible {
         Visible::Function(function)
@@ -2103,8 +2136,10 @@ unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
         // default method, and is the one its dispatch uses once methods are on.
         Some(function) => {
             if get_attr(generic, symbols().default) != function
-                || crate::dispatch::primitive_methods(function)
-                    .is_some_and(|(found, _)| found != generic)
+                || handles::reading(|context| {
+                    crate::dispatch::primitive_methods(context, handles::held(context, function))
+                        .is_some_and(|(found, _)| found.raw() != generic)
+                })
             {
                 bail!(
                     skip,
@@ -2285,7 +2320,14 @@ unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
         eval::define(name_symbol, generic, table)?;
     }
     if let Some(primitive) = primitive {
-        crate::dispatch::set_primitive_methods(primitive, "reset", generic, nil())?;
+        handles::with(|context| {
+            crate::dispatch::set_primitive_methods(
+                handles::held(context, primitive),
+                "reset",
+                handles::held(context, generic),
+                handles::null(),
+            )
+        })?;
     }
     values::scalar_bool(true)
 }
@@ -2800,7 +2842,13 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
         bail!(skip, "the methods package's class table is missing");
     };
     if class_table.kind() != SexpType::Environment
-        || crate::methods::cached_class_definition(class, class_table)? != nil()
+        || handles::with_result(|context| {
+            let class = handles::held(context, class);
+            let Some(table) = handles::held(context, class_table).downcast::<Environment>() else {
+                return Ok(nil());
+            };
+            crate::methods::cached_class_definition(context, class, table).map(Local::raw)
+        })? != nil()
     {
         bail!(skip, "the class is already defined");
     }
@@ -3210,7 +3258,10 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
     } else {
         named_list(&slots)?
     };
-    let definition = crate::methods::new_object(representation_class)?;
+    let definition = handles::with_result(|context| {
+        let definition = handles::held(context, representation_class);
+        crate::methods::new_object(context, definition).map(Local::raw)
+    })?;
     crate::heap().root(definition);
     let version = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
     crate::heap().root(version);
@@ -3392,7 +3443,13 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
         bail!(skip, "the methods package's class table is missing");
     };
     if class_table.kind() != SexpType::Environment
-        || crate::methods::cached_class_definition(class, class_table)? != nil()
+        || handles::with_result(|context| {
+            let class = handles::held(context, class);
+            let Some(table) = handles::held(context, class_table).downcast::<Environment>() else {
+                return Ok(nil());
+            };
+            crate::methods::cached_class_definition(context, class, table).map(Local::raw)
+        })? != nil()
     {
         bail!(skip, "the class is already defined");
     }
@@ -3437,7 +3494,10 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
 
     // `makeClassRepresentation(name, package = package)` wrapped as a union, which `setClass()`
     // completes unchanged and binds.
-    let definition = crate::methods::new_object(union_class)?;
+    let definition = handles::with_result(|context| {
+        let definition = handles::held(context, union_class);
+        crate::methods::new_object(context, definition).map(Local::raw)
+    })?;
     crate::heap().root(definition);
     let version = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
     crate::heap().root(version);
@@ -3624,7 +3684,10 @@ unsafe fn add_union_member(
         let prototype = if member_virtual {
             slot(member_definition, symbols().prototype)?
         } else {
-            crate::methods::new_object(member_definition)?
+            handles::with_result(|context| {
+                let definition = handles::held(context, member_definition);
+                crate::methods::new_object(context, definition).map(Local::raw)
+            })?
         };
         crate::subset::assign_slot(union_updated, symbols().prototype, prototype)?;
     }
@@ -4543,7 +4606,16 @@ unsafe fn cache_foreign_generic(
         bail!(false);
     }
     // `getGeneric(f, FALSE, searchWhere, fpkg)` searches from the namespace, not the cache.
-    let generic = crate::methods::visible_generic(symbol, place)?;
+    let generic = handles::with_result(|context| {
+        let Some(symbol) = handles::held(context, symbol).downcast::<Symbol>() else {
+            return Ok(nil());
+        };
+        let symbol = handles::permanent(symbol);
+        let Some(place) = handles::held(context, place).downcast::<Environment>() else {
+            return Ok(nil());
+        };
+        crate::methods::visible_generic(context, symbol, place).map(Local::raw)
+    })?;
     if generic == nil()
         || generic.kind() != SexpType::Closure
         || slot_text(generic, "package")? != generic_package
@@ -4608,7 +4680,18 @@ unsafe fn cache_foreign_generic(
                 // `getGeneric()` answers from the generic table first, which is the only place
                 // the generic of a primitive member such as `&` lives.
                 let cached = quiet_value(member_symbol, generic_table)?;
-                let visible = crate::methods::visible_generic(member_symbol, place)?;
+                let visible = handles::with_result(|context| {
+                    let Some(symbol) = handles::held(context, member_symbol).downcast::<Symbol>()
+                    else {
+                        return Ok(nil());
+                    };
+                    let symbol = handles::permanent(symbol);
+                    let Some(place) = handles::held(context, place).downcast::<Environment>()
+                    else {
+                        return Ok(nil());
+                    };
+                    crate::methods::visible_generic(context, symbol, place).map(Local::raw)
+                })?;
                 let visible = match (cached, visible.kind()) {
                     (Some(cached), SexpType::Nil | SexpType::Builtin | SexpType::Special)
                         if cached.kind() == SexpType::Closure =>
@@ -4668,7 +4751,14 @@ unsafe fn cache_foreign_generic(
         }
     }
     for (primitive, node, methods_table) in primitives {
-        crate::dispatch::set_primitive_methods(primitive, "set", node, methods_table)?;
+        handles::with(|context| {
+            crate::dispatch::set_primitive_methods(
+                handles::held(context, primitive),
+                "set",
+                handles::held(context, node),
+                handles::held(context, methods_table),
+            )
+        })?;
     }
     Ok(true)
 }
@@ -4997,9 +5087,15 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     // slot of the new class's prototype, and a shallow copy is enough for the reason
     // `new_object_copying` gives.
     if !own_initialize && !crate::methods::first_units_pending() {
-        let value = crate::methods::new_object_copying(definition, false)?;
+        let value = handles::with_result(|context| {
+            let definition = handles::held(context, definition);
+            crate::methods::new_object_copying(context, definition, false).map(Local::raw)
+        })?;
         crate::heap().root(value);
-        let label = crate::methods::dispatch_class(value)?;
+        let label = handles::with_result(|context| {
+            let value = handles::held(context, value);
+            crate::methods::dispatch_class(context, value).map(Local::raw)
+        })?;
         let method = match quiet_value(install_text(label.element(0))?, all_table)? {
             Some(method) => Some(method),
             None => match methods_value("initialize")? {
@@ -5228,7 +5324,10 @@ unsafe fn direct_extension(
             values::triple(SexpType::Closure, simple_replace.car(), replace_body, place)?,
         )
     };
-    let extension = crate::methods::new_object(extension_class)?;
+    let extension = handles::with_result(|context| {
+        let definition = handles::held(context, extension_class);
+        crate::methods::new_object(context, definition).map(Local::raw)
+    })?;
     crate::heap().root(extension);
     let names = symbols();
     for (slot_name, value) in [

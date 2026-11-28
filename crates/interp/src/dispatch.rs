@@ -10,8 +10,8 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
-            self, Cx, Environment, Gc, Held, Integer, Language, Local, Pairlist, Promise, Str,
-            Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense, get_attribute,
+            self, Cx, Environment, Gc, Held, Integer, Language, Local, Pairlist, Pointer, Promise,
+            Str, Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense, get_attribute,
             is_s4, null, safe, set_class, symbol, text_vector, unreferenced,
         },
         interp,
@@ -2638,7 +2638,12 @@ pub enum MethodsState {
 }
 
 /// `R_set_prim_method`: `code` is one of `"clear"`, `"reset"`, `"set"` and `"suppress"`.
-pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods: Sexp) -> R<()> {
+pub fn set_primitive_methods(
+    op: Local<'_>,
+    code: &str,
+    generic: Local<'_>,
+    methods: Local<'_>,
+) -> R<()> {
     let state = match code {
         "clear" => MethodsState::None,
         "reset" => MethodsState::NeedsReset,
@@ -2650,11 +2655,11 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
             )));
         }
     };
-    if !matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
+    let Some(index) = handles::primitive_index(op) else {
         return Err(error("invalid object: must be a primitive function"));
-    }
+    };
+    // The table is traced, so the generic and the methods table it holds stay alive.
     let table = &mut interp().globals.primitive_methods;
-    let index = op.primitive_index();
     match state {
         MethodsState::None => {
             table.remove(&index);
@@ -2665,10 +2670,11 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
             }
         }
         MethodsState::Has | MethodsState::NeedsReset => {
-            if generic != nil() && generic.kind() != SexpType::Closure {
+            let generic_type = generic.r_type();
+            if generic_type != SexpType::Nil && generic_type != SexpType::Closure {
                 return Err(error(format!(
                     "the formal definition of a primitive generic must be a function object (got type '{}')",
-                    generic.kind().name()
+                    generic_type.name()
                 )));
             }
             let entry = table.entry(index).or_insert(PrimitiveMethods {
@@ -2677,11 +2683,11 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
                 methods: nil(),
             });
             entry.state = state;
-            if generic != nil() {
-                entry.generic = generic;
+            if generic_type != SexpType::Nil {
+                entry.generic = generic.raw();
             }
-            if methods != nil() {
-                entry.methods = methods;
+            if methods.r_type() != SexpType::Nil {
+                entry.methods = methods.raw();
             }
         }
     }
@@ -2689,16 +2695,19 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
 }
 
 /// The generic and methods table the methods package set for primitive `op`, if any.
-pub unsafe fn primitive_methods(op: Sexp) -> Option<(Sexp, Sexp)> {
-    if !matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
-        return None;
-    }
-    interp()
+pub fn primitive_methods<'a>(
+    _context: &'a Cx<'_>,
+    op: impl Pointer<Value>,
+) -> Option<(Gc<'a>, Gc<'a>)> {
+    let index = handles::primitive_index(op)?;
+    let entry = interp()
         .globals
         .primitive_methods
-        .get(&op.primitive_index())
-        .filter(|entry| entry.state != MethodsState::None)
-        .map(|entry| (entry.generic, entry.methods))
+        .get(&index)
+        .filter(|entry| entry.state != MethodsState::None)?;
+    // SAFETY: the interpreter's globals are traced, and the borrow of the context lets nothing
+    // change the table or collect before the values are used.
+    Some(unsafe { (Gc::adopt(entry.generic), Gc::adopt(entry.methods)) })
 }
 
 /// `R_possible_dispatch`: dispatches primitive `op` through the methods package when it made
@@ -2733,10 +2742,14 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
             })
             .collect();
         if !classes.is_empty() {
-            crate::methods::force_deferred(
-                values::primitive_name(op).as_bytes(),
-                crate::methods::Lookup::Primitive(&classes),
-            )?;
+            let name = values::primitive_name(op);
+            handles::with(|context| {
+                crate::methods::force_deferred(
+                    context,
+                    name.as_bytes(),
+                    crate::methods::Lookup::Primitive(&classes),
+                )
+            })?;
         }
     }
     let Some(entry) = interp()
@@ -2755,9 +2768,19 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
     }
     let promised = promised_args(call, args)?;
     if methods != nil()
-        && let Some(arguments) = crate::methods::signature_arguments(&promised, generic)?
+        && let Some(method) = handles::with_result(|context| {
+            let generic = handles::held(context, generic);
+            let methods = handles::held(context, methods);
+            let arguments = handles::tagged(context, &promised);
+            match crate::methods::signature_arguments(context, arguments, generic)? {
+                Some(arguments) => {
+                    crate::methods::quick_method_check(context, arguments, methods, generic)
+                        .map(|method| Some(method.raw()))
+                }
+                None => Ok(None),
+            }
+        })?
     {
-        let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
             // The default method of an internal generic such as `as.vector` stands for the
             // internal code itself; calling it would dispatch again.
@@ -2777,7 +2800,7 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
         }
     }
     let value = apply_closure(call, generic, &promised, env, None)?;
-    if value == deferred_default_marker()? {
+    if value == symbols().deferred_default_marker {
         return Ok(None);
     }
     Ok(Some(value))
@@ -2807,11 +2830,6 @@ unsafe fn cached_method_vars(method: Sexp, generic: Sexp) -> R<Vec<(Sexp, Sexp)>
     Ok(vars)
 }
 
-/// The value a generic returns to have the primitive's own code run instead.
-pub unsafe fn deferred_default_marker() -> R<Sexp> {
-    values::install("__Deferred_Default_Marker__")
-}
-
 fn do_is_methods_dispatch_on<'s>(
     context: &mut Cx<'s>,
     _arguments: &handles::Args<'_, 's>,
@@ -2835,7 +2853,10 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
     // tier 0 enters it in place of this call wherever its loop can
     // (`bytecode::standard_generic_in_place`).
     if let Some(position) = call.slot_frame()
-        && let Some(selected) = crate::methods::select_in_slots(name, position)?
+        && let Some(selected) = handles::with(|context| {
+            let name = handles::held(context, name);
+            crate::methods::select_in_slots(context, name, position)
+        })?
         && let Some(entered) =
             eval::enter_method(position, selected.method, &selected.vars, selected.standard)?
     {
@@ -2853,7 +2874,14 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
             values::string_at(name, 0).unwrap_or_default()
         )));
     }
-    crate::methods::dispatch_generic(name, env, generic)
+    handles::with_result(|context| {
+        let name = handles::held(context, name);
+        let env = handles::held(context, env)
+            .downcast::<Environment>()
+            .ok_or_else(|| error("invalid environment for the generic function"))?;
+        let generic = handles::held(context, generic);
+        crate::methods::dispatch_generic(context, name, env, generic).map(Local::raw)
+    })
 }
 
 /// The innermost function on the call stack whose `generic` attribute names `name`, which is

@@ -665,31 +665,28 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     })
 }
 
-/// The text of a condition's message, for printing, which raw code keeps alive.
-pub unsafe fn condition_message(condition: Sexp) -> R<String> {
-    handles::with(|context| {
-        let condition = handles::adopt(context, condition);
-        let Some(list) = condition.standard::<List>() else {
-            return Ok(String::new());
-        };
-        let names = context.root(get_attribute(
-            context,
-            list,
-            symbol(|symbols| symbols.names),
-        ));
-        let position = dense::<Str>(context, names)?.and_then(|names| {
-            names
-                .iter(context)
-                .position(|name| name.bytes() == b"message")
-        });
-        let Some(position) = position else {
-            return Ok(String::new());
-        };
-        let message = context.root(list.read(context).get(position));
-        Ok(match dense::<Str>(context, message)? {
-            Some(text) if !text.is_empty() => handles::text(text.get(context, 0)).into_owned(),
-            _ => String::new(),
-        })
+/// The text of a condition's message, for printing.
+pub fn condition_message(context: &mut Cx<'_>, condition: Local<'_>) -> R<String> {
+    let Some(list) = condition.standard::<List>() else {
+        return Ok(String::new());
+    };
+    let names = context.root(get_attribute(
+        context,
+        list,
+        symbol(|symbols| symbols.names),
+    ));
+    let position = dense::<Str>(context, names)?.and_then(|names| {
+        names
+            .iter(context)
+            .position(|name| name.bytes() == b"message")
+    });
+    let Some(position) = position else {
+        return Ok(String::new());
+    };
+    let message = context.root(list.read(context).get(position));
+    Ok(match dense::<Str>(context, message)? {
+        Some(text) if !text.is_empty() => handles::text(text.get(context, 0)).into_owned(),
+        _ => String::new(),
     })
 }
 

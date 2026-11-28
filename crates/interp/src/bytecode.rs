@@ -10126,7 +10126,11 @@ unsafe fn standard_generic_in_place(state: &mut Activation<'_, '_>, at: usize) -
     };
     let name = pool_constant(state, *code.add(at + 3) as usize).cdr().car();
     let references = interp.references_used;
-    let selected = match crate::methods::select_in_slots(name, interp.slot_owner as usize) {
+    let position = interp.slot_owner as usize;
+    let selected = match handles::with(|context| {
+        let name = handles::held(context, name);
+        crate::methods::select_in_slots(context, name, position)
+    }) {
         Ok(selected) => selected?,
         Err(unwind) => {
             count();

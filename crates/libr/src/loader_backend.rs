@@ -14,6 +14,7 @@ use {
     interp::{
         builtins::{BuiltinDef, Call, internal, internal_function},
         eval::{define, eval, make_promise},
+        handles::{self, Held},
         lower::{file_srcfile, lower_node, lower_node_at_line, parse_text},
         methods::{
             DeferredDefinitions, defer_definitions, drop_deferred_definitions, force_deferred_unit,
@@ -703,7 +704,8 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
         primitives,
         lazy,
         first_pending: true,
-        force,
+        // SAFETY: `force` is a closure, checked above, and `defer_definitions` preserves it.
+        force: unsafe { Held::adopt(force) },
     });
     Ok(nil())
 }
@@ -714,7 +716,7 @@ unsafe fn do_force_unit(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let generic = call.arg(1);
     let generic = (generic != nil()).then(|| generic.element(0).bytes());
-    force_deferred_unit(&root, generic)?;
+    handles::with(|context| force_deferred_unit(context, &root, generic))?;
     Ok(nil())
 }
 

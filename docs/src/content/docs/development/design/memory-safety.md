@@ -641,7 +641,10 @@ cells whose mode chooses promises, eager values or argument references, and tier
 tier 0's call path; and the condition system (`conditions.rs`: signalling, the default error and
 warning handlers, and the builtins of the handler and restart stacks), whose stacks keep raw
 fields that the heap traces and that safe code reads through `handles::handler_entries` and
-`handles::restart_entries`. A dispatched
+`handles::restart_entries`; and the methods package's routines and S4 dispatch (`methods.rs`:
+`standardGeneric`'s selection from the generic's frame or slots, `R_execMethod`, the quick method
+check of a primitive, deferred definitions, slots, class and generic lookups), whose inline cache
+holds what it names in `Held<T>` fields that the heap traces. A dispatched
 call's method variables cross into handles as `handles::MethodVariables`, a view over the
 dispatcher's pairs that every layer down to the frame push takes, so they are never copied.
 Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark

@@ -3252,7 +3252,7 @@ pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
 }
 
 /// [`get_slot`] on handles.
-fn slot_of<'s>(
+pub(crate) fn slot_of<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     slot: Local<'s, Symbol>,
@@ -3634,22 +3634,31 @@ pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
 /// As for [`set_slot`]; the write lands in `object` whoever else refers to it, which the
 /// caller accepts.
 pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    // SAFETY: the caller's roots hold the arguments, its contract accepts a write into a shared
-    // `object`, and the result is rooted before anything else allocates.
-    unsafe {
-        handles::with_result(|context| {
-            let object = handles::held(context, object);
-            let slot = handles::permanent(exact::<Symbol>(handles::held(context, symbol))?);
-            let value = handles::held(context, value);
-            let mut object = Owned::assume(object);
-            Ok(store_slot(context, &mut object, slot, value)?.raw())
-        })
-    }
+    handles::with_result(|context| {
+        let object = handles::held(context, object);
+        let slot = handles::permanent(exact::<Symbol>(handles::held(context, symbol))?);
+        let value = handles::held(context, value);
+        set_slot_in_place(context, object, slot, value).map(Local::raw)
+    })
+}
+
+/// [`assign_slot`] on handles: the write lands in `object` whoever else refers to it, which
+/// the methods package's `slot<-` relies on.
+pub(crate) fn set_slot_in_place<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    // SAFETY: GNU R's `R_do_slot_assign` writes into a shared object too, and the methods
+    // package's R code depends on it (`initialize` discards `slot<-`'s result).
+    let mut object = unsafe { Owned::assume(object) };
+    store_slot(context, &mut object, slot, value)
 }
 
 /// Sets the slot `symbol` of the owned `object` to `value`: `.Data` through the methods
 /// package's `setDataPart`, and `NULL` as the methods package's placeholder symbol.
-fn store_slot<'s>(
+pub(crate) fn store_slot<'s>(
     context: &mut Cx<'s>,
     object: &mut Owned<'s>,
     slot: Gc<'static, Symbol>,

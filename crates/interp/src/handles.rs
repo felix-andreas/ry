@@ -1656,6 +1656,17 @@ macro_rules! safe_direct {
 }
 pub(crate) use safe_direct;
 
+impl<'a, 's> Args<'a, 's, NativeCall<'a>> {
+    /// The foreign call expression, which errors name: `NULL` while a graphics device replays
+    /// its display list.
+    #[inline]
+    pub fn expression(&self) -> Local<'s> {
+        // SAFETY: the evaluator keeps the foreign call it is evaluating rooted, and `NULL` is
+        // permanent.
+        unsafe { Local::adopt(self.call.call) }
+    }
+}
+
 impl<'s> Args<'_, 's> {
     /// The call expression, which errors and warnings name.
     #[inline]
@@ -2199,6 +2210,12 @@ pub fn clear_attributes<'s, T: Kind>(
             raw.set_gp_bits(gp::S4_OBJECT, true);
         }
     }
+}
+
+/// Sets the S4 bit of `object`, which `isS4` reads.
+pub fn mark_s4<T: Kind>(_context: &mut Cx<'_>, object: &mut Owned<'_, T>) {
+    // SAFETY: the caller owns `object`, and the write changes one flag of its header.
+    unsafe { object.get().raw().set_gp_bits(gp::S4_OBJECT, true) }
 }
 
 /// Sets the class attribute, or removes it for `NULL` or an empty vector, with the object bit
@@ -3949,6 +3966,17 @@ impl<'c, 's> LiveFrame<'c, 's> {
         Some(unsafe { Gc::adopt(argument.value) })
     }
 
+    /// The tag and the value of each argument the frame was called with, as `sys.call`
+    /// matched them.
+    #[inline]
+    pub fn arguments(self) -> impl Iterator<Item = (Gc<'c>, Gc<'c>)> {
+        // SAFETY: the interpreter traces the argument stack, each tag is a symbol or `NULL`, and
+        // the borrow of the context lets nothing pop the stack before the last one is used.
+        crate::frame_args(crate::interp(), self.index)
+            .iter()
+            .map(|argument| unsafe { (Gc::adopt(argument.tag), Gc::adopt(argument.value)) })
+    }
+
     /// The register below a slot frame's slots, which holds its environment once it has one.
     #[inline]
     pub fn header(self) -> usize {
@@ -4541,6 +4569,17 @@ pub fn mark_assigned(_context: &Cx<'_>, binding: impl Pointer<Binding>) {
     }
 }
 
+/// Marks `binding` as holding a missing argument, which `missing()` reports, and as absent
+/// when the call supplied nothing for it.
+pub fn mark_missing(_context: &Cx<'_>, binding: impl Pointer<Binding>, absent: bool) {
+    // SAFETY: the cell is live, and the writes change two flags of its header.
+    unsafe {
+        let raw = binding.raw();
+        raw.set_gp_bits(gp::BINDING_MISSING, true);
+        raw.set_gp_bits(gp::BINDING_ABSENT, absent);
+    }
+}
+
 /// `symbol <- value` in `environment`, whose own frame binds `symbol` to `binding`, or not at
 /// all.
 pub fn assign_local(
@@ -4771,6 +4810,41 @@ pub fn lazy_record_header(_context: &mut Cx<'_>, value: Local<'_>) -> R<Option<(
     unsafe { crate::serialize::lazy_record_header(value.raw()) }
 }
 
+/// The methods package's namespace, once `R_initMethodDispatch` has named it.
+pub fn methods_namespace<'s>(context: &Cx<'s>) -> Option<Local<'s, Environment>> {
+    // SAFETY: the interpreter's globals are traced, so the namespace they name is live, and the
+    // root keeps it alive if they change.
+    let namespace = unsafe { Gc::<Value>::adopt(crate::interp().globals.methods_namespace) };
+    namespace
+        .downcast::<Environment>()
+        .map(|namespace| context.root(namespace))
+}
+
+/// A new S4 object without slots: `Rf_allocS4Object`.
+pub fn new_s4_object<'s>(context: &mut Cx<'s>) -> R<Owned<'s>> {
+    // SAFETY: a new S4 object holds nothing, it is rooted before anything else allocates, and
+    // only this handle reaches it.
+    unsafe {
+        let nil = values::nil();
+        let object = rooted(
+            context,
+            crate::heap().alloc_triple(SexpType::Object, nil, nil, nil)?,
+        );
+        object.raw().set_gp_bits(gp::S4_OBJECT, true);
+        Ok(Owned::assume(object))
+    }
+}
+
+/// An external pointer to nothing, with no tag and no protected value.
+pub fn null_external_pointer<'s>(context: &mut Cx<'s>) -> R<Local<'s>> {
+    // SAFETY: the pointer holds `NULL` twice, and it is rooted before anything else allocates.
+    unsafe {
+        let nil = values::nil();
+        let pointer = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil, nil)?;
+        Ok(rooted(context, pointer))
+    }
+}
+
 /// The table of loaded namespaces, by name.
 pub fn namespace_registry<'s>() -> Local<'s, Environment> {
     // SAFETY: the registry is a permanent root of the heap, and an environment.
@@ -4803,6 +4877,16 @@ pub fn builtin_definition(
 ) -> R<&'static crate::builtins::BuiltinDef> {
     // SAFETY: the function is live, and the definition table is static.
     unsafe { crate::eval::builtin_def(function.raw()) }
+}
+
+/// The index of primitive `function` in the builtin table, `None` for any other value.
+pub fn primitive_index(function: impl Pointer<Value>) -> Option<u32> {
+    let function = function.raw();
+    // SAFETY: the function is live, and a primitive's header holds its index.
+    unsafe {
+        matches!(function.kind(), SexpType::Builtin | SexpType::Special)
+            .then(|| function.primitive_index())
+    }
 }
 
 /// The base primitive called `name`, for any scope: the interpreter keeps its primitives for

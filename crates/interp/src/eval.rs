@@ -5668,6 +5668,28 @@ unsafe fn run_frame_general(
     })
 }
 
+/// Runs `function`'s body in `environment`, whose arguments are already bound, as a call with
+/// no method variables whose argument checks run once the frame is pushed: how an S4 method
+/// runs in place of its generic.
+pub fn run_in_environment<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    function: Local<'s, Closure>,
+    environment: Local<'s, Environment>,
+    sys_parent: Local<'s>,
+    args: &[Tagged<'s>],
+) -> R<Local<'s>> {
+    let frame = GeneralFrame {
+        call,
+        function,
+        body: BodyFrame::Environment(environment),
+        sys_parent,
+        args,
+        method_vars: handles::MethodVariables::none(),
+    };
+    run_general(context, &frame, Signature::Unchecked)
+}
+
 /// A closure call on the general path ([`run_general`]).
 pub struct GeneralFrame<'a, 's> {
     pub call: Local<'s>,

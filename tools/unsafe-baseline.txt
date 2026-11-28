@@ -25,13 +25,13 @@
 22 crates/interp/src/code_image.rs
 65 crates/interp/src/coerce.rs
 19 crates/interp/src/combine.rs
-15 crates/interp/src/conditions.rs
+14 crates/interp/src/conditions.rs
 180 crates/interp/src/connections.rs
 30 crates/interp/src/console_server.rs
 14 crates/interp/src/crash.rs
 32 crates/interp/src/debugger.rs
 45 crates/interp/src/deparse.rs
-72 crates/interp/src/dispatch.rs
+70 crates/interp/src/dispatch.rs
 21 crates/interp/src/distributions.rs
 11 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
@@ -41,7 +41,7 @@
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-307 crates/interp/src/handles.rs
+315 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 23 crates/interp/src/interp.rs
@@ -49,7 +49,7 @@
 5 crates/interp/src/latex.rs
 112 crates/interp/src/linalg.rs
 40 crates/interp/src/lower.rs
-59 crates/interp/src/methods.rs
+6 crates/interp/src/methods.rs
 137 crates/interp/src/methods_core.rs
 30 crates/interp/src/moves.rs
 27 crates/interp/src/native.rs

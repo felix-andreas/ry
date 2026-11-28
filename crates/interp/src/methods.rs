@@ -8,19 +8,18 @@
 
 use {
     crate::{
-        annotations::Entry,
-        builtin_libraries::{NativeCall, NativeFn},
-        builtins::Arg,
+        builtin_libraries::NativeFn,
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
-        eval::{self, CallFrame},
+        eval,
         handles::{
-            self, Cx, Environment, Expression, List, Local, NativeArgs, Str, StringFill, Symbol,
+            self, Binding, Chars, Closure, Cx, Environment, Expression, Gc, Held, Kind, List,
+            Local, NativeArgs, Pairlist, Pointer, Promise, Str, StringFill, Symbol, Tagged, Value,
             safe,
         },
         interp,
-        unwind::{Jump, R, Unwind, error, error_in},
-        values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+        unwind::{R, Unwind, error},
+        values::symbols,
     },
     heap::{
         Marker,
@@ -29,39 +28,48 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::rc::Rc,
+    std::borrow::Cow,
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
-    ("R_M_setPrimitiveMethods", set_primitive_methods_routine),
+    (
+        "R_M_setPrimitiveMethods",
+        safe!(native set_primitive_methods_routine),
+    ),
     (
         "R_clear_method_selection",
         safe!(native clear_method_selection),
     ),
     ("R_dummy_extern_place", safe!(native dummy_extern_place)),
     ("R_el_named", safe!(native element_named)),
-    ("R_externalptr_prototype_object", external_pointer_prototype),
-    ("R_getClassFromCache", class_from_cache),
-    ("R_getGeneric", get_generic_routine),
-    ("R_get_slot", get_slot),
-    ("R_hasSlot", has_slot_routine),
+    (
+        "R_externalptr_prototype_object",
+        safe!(native external_pointer_prototype),
+    ),
+    ("R_getClassFromCache", safe!(native class_from_cache)),
+    ("R_getGeneric", safe!(native get_generic_routine)),
+    ("R_get_slot", safe!(native get_slot)),
+    ("R_hasSlot", safe!(native has_slot_routine)),
     ("R_identC", safe!(native identical_strings)),
-    ("R_initMethodDispatch", init_method_dispatch),
+    ("R_initMethodDispatch", safe!(native init_method_dispatch)),
     ("R_methodsPackageMetaName", safe!(native package_meta_name)),
-    ("R_methods_test_MAKE_CLASS", test_make_class),
-    ("R_methods_test_NEW", test_new),
-    ("R_missingArg", missing_arg_routine),
-    ("R_nextMethodCall", next_method_call),
-    ("R_quick_method_check", quick_method_check_routine),
-    ("R_selectMethod", select_method),
+    ("R_methods_test_MAKE_CLASS", safe!(native test_make_class)),
+    ("R_methods_test_NEW", safe!(native test_new)),
+    ("R_missingArg", safe!(native missing_arg_routine)),
+    ("R_nextMethodCall", safe!(native next_method_call)),
+    (
+        "R_quick_method_check",
+        safe!(native quick_method_check_routine),
+    ),
+    ("R_selectMethod", safe!(native select_method)),
     ("R_set_el_named", safe!(native set_element_named)),
-    ("R_set_slot", set_slot),
-    ("R_standardGeneric", standard_generic),
+    ("R_set_slot", safe!(native set_slot)),
+    ("R_standardGeneric", safe!(native standard_generic)),
     ("do_substitute_direct", safe!(native substitute_direct)),
-    ("Rf_allocS4Object", alloc_s4_object),
+    ("Rf_allocS4Object", safe!(native alloc_s4_object)),
     ("R_set_method_dispatch", safe!(native set_method_dispatch)),
-    ("R_get_primname", primitive_name),
-    ("new_object", new_object_routine),
+    ("R_get_primname", safe!(native primitive_name)),
+    ("new_object", safe!(native new_object_routine)),
 ];
 
 /// S4 definitions a package loader holds back until first use, in units. The first unit holds
@@ -82,13 +90,13 @@ pub struct DeferredDefinitions {
     pub first_pending: bool,
     /// Preserved while registered: a closure the loader defined in a frame that has returned,
     /// which nothing counted holds, so the frame would otherwise be released under it.
-    pub force: Sexp,
+    pub force: Held<Closure>,
 }
 
 /// Registers `definitions`, replacing any registered under the same key.
 pub fn defer_definitions(definitions: DeferredDefinitions) {
     drop_deferred_definitions(&definitions.key);
-    crate::heap().preserve(definitions.force);
+    crate::heap().preserve(definitions.force.raw());
     interp().globals.deferred_definitions.push(definitions);
 }
 
@@ -100,7 +108,7 @@ pub fn drop_deferred_definitions(key: &str) {
         .position(|definitions| definitions.key == key)
     {
         let dropped = deferred.remove(position);
-        crate::heap().release(dropped.force);
+        crate::heap().release(dropped.force.raw());
     }
 }
 
@@ -117,8 +125,8 @@ pub fn first_units_pending() -> bool {
 /// Runs the unit of the definitions registered under `key` that `generic` names, or the
 /// first unit for `None`, unless it ran already: what a placeholder the loader bound in a
 /// unit's place does when code reaches it.
-pub unsafe fn force_deferred_unit(key: &str, generic: Option<&[u8]>) -> R<()> {
-    let deferred = &mut interp().globals.deferred_definitions;
+pub fn force_deferred_unit(context: &mut Cx<'_>, key: &str, generic: Option<&[u8]>) -> R<()> {
+    let deferred = &interp().globals.deferred_definitions;
     let Some(position) = deferred
         .iter()
         .position(|definitions| definitions.key == key)
@@ -126,65 +134,75 @@ pub unsafe fn force_deferred_unit(key: &str, generic: Option<&[u8]>) -> R<()> {
         return Ok(());
     };
     let lazy = generic.filter(|generic| deferred[position].lazy.contains(*generic));
-    run_unit(position, lazy)
+    run_unit(context, position, lazy)
 }
 
 /// `R_dispatchGeneric`: selects and runs the method of generic `generic` named `name` for the
 /// arguments in the generic's frame `env`.
-pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> {
+pub fn dispatch_generic<'s>(
+    context: &mut Cx<'s>,
+    name: Local<'s>,
+    env: Local<'s, Environment>,
+    generic: Local<'s>,
+) -> R<Local<'s>> {
     activity::count(Counter::S4Dispatches);
     let selecting = activity::enter(Activity::S4Dispatch, 0);
-    let generic_name = || values::first_string(name).unwrap_or_default().into_owned();
-    if generic.kind() != SexpType::Closure {
-        let class = dispatch::class_of_raw(generic)?;
+    let Some(generic) = generic.downcast::<Closure>() else {
+        let class = dispatch::class_of(context, generic)?;
         return Err(error(format!(
             "expected a generic function or a primitive for dispatch, got an object of class \"{}\"",
-            values::first_string(class).unwrap_or_default()
+            first_text(context, class)
         )));
-    }
+    };
     // A package loader may hold back methods for this generic, which must be in its tables
     // before it selects one.
     if !interp().globals.deferred_definitions.is_empty() {
-        force_deferred(generic_name().as_bytes(), Lookup::Generic)?;
+        let generic_name = first_text(context, name);
+        force_deferred(context, generic_name.as_bytes(), Lookup::Generic)?;
     }
-    let generic_env = generic.tag();
-    let mut method = match valid_site(generic).map(|site| site.signature.clone()) {
+    let generic_env = context.root(generic.read(context).environment());
+    let cached = valid_site(context, generic.read(context)).map(|site| site.signature.clone());
+    let mut method = match cached {
         Some(signature) => {
-            let values = signature_values(&signature, env, &generic_name)?;
-            let classes = class_keys(&signature, &values)?;
-            match cached_method(generic, &classes) {
+            let values = signature_values(context, &signature, env, name)?;
+            let classes = class_keys(context, &signature, &values)?;
+            match cached_method(context, generic.read(context), &classes) {
                 Some(method) => method,
-                None => select_method_for(generic, generic_env, &signature, &values, &classes)?,
+                None => {
+                    select_method_for(context, generic, generic_env, &signature, &values, &classes)?
+                }
             }
         }
         None => {
-            let signature = signature_symbols(generic_env)?;
-            let values = signature_values(&signature, env, &generic_name)?;
-            let classes = class_keys(&signature, &values)?;
-            select_method_for(generic, generic_env, &signature, &values, &classes)?
+            let signature = signature_symbols(context, generic_env)?;
+            let values = signature_values(context, &signature, env, name)?;
+            let classes = class_keys(context, &signature, &values)?;
+            select_method_for(context, generic, generic_env, &signature, &values, &classes)?
         }
     };
-    if method.is_object() {
-        method = load_method(method, name, env)?;
+    if handles::is_object(method) {
+        method = load_method(context, method, name, env)?;
     }
     drop(selecting);
-    match method.kind() {
-        SexpType::Closure => {
-            if values::inherits(method, "internalDispatchMethod") {
-                dispatch::deferred_default_marker()
-            } else {
-                exec_method(method, env)
-            }
+    match method.r_type() {
+        SexpType::Closure if !handles::inherits(context, method, "internalDispatchMethod") => {
+            let Some(method) = method.downcast::<Closure>() else {
+                return Err(error("invalid object (non-function) used as method"));
+            };
+            exec_method(context, method, env)
         }
         // A primitive is never a method; it is the default of a primitive made generic, and
         // the marker tells the primitive to run its own code.
-        SexpType::Builtin | SexpType::Special => dispatch::deferred_default_marker(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => {
+            Ok(handles::permanent_symbol(|symbols| symbols.deferred_default_marker).value())
+        }
         _ => Err(error("invalid object (non-function) used as method")),
     }
 }
 
 /// A method [`select_in_slots`] found in the generic's site, with what
-/// [`eval::enter_method`] takes to run it on the generic's slots.
+/// [`eval::enter_method`] takes to run it on the generic's slots. The site holds the method
+/// and the values of `vars`.
 pub(crate) struct Selected {
     pub method: Sexp,
     /// The dispatch variables the method's frame binds, `.Generic` last
@@ -201,88 +219,111 @@ pub(crate) struct Selected {
 /// selects the method): the site holds no method for these classes, the method needs more
 /// than its dispatch variables ([`S4Entry::plain`]), a loader holds definitions back, or
 /// forcing an argument gave the frame its environment.
-pub(crate) unsafe fn select_in_slots(name: Sexp, position: usize) -> R<Option<Selected>> {
+pub(crate) fn select_in_slots(
+    context: &mut Cx<'_>,
+    name: Local<'_>,
+    position: usize,
+) -> R<Option<Selected>> {
     let state = interp();
     if position + 1 != state.frames.len() || !state.globals.deferred_definitions.is_empty() {
         return Ok(None);
     }
-    let (generic, header, missing) = {
-        let frame = &state.frames[position];
-        (frame.function.raw(), frame.slots as usize, frame.missing)
-    };
-    let Some(mut site) = valid_site(generic) else {
+    let generic = context.root(handles::live_frame(context, position).function());
+    let Some(mut site) = valid_site(context, generic.read(context)) else {
         return Ok(None);
     };
     // `standardGeneric` dispatches for the innermost generic on the stack that `name` names,
     // which is this frame's function when its `generic` attribute is that name.
-    let attribute = values::get_attr(generic, symbols().generic);
-    if site.positions.is_empty()
-        || attribute.kind() != SexpType::String
-        || length(attribute) == 0
-        || !values::same_string(
-            values::string_elt(attribute, 0),
-            values::string_elt(name, 0),
-        )
-    {
+    let attribute = handles::get_attribute(context, generic, handles::symbol(|s| s.generic));
+    let names_generic = match (attribute.standard::<Str>(), name.standard::<Str>()) {
+        (Some(attribute), Some(name)) => {
+            !attribute.is_empty()
+                && !name.is_empty()
+                && handles::same_text(attribute.get(0), name.read(context).get(0))
+        }
+        _ => false,
+    };
+    if site.positions.is_empty() || !names_generic {
         return Ok(None);
     }
     activity::count(Counter::S4Dispatches);
     let _selecting = activity::enter(Activity::S4Dispatch, 0);
     // Every argument is forced before any class is read, as `dispatch_generic` does: forcing
     // runs code that may define classes and methods.
-    let mut arguments: SmallVec<[Sexp; 2]> = SmallVec::new();
+    let mut arguments: SmallVec<[Local<'_>; 2]> = SmallVec::new();
     let mut index = 0;
     while let Some(&place) = site.positions.get(index) {
         let place = place as usize;
-        let mut value = *crate::bytecode::register_address(header + 1 + place);
-        if missing & (1 << place) != 0 {
-            value = missing_arg();
-        } else if value.kind() == SexpType::Promise {
-            let promise = value;
-            value = promise.car();
-            if value == unbound() {
-                value = match eval::settled_without_code(promise)? {
-                    Some(value) => value,
+        let frame = handles::live_frame(context, position);
+        let value = if frame.is_missing_formal(place) {
+            handles::missing_argument()
+        } else {
+            let value = frame.slot(place);
+            match value.downcast::<Promise>() {
+                None => context.root(value),
+                Some(promise) if !handles::is_unbound(promise.result()) => {
+                    context.root(promise.result())
+                }
+                Some(promise) => match eval::settle_without_code(context, promise) {
+                    Some(value) => context.root(value),
                     None => {
+                        let promise = context.root(promise);
                         let symbol = site.signature[index];
-                        let forced = catching_errors(nil(), || eval::force_promise(promise))?;
-                        let value = forced.map_err(|message| {
-                            let generic_name = values::first_string(name).unwrap_or_default();
-                            argument_error(symbol, &generic_name, &message)
+                        let forced = catching_errors(context, handles::null(), |context| {
+                            handles::force(context, promise.value())
                         })?;
+                        let value = match forced {
+                            Ok(value) => value,
+                            Err(message) => {
+                                let generic_name = first_text(context, name);
+                                return Err(argument_error(
+                                    context,
+                                    symbol,
+                                    &generic_name,
+                                    &message,
+                                ));
+                            }
+                        };
                         // The argument's code may have defined a method or left the frame
                         // with an environment, so the site and the frame are read again.
-                        let state = interp();
-                        if position + 1 != state.frames.len()
-                            || state.frames[position].env.raw() != nil()
+                        if position + 1 != interp().frames.len()
+                            || handles::live_frame(context, position)
+                                .environment()
+                                .is_some()
                         {
                             return Ok(None);
                         }
-                        match valid_site(generic) {
+                        match valid_site(context, generic.read(context)) {
                             Some(again) if again.positions.len() > index => site = again,
                             _ => return Ok(None),
                         }
                         value
                     }
-                };
+                },
             }
-        }
+        };
         arguments.push(value);
         index += 1;
     }
-    let classes = class_keys(&site.signature, &arguments)?;
+    let classes = class_keys(context, &site.signature, &arguments)?;
     let Some(entry) = site
         .entries
         .iter()
-        .find(|entry| entry.classes.as_slice() == classes.as_slice())
+        .find(|entry| same_classes(&entry.classes, &classes))
     else {
         return Ok(None);
     };
-    if !entry.plain || entry.cell.cdr() != entry.method {
+    if !entry.plain
+        || !entry
+            .cell
+            .get(context)
+            .content()
+            .is(entry.method.get(context))
+    {
         return Ok(None);
     }
     Ok(Some(Selected {
-        method: entry.method,
+        method: entry.method.raw(),
         vars: MethodVars::from_slice(&entry.vars),
         standard: site.standard,
     }))
@@ -311,13 +352,13 @@ const S4_ENTRIES: usize = 4;
 const MAX_S4_SITES: usize = 4096;
 
 struct S4Site {
-    env: Sexp,
+    env: Held<Environment>,
     /// The `.SigArgs`, `.SigLength` and `.AllMTable` bindings in the generic's environment and
     /// the values they held.
-    bindings: [(Sexp, Sexp); 3],
+    bindings: [(Held<Binding>, Held<Value>); 3],
     /// The generic's own `.Generic` binding and the value it held, when it has one.
-    name: Option<(Sexp, Sexp)>,
-    signature: SmallVec<[Sexp; 2]>,
+    name: Option<(Held<Binding>, Held<Value>)>,
+    signature: Signature,
     /// The place of each signature argument among the generic's formals, which is its slot in
     /// the generic's slot frame ([`select_in_slots`]). Empty when one of them is `...`, no
     /// formal, or past the formals a slot frame keeps a missing bit for, and dispatch then
@@ -331,9 +372,9 @@ struct S4Site {
 
 struct S4Entry {
     /// The first class of each signature argument, an interned string, or `"missing"`.
-    classes: SmallVec<[Sexp; 2]>,
-    cell: Sexp,
-    method: Sexp,
+    classes: SmallVec<[Held<Chars>; 2]>,
+    cell: Held<Binding>,
+    method: Held<Value>,
     /// Whether the method can run on the generic's arguments as they are: it is a closure
     /// with the generic's formals, and loading it binds nothing but `vars`
     /// ([`plain_method_vars`]).
@@ -341,6 +382,10 @@ struct S4Entry {
     /// The dispatch variables a plain method's frame binds.
     vars: MethodVars,
 }
+
+/// A generic's signature arguments that take part in dispatch, which are symbols and so
+/// never freed.
+type Signature = SmallVec<[Gc<'static, Symbol>; 2]>;
 
 type MethodVars = SmallVec<[(Sexp, Sexp); 4]>;
 
@@ -359,61 +404,86 @@ pub(crate) unsafe fn trace_s4_site(cache: &S4Cache, generic: Sexp, marker: &mut 
 
 unsafe fn mark_s4_site(generic: Sexp, site: &S4Site, marker: &mut Marker<'_>) {
     marker.mark(generic);
-    marker.mark(site.env);
-    for (cell, value) in site.bindings.into_iter().chain(site.name) {
-        marker.mark(cell);
-        marker.mark(value);
+    marker.mark(site.env.raw());
+    for (cell, value) in site.bindings.iter().chain(&site.name) {
+        marker.mark(cell.raw());
+        marker.mark(value.raw());
     }
     for entry in &site.entries {
-        for &class in &entry.classes {
-            marker.mark(class);
+        for class in &entry.classes {
+            marker.mark(class.raw());
         }
-        marker.mark(entry.cell);
-        marker.mark(entry.method);
+        marker.mark(entry.cell.raw());
+        marker.mark(entry.method.raw());
         for &(_, value) in &entry.vars {
             marker.mark(value);
         }
     }
 }
 
+/// `value` held by the S4 cache.
+fn hold<T: Kind>(value: impl Pointer<T>) -> Held<T> {
+    // SAFETY: what the cache holds is stored in a site, which `trace_s4_cache` marks.
+    unsafe { Held::adopt(value.raw()) }
+}
+
 /// The site of `generic`, when the bindings it was made from hold what they held.
-unsafe fn valid_site(generic: Sexp) -> Option<&'static S4Site> {
-    let site = interp().method_cache.s4.sites.get(&generic)?;
-    (site.env == generic.tag()
+fn valid_site(context: &Cx<'_>, generic: Gc<'_, Closure>) -> Option<&'static S4Site> {
+    let site = interp().method_cache.s4.sites.get(&generic.raw())?;
+    (site.env.raw() == generic.environment().raw()
         && site
             .bindings
             .iter()
             .chain(&site.name)
-            .all(|&(cell, value)| cell.cdr() == value))
+            .all(|(cell, value)| cell.get(context).content().is(value.get(context))))
     .then_some(site)
 }
 
-unsafe fn cached_method(generic: Sexp, classes: &[Sexp]) -> Option<Sexp> {
-    let site = interp().method_cache.s4.sites.get(&generic)?;
+fn cached_method<'s>(
+    context: &Cx<'s>,
+    generic: Gc<'_, Closure>,
+    classes: &[Local<'_, Chars>],
+) -> Option<Local<'s>> {
+    let site = interp().method_cache.s4.sites.get(&generic.raw())?;
     let entry = site
         .entries
         .iter()
-        .find(|entry| entry.classes.as_slice() == classes)?;
-    (entry.cell.cdr() == entry.method).then_some(entry.method)
+        .find(|entry| same_classes(&entry.classes, classes))?;
+    let method = entry.method.get(context);
+    entry
+        .cell
+        .get(context)
+        .content()
+        .is(method)
+        .then(|| context.root(method))
+}
+
+fn same_classes(held: &[Held<Chars>], classes: &[Local<'_, Chars>]) -> bool {
+    held.len() == classes.len()
+        && held
+            .iter()
+            .zip(classes)
+            .all(|(held, class)| held.raw() == class.raw())
 }
 
 /// The values of the signature arguments in the generic's frame `env`, the missing marker for
 /// one the call did not supply, and for `...` the class `.dotsClass` gives it.
-unsafe fn signature_values(
-    signature: &[Sexp],
-    env: Sexp,
-    generic_name: &dyn Fn() -> String,
-) -> R<SmallVec<[Sexp; 2]>> {
-    let mut values: SmallVec<[Sexp; 2]> = SmallVec::new();
+fn signature_values<'s>(
+    context: &mut Cx<'s>,
+    signature: &[Gc<'static, Symbol>],
+    env: Local<'s, Environment>,
+    name: Local<'s>,
+) -> R<SmallVec<[Local<'s>; 2]>> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut values = SmallVec::new();
     for &symbol in signature {
-        let value = if symbol == symbols().dots {
-            dots_class(env)?
-        } else if bound_missing(symbol, env)? {
-            missing_arg()
+        let value = if symbol.is(dots) {
+            dots_class(context, env)?
+        } else if bound_missing(context, symbol, env)? {
+            handles::missing_argument()
         } else {
-            evaluate_argument(symbol, env, generic_name)?
+            evaluate_argument(context, symbol, env, name)?
         };
-        crate::heap().root(value);
         values.push(value);
     }
     Ok(values)
@@ -421,18 +491,27 @@ unsafe fn signature_values(
 
 /// The class each signature argument contributes to the method's label: its value's first
 /// class, `"missing"` for a missing argument, and for `...` the class `.dotsClass` gave.
-unsafe fn class_keys(signature: &[Sexp], argument_values: &[Sexp]) -> R<SmallVec<[Sexp; 2]>> {
+fn class_keys<'s>(
+    context: &mut Cx<'s>,
+    signature: &[Gc<'static, Symbol>],
+    argument_values: &[Local<'s>],
+) -> R<SmallVec<[Local<'s, Chars>; 2]>> {
+    let dots = handles::symbol(|symbols| symbols.dots);
     let mut classes = SmallVec::new();
     for (&symbol, &value) in signature.iter().zip(argument_values) {
-        let class = if value == missing_arg() {
-            symbols().missing.car()
-        } else if symbol == symbols().dots {
-            if value.kind() != SexpType::String || length(value) == 0 {
-                return Err(error("'.dotsClass' did not return a class"));
-            }
-            values::string_elt(value, 0)
+        let class = if handles::is_missing_argument(value) {
+            context.root(handles::symbol(|symbols| symbols.missing).name())
         } else {
-            values::string_elt(dispatch::class_of_raw(value)?, 0)
+            let class = if symbol.is(dots) {
+                value
+            } else {
+                dispatch::class_of(context, value)?
+            };
+            match handles::dense::<Str>(context, class)? {
+                Some(class) if !class.is_empty() => context.root(class.get(context, 0)),
+                _ if symbol.is(dots) => return Err(error("'.dotsClass' did not return a class")),
+                _ => return Err(error("internal error: an object has no class")),
+            }
         };
         classes.push(class);
     }
@@ -441,144 +520,182 @@ unsafe fn class_keys(signature: &[Sexp], argument_values: &[Sexp]) -> R<SmallVec
 
 /// Selects the method of `generic` for the signature arguments' `values` and classes, from its
 /// methods table or by inheritance, and refreshes the generic's site.
-unsafe fn select_method_for(
-    generic: Sexp,
-    generic_env: Sexp,
-    signature: &[Sexp],
-    argument_values: &[Sexp],
-    classes: &[Sexp],
-) -> R<Sexp> {
-    let table = all_methods_table(generic, generic_env)?;
+fn select_method_for<'s>(
+    context: &mut Cx<'s>,
+    generic: Local<'s, Closure>,
+    generic_env: Local<'s, Environment>,
+    signature: &[Gc<'static, Symbol>],
+    argument_values: &[Local<'s>],
+    classes: &[Local<'s, Chars>],
+) -> R<Local<'s>> {
+    let table = all_methods_table(context, generic, generic_env)?;
     let mut label: SmallVec<[u8; 64]> = SmallVec::new();
     for (index, class) in classes.iter().enumerate() {
         if index > 0 {
             label.push(b'#');
         }
-        label.extend_from_slice(class.bytes());
+        label.extend_from_slice(class.bytes(context));
     }
-    let label = values::install_bytes(&label)?;
-    let heap = crate::heap();
-    let cell = heap.frame_cell(table, label);
-    let method = match cell {
-        Some(cell) => eval::value_of(eval::cell_value(cell)?)?,
-        None => unbound(),
-    };
-    if method == unbound() {
-        let mut full_classes = Vec::with_capacity(argument_values.len());
+    let label = handles::install_bytes(context, &label)?;
+    let Some(method) = frame_forced(context, table, label)? else {
+        let dots = handles::symbol(|symbols| symbols.dots);
+        let mut full_classes: SmallVec<[Local<'s>; 2]> = SmallVec::new();
         for (&symbol, &value) in signature.iter().zip(argument_values) {
-            let class = if value == missing_arg() {
-                values::scalar_string("missing")?
-            } else if symbol == symbols().dots {
+            let class = if handles::is_missing_argument(value) {
+                handles::text_vector(context, &["missing"])?.value()
+            } else if symbol.is(dots) {
                 value
             } else {
-                dispatch_class(value)?
+                dispatch_class(context, value)?
             };
-            heap.root(class);
             full_classes.push(class);
         }
-        return inherited_method(&full_classes, generic, table);
-    }
-    if let Some(cell) = cell
-        && !cell.has_gp(gp::ACTIVE_BINDING)
-        && cell.cdr() == method
+        return inherited_method(context, &full_classes, generic, table);
+    };
+    if let Some(binding) = handles::frame_binding(context, table, label)
+        && !binding.is_active()
+        && binding.content().is(method)
     {
-        remember_method(generic, generic_env, signature, classes, cell, method);
+        remember_method(
+            context,
+            generic,
+            generic_env,
+            signature,
+            classes,
+            binding,
+            method,
+        );
     }
     Ok(method)
 }
 
-unsafe fn remember_method(
-    generic: Sexp,
-    generic_env: Sexp,
-    signature: &[Sexp],
-    classes: &[Sexp],
-    cell: Sexp,
-    method: Sexp,
+fn remember_method(
+    context: &Cx<'_>,
+    generic: Local<'_, Closure>,
+    generic_env: Local<'_, Environment>,
+    signature: &[Gc<'static, Symbol>],
+    classes: &[Local<'_, Chars>],
+    cell: Gc<'_, Binding>,
+    method: Local<'_>,
 ) {
-    let heap = crate::heap();
-    let symbols = symbols();
-    let mut bindings = [(nil(), nil()); 3];
-    for (slot, symbol) in
-        bindings
-            .iter_mut()
-            .zip([symbols.sig_args, symbols.sig_length, symbols.all_mtable])
-    {
-        let Some(binding) = heap.frame_cell(generic_env, symbol) else {
+    let mut bindings: SmallVec<[(Gc<'_, Binding>, Gc<'_>); 3]> = SmallVec::new();
+    for symbol in [
+        handles::symbol(|symbols| symbols.sig_args),
+        handles::symbol(|symbols| symbols.sig_length),
+        handles::symbol(|symbols| symbols.all_mtable),
+    ] {
+        let Some(binding) = handles::frame_binding(context, generic_env, symbol) else {
             return;
         };
-        if binding.has_gp(gp::ACTIVE_BINDING) {
+        if binding.is_active() {
             return;
         }
-        *slot = (binding, binding.cdr());
+        bindings.push((binding, binding.content()));
     }
-    let name = heap
-        .frame_cell(generic_env, symbols.dot_generic)
-        .filter(|binding| !binding.has_gp(gp::ACTIVE_BINDING))
-        .map(|binding| (binding, binding.cdr()));
+    let name = handles::frame_binding(
+        context,
+        generic_env,
+        handles::symbol(|symbols| symbols.dot_generic),
+    )
+    .filter(|binding| !binding.is_active())
+    .map(|binding| (binding, binding.content()));
     // Classes that are not interned strings would never compare equal.
-    if !classes.iter().all(|class| class.has_gp(gp::CACHED)) {
+    if !classes
+        .iter()
+        .all(|class| class.read(context).has_mark(gp::CACHED))
+    {
         return;
     }
     let method_cache = &mut interp().method_cache;
-    method_cache.note_written(dispatch::Written::S4Site(generic));
+    method_cache.note_written(dispatch::Written::S4Site(generic.raw()));
     let cache = &mut method_cache.s4;
     if cache.sites.len() >= MAX_S4_SITES {
         cache.sites.clear();
     }
-    let site = cache.sites.entry(generic).or_insert_with(|| S4Site {
-        env: generic_env,
-        bindings,
-        name,
-        signature: SmallVec::new(),
+    let held_bindings = || {
+        [0, 1, 2].map(|index| {
+            let (binding, value) = bindings[index];
+            (hold(binding), hold(value))
+        })
+    };
+    let site = cache.sites.entry(generic.raw()).or_insert_with(|| S4Site {
+        env: hold(generic_env),
+        bindings: held_bindings(),
+        name: name.map(|(binding, value)| (hold(binding), hold(value))),
+        signature: Signature::new(),
         positions: SmallVec::new(),
         standard: false,
         entries: SmallVec::new(),
     });
-    if site.env != generic_env
-        || site.bindings != bindings
-        || site.name != name
-        || site.signature.as_slice() != signature
-    {
-        site.env = generic_env;
-        site.bindings = bindings;
-        site.name = name;
+    let same_pair = |held: &(Held<Binding>, Held<Value>),
+                     (binding, value): (Gc<'_, Binding>, Gc<'_>)| {
+        held.0.raw() == binding.raw() && held.1.raw() == value.raw()
+    };
+    let unchanged = site.env.raw() == generic_env.raw()
+        && site
+            .bindings
+            .iter()
+            .zip(&bindings)
+            .all(|(held, &pair)| same_pair(held, pair))
+        && match (&site.name, name) {
+            (Some(held), Some(pair)) => same_pair(held, pair),
+            (None, None) => true,
+            _ => false,
+        }
+        && site.signature.len() == signature.len()
+        && site
+            .signature
+            .iter()
+            .zip(signature)
+            .all(|(held, symbol)| held.is(*symbol));
+    if !unchanged {
+        site.env = hold(generic_env);
+        site.bindings = held_bindings();
+        site.name = name.map(|(binding, value)| (hold(binding), hold(value)));
         site.signature = signature.into();
         site.positions.clear();
-        let dots = symbols.dots;
+        let closure = generic.read(context);
+        let dots = handles::symbol(|symbols| symbols.dots);
         for &symbol in signature {
-            let mut formal = generic.car();
+            let mut formal = closure.formals().downcast::<Pairlist>();
             let mut place = 0;
-            while formal.kind() == SexpType::Pairlist && formal.tag() != symbol {
-                formal = formal.cdr();
+            while let Some(cell) = formal
+                && !cell.tag().is(symbol)
+            {
+                formal = cell.rest().downcast::<Pairlist>();
                 place += 1;
             }
-            if formal.kind() != SexpType::Pairlist || symbol == dots || place >= 64 {
+            if formal.is_none() || symbol.is(dots) || place >= 64 {
                 site.positions.clear();
                 break;
             }
             site.positions.push(place as u8);
         }
-        let body = crate::bytecode::closure_body(generic);
-        site.standard = body.kind() == SexpType::Language
-            && body.car() == symbols.standard_generic
-            && body.cdr().kind() == SexpType::Pairlist
-            && body.cdr().cdr() == nil()
-            && body.cdr().tag() == nil()
-            && body.cdr().car().kind() == SexpType::String;
+        let standard_generic = handles::symbol(|symbols| symbols.standard_generic);
+        site.standard = handles::closure_source(closure)
+            .and_then(|body| body.downcast::<handles::Language>())
+            .is_some_and(|body| {
+                body.head().is(standard_generic)
+                    && body.rest().downcast::<Pairlist>().is_some_and(|argument| {
+                        argument.rest().is(handles::null())
+                            && argument.tag().is(handles::null())
+                            && argument.head().r_type() == SexpType::String
+                    })
+            });
         site.entries.clear();
     }
-    let vars = name.and_then(|(_, name)| plain_method_vars(generic, method, name));
+    let vars = name.and_then(|(_, name)| plain_method_vars(context, generic, method, name));
     let entry = S4Entry {
-        classes: classes.into(),
-        cell,
-        method,
+        classes: classes.iter().map(|&class| hold(class)).collect(),
+        cell: hold(cell),
+        method: hold(method),
         plain: vars.is_some(),
         vars: vars.unwrap_or_default(),
     };
     if let Some(stale) = site
         .entries
         .iter_mut()
-        .find(|stale| stale.classes.as_slice() == classes)
+        .find(|stale| same_classes(&stale.classes, classes))
     {
         *stale = entry;
     } else if site.entries.len() < S4_ENTRIES {
@@ -591,100 +708,122 @@ unsafe fn remember_method(
 /// that: the method is no closure, it stands for a primitive's own code, its formals are not
 /// the generic's, or it is a method definition with attributes that only the methods
 /// package's `loadMethod` knows how to load ([`load_method`]).
-unsafe fn plain_method_vars(generic: Sexp, method: Sexp, generic_name: Sexp) -> Option<MethodVars> {
-    if method.kind() != SexpType::Closure || values::inherits(method, "internalDispatchMethod") {
+fn plain_method_vars(
+    context: &Cx<'_>,
+    generic: Local<'_, Closure>,
+    method: Local<'_>,
+    generic_name: Gc<'_>,
+) -> Option<MethodVars> {
+    let closure = method.downcast::<Closure>()?;
+    if handles::inherits(context, method, "internalDispatchMethod") {
         return None;
     }
-    let (mut formal, mut generic_formal) = (method.car(), generic.car());
-    while formal.kind() == SexpType::Pairlist && generic_formal.kind() == SexpType::Pairlist {
-        if formal.tag() != generic_formal.tag() {
+    let (mut formal, mut generic_formal) = (
+        closure.read(context).formals().downcast::<Pairlist>(),
+        generic.read(context).formals().downcast::<Pairlist>(),
+    );
+    while let (Some(cell), Some(generic_cell)) = (formal, generic_formal) {
+        if !cell.tag().is(generic_cell.tag()) {
             return None;
         }
-        formal = formal.cdr();
-        generic_formal = generic_formal.cdr();
+        formal = cell.rest().downcast::<Pairlist>();
+        generic_formal = generic_cell.rest().downcast::<Pairlist>();
     }
-    if formal.kind() == SexpType::Pairlist || generic_formal.kind() == SexpType::Pairlist {
+    if formal.is_some() || generic_formal.is_some() {
         return None;
     }
     let symbols = symbols();
     let mut vars = MethodVars::new();
-    if method.is_object() {
-        let mut attribute = method.attrib();
-        while attribute.kind() == SexpType::Pairlist {
-            let tag = attribute.tag();
-            if tag == symbols.target {
-                vars.push((symbols.dot_target, attribute.car()));
-            } else if tag == symbols.defined {
-                vars.push((symbols.dot_defined, attribute.car()));
-            } else if tag != symbols.generic && tag != symbols.class && tag != symbols.srcref {
+    if handles::is_object(method) {
+        for (tag, value) in handles::attribute_cells(context, method) {
+            if tag.raw() == symbols.target {
+                vars.push((symbols.dot_target, value.raw()));
+            } else if tag.raw() == symbols.defined {
+                vars.push((symbols.dot_defined, value.raw()));
+            } else if tag.raw() != symbols.generic
+                && tag.raw() != symbols.class
+                && tag.raw() != symbols.srcref
+            {
                 return None;
             }
-            attribute = attribute.cdr();
         }
-        vars.push((symbols.dot_method, method));
+        vars.push((symbols.dot_method, method.raw()));
     }
-    if generic_name.kind() == SexpType::Promise {
+    if generic_name.r_type() == SexpType::Promise {
         return None;
     }
-    vars.push((symbols.dot_generic, generic_name));
+    vars.push((symbols.dot_generic, generic_name.raw()));
     Some(vars)
 }
 
 /// `R_quick_dispatch`: the method already in the table of generic `generic` for the classes of
 /// `arguments` (a pairlist of the primitive's matched arguments), or `NULL` when the generic
 /// itself must select one.
-pub unsafe fn quick_method_check(arguments: Sexp, methods: Sexp, generic: Sexp) -> R<Sexp> {
-    let table = if generic.kind() == SexpType::Closure {
-        eval::find_var_in_frame(values::install(".AllMTable")?, generic.tag())?
-    } else {
-        unbound()
+pub fn quick_method_check<'s>(
+    context: &mut Cx<'s>,
+    arguments: Local<'s>,
+    methods: Local<'s>,
+    generic: Local<'s>,
+) -> R<Local<'s>> {
+    let generic_env = generic
+        .downcast::<Closure>()
+        .map(|generic| context.root(generic.read(context).environment()));
+    let table = match generic_env {
+        Some(generic_env) => eval::frame_content(
+            context,
+            generic_env,
+            handles::symbol(|symbols| symbols.all_mtable),
+        )?,
+        None => None,
     };
-    let table = if table.kind() == SexpType::Environment {
-        table
-    } else if methods.kind() == SexpType::Environment {
-        methods
-    } else {
-        return Ok(nil());
+    let Some(table) = table
+        .and_then(|table| table.downcast::<Environment>())
+        .or_else(|| methods.downcast::<Environment>())
+    else {
+        return Ok(handles::null());
     };
-    let signature_length = if generic.kind() == SexpType::Closure {
-        let value = eval::find_var_in_frame(values::install(".SigLength")?, generic.tag())?;
-        if value == unbound() {
-            1
-        } else {
-            values::as_integer_scalar(value).max(0) as usize
-        }
-    } else {
-        1
+    let signature_length = match generic_env {
+        Some(generic_env) => match eval::frame_content(
+            context,
+            generic_env,
+            handles::symbol(|symbols| symbols.sig_length),
+        )? {
+            Some(value) if !handles::is_unbound(value) => {
+                handles::integer_scalar(context, value).max(0) as usize
+            }
+            _ => 1,
+        },
+        None => 1,
     };
     let mut label = String::new();
     let mut argument = arguments;
     for index in 0..signature_length {
         // Arguments past the ones supplied are missing.
-        let value = if argument.kind() == SexpType::Pairlist {
-            argument.car()
-        } else {
-            missing_arg()
+        let cell = argument.downcast::<Pairlist>();
+        let value = match cell {
+            Some(cell) => context.root(cell.read(context).head()),
+            None => handles::missing_argument(),
         };
-        let class = if value == missing_arg() {
+        let class = if handles::is_missing_argument(value) {
             "missing".to_owned()
         } else {
-            let value = eval::value_of(value)?;
-            let class = dispatch_class(value)?;
-            values::first_string(class).unwrap_or_default().into_owned()
+            let value = handles::force(context, value)?;
+            let class = dispatch_class(context, value)?;
+            first_text(context, class)
         };
         if index > 0 {
             label.push('#');
         }
         label.push_str(&class);
-        if argument.kind() == SexpType::Pairlist {
-            argument = argument.cdr();
+        if let Some(cell) = cell {
+            argument = context.root(cell.read(context).rest());
         }
     }
-    let method = eval::find_var_in_frame(values::install(&label)?, table)?;
-    if method == unbound() {
-        return Ok(nil());
+    let label = handles::install_bytes(context, label.as_bytes())?;
+    match eval::frame_content(context, table, label)? {
+        Some(method) if !handles::is_unbound(method) => handles::force(context, method),
+        _ => Ok(handles::null()),
     }
-    eval::value_of(method)
 }
 
 /// The primitive's arguments `args` reordered into the signature of generic `generic`, as a
@@ -693,56 +832,68 @@ pub unsafe fn quick_method_check(arguments: Sexp, methods: Sexp, generic: Sexp) 
 /// arguments in order, so `x[i, drop = FALSE]` takes the class of `drop` for `j` and reuses
 /// the method cached for `x[i, j]`; matching by name first keys it as `j` missing. `None`
 /// means the arguments need full matching (a partial or unknown name), which the generic does.
-pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>> {
-    if generic.kind() != SexpType::Closure {
+pub fn signature_arguments<'s>(
+    context: &mut Cx<'s>,
+    args: &[Tagged<'s>],
+    generic: Local<'s>,
+) -> R<Option<Local<'s>>> {
+    let Some(generic) = generic.downcast::<Closure>() else {
         return Ok(None);
-    }
-    let generic_env = generic.tag();
-    for name in [".SigArgs", ".SigLength"] {
-        if eval::find_var_in_frame(values::install(name)?, generic_env)? == unbound() {
-            return Ok(None);
+    };
+    let generic_env = context.root(generic.read(context).environment());
+    for symbol in [
+        handles::symbol(|symbols| symbols.sig_args),
+        handles::symbol(|symbols| symbols.sig_length),
+    ] {
+        match eval::frame_content(context, generic_env, symbol)? {
+            Some(value) if !handles::is_unbound(value) => {}
+            _ => return Ok(None),
         }
     }
-    let signature = signature_symbols(generic_env)?;
-    let mut formals = Vec::new();
-    let mut formal = generic.car();
-    while formal.kind() == SexpType::Pairlist {
-        formals.push(formal.tag());
-        formal = formal.cdr();
-    }
-    let mut matched = vec![missing_arg(); formals.len()];
-    let mut taken = vec![false; formals.len()];
-    for arg in args.iter().filter(|arg| arg.tag != nil()) {
-        let Some(index) = formals.iter().position(|&formal| formal == arg.tag) else {
+    let signature = signature_symbols(context, generic_env)?;
+    let mut formals: SmallVec<[Gc<'static, Symbol>; 8]> = SmallVec::new();
+    let mut formal = generic.read(context).formals().downcast::<Pairlist>();
+    while let Some(cell) = formal {
+        let Some(tag) = cell.tag().downcast::<Symbol>() else {
             return Ok(None);
         };
-        if formals[index] == symbols().dots || taken[index] {
+        formals.push(handles::permanent(tag));
+        formal = cell.rest().downcast::<Pairlist>();
+    }
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut matched: SmallVec<[Local<'s>; 8]> =
+        std::iter::repeat_n(handles::missing_argument(), formals.len()).collect();
+    let mut taken: SmallVec<[bool; 8]> = std::iter::repeat_n(false, formals.len()).collect();
+    for arg in args.iter().filter(|arg| !arg.tag.is(handles::null())) {
+        let Some(index) = formals.iter().position(|formal| arg.tag.is(*formal)) else {
+            return Ok(None);
+        };
+        if formals[index].is(dots) || taken[index] {
             return Ok(None);
         }
         matched[index] = arg.value;
         taken[index] = true;
     }
     let mut next = 0;
-    for arg in args.iter().filter(|arg| arg.tag == nil()) {
-        while next < formals.len() && taken[next] && formals[next] != symbols().dots {
+    for arg in args.iter().filter(|arg| arg.tag.is(handles::null())) {
+        while next < formals.len() && taken[next] && !formals[next].is(dots) {
             next += 1;
         }
         // Positional arguments past `...` belong to the dots, which no signature names.
-        if next >= formals.len() || formals[next] == symbols().dots {
+        if next >= formals.len() || formals[next].is(dots) {
             break;
         }
         matched[next] = arg.value;
         taken[next] = true;
     }
-    let mut list = nil();
+    let mut list = handles::null();
     for symbol in signature.iter().rev() {
         let value = formals
             .iter()
-            .position(|formal| formal == symbol)
+            .position(|formal| formal.is(*symbol))
             .and_then(|index| matched.get(index).copied())
-            .unwrap_or_else(missing_arg);
-        list = values::cons(value, list)?;
-        crate::heap().root(list);
+            .unwrap_or_else(handles::missing_argument);
+        list = handles::cons(context, handles::null(), value, list)?;
     }
     Ok(Some(list))
 }
@@ -754,84 +905,97 @@ pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>
 /// gives no default stays without a value whatever the method declares, as in GNU R. The
 /// frame also gets the dispatch variables, and takes over the generic's call, caller and
 /// arguments, which is what `sys.call()`, `parent.frame()` and `match.call()` see.
-pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
-    let state = interp();
-    let position = state
+pub fn exec_method<'s>(
+    context: &mut Cx<'s>,
+    method: Local<'s, Closure>,
+    generic_env: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let position = interp()
         .frames
         .iter()
-        .rposition(|frame| frame.owns(generic_env))
+        .rposition(|frame| frame.owns(generic_env.raw()))
         .ok_or_else(|| error("could not find the generic function's frame"))?;
-    let call = state.frames[position].call.raw();
-    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site(eval::Site::S4Dispatch))?;
-    eval::materialize_references(position)?;
-    let promargs: eval::Args = crate::frame_args(state, position).into();
-    let heap = crate::heap();
-    let method_env = values::new_env(method.tag())?;
-    let mut formal = method.car();
-    while formal.kind() == SexpType::Pairlist {
-        let symbol = formal.tag();
-        let cell = heap.frame_cell(generic_env, symbol).ok_or_else(|| {
-            error(format!(
+    let call = context.root(handles::live_frame(context, position).call());
+    let sys_parent =
+        handles::frame_sys_parent(context, position, eval::Reify::Site(eval::Site::S4Dispatch))?;
+    eval::detach_frame_references(context, position)?;
+    let arguments: SmallVec<[Tagged<'s>; 8]> = handles::live_frame(context, position)
+        .arguments()
+        .map(|(tag, value)| Tagged {
+            tag: handles::root_unless_permanent(context, tag),
+            value: context.root(value),
+        })
+        .collect();
+    let enclosure = context.root(method.read(context).environment());
+    let method_env = handles::new_environment(context, enclosure)?;
+    let mut formal = context.root(method.read(context).formals());
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        let (tag, default) = {
+            let cell = cell.read(context);
+            (cell.tag().downcast::<Symbol>(), context.root(cell.head()))
+        };
+        let Some(symbol) = tag.map(handles::permanent) else {
+            return Err(error("invalid formal argument list for the method"));
+        };
+        let Some(binding) = handles::frame_binding(context, generic_env, symbol) else {
+            return Err(error(format!(
                 "could not find symbol \"{}\" in environment of the generic function",
-                symbol_name(symbol)
-            ))
-        })?;
-        let missing = cell.has_gp(gp::BINDING_MISSING) || cell.cdr() == missing_arg();
-        let absent = cell.has_gp(gp::BINDING_ABSENT) || cell.cdr() == missing_arg();
-        let mut value = cell.cdr();
-        if cell.has_gp(gp::BINDING_MISSING)
-            && value != missing_arg()
-            && (value.kind() != SexpType::Promise || value.car() == unbound())
-        {
+                handles::text(symbol.name())
+            )));
+        };
+        let missing_bit = binding.has_flag(gp::BINDING_MISSING);
+        let content = binding.content();
+        let missing = missing_bit || handles::is_missing_argument(content);
+        let absent = binding.has_flag(gp::BINDING_ABSENT) || handles::is_missing_argument(content);
+        let unforced = content
+            .downcast::<Promise>()
+            .is_none_or(|promise| handles::is_unbound(promise.result()));
+        let binding = context.root(binding);
+        let mut value = context.root(content);
+        if missing_bit && !handles::is_missing_argument(value) && unforced {
             // GNU R hands the method the generic's own promise with the method's default in
             // it, so the generic's body reads the method's default after the dispatch too.
-            value = eval::make_promise(formal.car(), method_env)?;
-            heap.set_binding_value(cell, value)?;
+            let promise = handles::promise(context, default, method_env)?;
+            context.set_binding_value(binding, promise.value())?;
+            value = promise.value();
         }
-        eval::define(symbol, value, method_env)?;
-        if missing && let Some(new_cell) = heap.frame_cell(method_env, symbol) {
-            new_cell.set_gp_bits(gp::BINDING_MISSING, true);
-            new_cell.set_gp_bits(gp::BINDING_ABSENT, absent);
+        let symbol = handles::interned_symbol(symbol);
+        eval::define_variable(context, symbol, value, method_env)?;
+        if missing && let Some(defined) = handles::frame_binding(context, method_env, symbol) {
+            handles::mark_missing(context, defined, absent);
         }
-        formal = formal.cdr();
+        formal = context.root(cell.read(context).rest());
     }
-    let symbols = symbols();
     for symbol in [
-        symbols.dot_defined,
-        symbols.dot_method,
-        symbols.dot_target,
-        symbols.dot_method_symbol,
+        handles::permanent_symbol(|symbols| symbols.dot_defined),
+        handles::permanent_symbol(|symbols| symbols.dot_method),
+        handles::permanent_symbol(|symbols| symbols.dot_target),
+        handles::permanent_symbol(|symbols| symbols.dot_method_symbol),
     ] {
-        let value = eval::find_var_in_frame(symbol, generic_env)?;
-        if value != unbound() {
-            eval::define(symbol, value, method_env)?;
+        if let Some(value) = eval::frame_content(context, generic_env, symbol)?
+            && !handles::is_unbound(value)
+        {
+            eval::define_variable(context, symbol, value, method_env)?;
         }
     }
-    let generic_symbol = symbols.dot_generic;
-    let generic = eval::find_var(generic_symbol, generic_env)?;
-    if generic == unbound() {
+    let generic_symbol = handles::permanent_symbol(|symbols| symbols.dot_generic);
+    let Some(generic) = eval::variable(context, generic_symbol, generic_env)?
+        .filter(|generic| !handles::is_unbound(*generic))
+    else {
         return Err(error(
             "generic function name not found in the environment of the generic",
         ));
-    }
-    eval::define(generic_symbol, generic, method_env)?;
-    eval::run_frame(
-        call,
-        method,
-        CallFrame::Env(method_env),
-        sys_parent,
-        &promargs,
-        Entry::Unchecked,
-        &[],
-    )
+    };
+    eval::define_variable(context, generic_symbol, generic, method_env)?;
+    eval::run_in_environment(context, call, method, method_env, sys_parent, &arguments)
 }
 
 /// `R_do_new_object`: a new object of the class `class_def` defines, a deep copy of its
 /// prototype, marked as S4 when the prototype is a plain S4 object or the class comes from a
 /// package. Native code may write into a slot of the object it gets without checking whether
 /// the slot's value is shared, so it gets a deep copy, as GNU R makes.
-pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
-    new_object_copying(class_def, true)
+pub fn new_object<'s>(context: &mut Cx<'s>, class_def: Local<'s>) -> R<Local<'s>> {
+    new_object_copying(context, class_def, true)
 }
 
 /// `new_object` with a shallow copy of the prototype when `deep` is false: the object, its
@@ -840,134 +1004,150 @@ pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
 /// reference, and the prototype holds one more, so a change to a slot of the new object copies
 /// that value first and the prototype never sees it. `new()` and `C_new_object` copy this way,
 /// which keeps a large prototype slot from being copied for every object.
-pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
-    if class_def == nil() {
+pub fn new_object_copying<'s>(
+    context: &mut Cx<'s>,
+    class_def: Local<'s>,
+    deep: bool,
+) -> R<Local<'s>> {
+    if class_def.is(handles::null()) {
         return Err(error(
             "C level NEW macro called with null class definition pointer",
         ));
     }
-    let virtual_flag = crate::subset::get_slot(class_def, symbols().virtual_, nil())?;
-    let class_name = crate::subset::get_slot(class_def, symbols().class_name, nil())?;
-    if values::as_logical_scalar(virtual_flag) != 0 {
+    let virtual_flag = slot_value(context, class_def, handles::symbol(|s| s.virtual_))?;
+    let class_name = slot_value(context, class_def, handles::symbol(|s| s.class_name))?;
+    if handles::logical_scalar(context, virtual_flag) != 0 {
         return Err(error(format!(
             "trying to generate an object from a virtual class (\"{}\")",
-            values::first_string(class_name).unwrap_or_default()
+            first_text(context, class_name)
         )));
     }
-    let prototype = crate::subset::get_slot(class_def, symbols().prototype, nil())?;
-    let value = if deep {
-        values::duplicate(prototype)?
+    let prototype = slot_value(context, class_def, handles::symbol(|s| s.prototype))?;
+    let mut value = if deep {
+        handles::deep_copy(context, prototype)?
     } else {
-        values::shallow_duplicate(prototype)?
+        handles::shallow_copy(context, prototype)?
     };
-    // Duplicating an environment, a symbol or an external pointer gives the object itself, so a
+    // Copying an environment, a symbol or an external pointer gives the object itself, so a
     // class set here would land on the one shared object. GNU R's `R_do_new_object` skips them.
     let reference_data = matches!(
-        value.kind(),
+        value.get().r_type(),
         SexpType::Environment | SexpType::Symbol | SexpType::ExternalPtr
     );
-    let package = values::get_attr(class_name, symbols().package);
-    if (value.kind() == SexpType::Object || package != nil()) && !reference_data {
-        values::set_attr(value, symbols().class, class_name)?;
-        value.set_gp_bits(gp::S4_OBJECT, true);
+    let has_package = !handles::get_attribute(context, class_name, handles::symbol(|s| s.package))
+        .is(handles::null());
+    if (value.get().r_type() == SexpType::Object || has_package) && !reference_data {
+        handles::set_attribute(
+            context,
+            &mut value,
+            handles::symbol(|s| s.class),
+            class_name,
+        )?;
+        handles::mark_s4(context, &mut value);
     }
-    Ok(value)
+    Ok(value.finish().value())
 }
 
 /// `R_do_MAKE_CLASS`: the definition of class `name`, from the methods package's `getClass`.
-pub unsafe fn make_class(name: &str) -> R<Sexp> {
-    let get_class = methods_function("getClass")?;
-    let call = values::call(get_class, &[values::scalar_string(name)?])?;
-    eval::eval(call, values::global_env())
+pub fn make_class<'s>(context: &mut Cx<'s>, name: &str) -> R<Local<'s>> {
+    let get_class = methods_function(context, "getClass")?;
+    let name = handles::text_vector(context, &[name])?;
+    let call = handles::call_of(context, get_class, &[name.value()])?;
+    handles::evaluate(context, call.value(), handles::global_environment())
 }
 
 /// `R_has_slot`: whether `object` has slot `name`. Every object but a plain S4 one has a data
 /// part.
-pub unsafe fn has_slot(object: Sexp, name: Sexp) -> R<bool> {
-    let symbol = slot_symbol(name)?;
-    if symbol == symbols().dot_data && object.kind() != SexpType::Object {
+pub fn has_slot<'s>(context: &mut Cx<'s>, object: Local<'s>, name: Local<'s>) -> R<bool> {
+    let symbol = slot_symbol(context, name)?;
+    if symbol.is(handles::symbol(|s| s.dot_data)) && object.r_type() != SexpType::Object {
         return Ok(true);
     }
-    Ok(values::get_attr(object, symbol) != nil())
+    Ok(!handles::get_attribute(context, object, symbol).is(handles::null()))
 }
 
 /// The symbol a slot name stands for: a symbol, or a single string.
-pub unsafe fn slot_symbol(name: Sexp) -> R<Sexp> {
-    match name.kind() {
-        SexpType::Symbol => Ok(name),
-        SexpType::String if length(name) == 1 => values::install_charsxp(name.element(0)),
+pub fn slot_symbol<'s>(context: &mut Cx<'s>, name: Local<'s>) -> R<Gc<'static, Symbol>> {
+    if let Some(symbol) = name.downcast::<Symbol>() {
+        return Ok(handles::permanent(symbol));
+    }
+    match strings(context, name)? {
+        Some(text) if text.len() == 1 => handles::install_name_at(context, text, 0),
         _ => Err(error("invalid type or length for slot name")),
     }
 }
 
 /// `R_data_class(object, TRUE)`: the one class S4 dispatch uses for `object`. A class attribute
 /// of length one is kept as it is, with its `package` attribute.
-pub unsafe fn dispatch_class(object: Sexp) -> R<Sexp> {
-    first_class(dispatch::class_of_raw(object)?)
+pub fn dispatch_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    let class = dispatch::class_of(context, object)?;
+    first_class(context, class)
 }
 
 // Selection.
 
 /// The generic's `.AllMTable`, which the methods package sets up on first use.
-unsafe fn all_methods_table(generic: Sexp, generic_env: Sexp) -> R<Sexp> {
-    let symbol = values::install(".AllMTable")?;
-    let table = eval::value_of(eval::find_var_in_frame(symbol, generic_env)?)?;
-    if table.kind() == SexpType::Environment {
+fn all_methods_table<'s>(
+    context: &mut Cx<'s>,
+    generic: Local<'s, Closure>,
+    generic_env: Local<'s, Environment>,
+) -> R<Local<'s, Environment>> {
+    let symbol = handles::symbol(|symbols| symbols.all_mtable);
+    if let Some(table) = frame_forced(context, generic_env, symbol)?
+        .and_then(|table| table.downcast::<Environment>())
+    {
         return Ok(table);
     }
-    let get_table = methods_function(".getMethodsTable")?;
-    let call = values::call(
+    let get_table = methods_function(context, ".getMethodsTable")?;
+    let yes = handles::logical_constant(context, 1)?;
+    let call = handles::call_of(
+        context,
         get_table,
-        &[
-            generic,
-            generic_env,
-            values::scalar_bool(true)?,
-            values::scalar_bool(true)?,
-        ],
+        &[generic.value(), generic_env.value(), yes, yes],
     )?;
-    let table = eval::eval(call, values::base_env())?;
-    if table.kind() != SexpType::Environment {
-        return Err(error("invalid methods table request"));
-    }
-    Ok(table)
+    let table = handles::evaluate(context, call.value(), handles::base_environment())?;
+    table
+        .downcast::<Environment>()
+        .ok_or_else(|| error("invalid methods table request"))
 }
 
 /// The generic's signature arguments that take part in dispatch: the first `.SigLength` of
 /// `.SigArgs`.
-unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
-    let arguments = eval::value_of(eval::find_var_in_frame(
-        values::install(".SigArgs")?,
+fn signature_symbols(context: &mut Cx<'_>, generic_env: Local<'_, Environment>) -> R<Signature> {
+    let arguments = frame_forced(
+        context,
         generic_env,
-    )?)?;
-    let count = eval::value_of(eval::find_var_in_frame(
-        values::install(".SigLength")?,
+        handles::symbol(|symbols| symbols.sig_args),
+    )?;
+    let count = frame_forced(
+        context,
         generic_env,
-    )?)?;
-    if arguments == unbound() || count == unbound() {
+        handles::symbol(|symbols| symbols.sig_length),
+    )?;
+    let (Some(arguments), Some(count)) = (arguments, count) else {
         return Err(error(
             "the generic function's environment has no signature information",
         ));
-    }
-    let count = (values::as_integer_scalar(count).max(0) as usize).min(length(arguments));
-    let mut result = Vec::with_capacity(count);
-    for index in 0..count {
-        let symbol = match arguments.kind() {
-            SexpType::String => values::install_charsxp(arguments.element(index))?,
-            SexpType::List => {
-                let element = arguments.element(index);
-                if element.kind() == SexpType::Symbol {
-                    element
-                } else {
-                    slot_symbol(element)?
-                }
-            }
-            _ => {
-                return Err(error(
-                    "invalid signature arguments in the generic function's environment",
-                ));
-            }
-        };
-        result.push(symbol);
+    };
+    let count = (handles::integer_scalar(context, count).max(0) as usize)
+        .min(handles::length(context, arguments));
+    let mut result = Signature::with_capacity(count);
+    if let Some(names) = handles::dense::<Str>(context, arguments)? {
+        for index in 0..count {
+            result.push(handles::install_name_at(context, names, index)?);
+        }
+    } else if let Some(list) = handles::dense::<List>(context, arguments)? {
+        for index in 0..count {
+            let element = context.root(list.get(context, index));
+            result.push(match element.downcast::<Symbol>() {
+                Some(symbol) => handles::permanent(symbol),
+                None => slot_symbol(context, element)?,
+            });
+        }
+    } else {
+        return Err(error(
+            "invalid signature arguments in the generic function's environment",
+        ));
     }
     Ok(result)
 }
@@ -975,178 +1155,414 @@ unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
 /// Whether the generic's own binding of `symbol` is missing. Only the binding counts: an
 /// argument passed on from a caller where it is missing is not missing here, so dispatch
 /// evaluates it and reports the error.
-unsafe fn bound_missing(symbol: Sexp, env: Sexp) -> R<bool> {
-    let cell = crate::heap().frame_cell(env, symbol).ok_or_else(|| {
+fn bound_missing(
+    context: &Cx<'_>,
+    symbol: Gc<'static, Symbol>,
+    env: Local<'_, Environment>,
+) -> R<bool> {
+    let binding = handles::frame_binding(context, env, symbol).ok_or_else(|| {
         error(format!(
             "could not find symbol '{}' in frame of call",
-            symbol_name(symbol)
+            handles::text(symbol.name())
         ))
     })?;
-    Ok(cell.has_gp(gp::BINDING_MISSING) || cell.cdr() == missing_arg())
+    Ok(binding.has_flag(gp::BINDING_MISSING) || handles::is_missing_argument(binding.content()))
 }
 
 /// The class of `...` for dispatch, from the methods package's `.dotsClass`.
-unsafe fn dots_class(env: Sexp) -> R<Sexp> {
-    let function = methods_function(".dotsClass")?;
-    let call = values::call(function, &[symbols().dots])?;
-    first_class(eval::eval(call, env)?)
+fn dots_class<'s>(context: &mut Cx<'s>, env: Local<'s, Environment>) -> R<Local<'s>> {
+    let function = methods_function(context, ".dotsClass")?;
+    let dots = handles::permanent_symbol(|symbols| symbols.dots);
+    let call = handles::call_of(context, function, &[dots.value()])?;
+    let class = handles::evaluate(context, call.value(), env)?;
+    first_class(context, class)
 }
 
-unsafe fn first_class(class: Sexp) -> R<Sexp> {
-    if length(class) > 1 {
-        values::scalar_string_charsxp(values::string_elt(class, 0))
-    } else {
-        Ok(class)
+fn first_class<'s>(context: &mut Cx<'s>, class: Local<'s>) -> R<Local<'s>> {
+    match handles::dense::<Str>(context, class)? {
+        Some(names) if names.len() > 1 => {
+            let mut first = StringFill::new(context, 1)?;
+            first.push(context, names.get(context, 0));
+            Ok(first.finish().finish().value())
+        }
+        _ => Ok(class),
     }
 }
 
 /// Forces a signature argument. GNU R evaluates it under an error handler that reports which
 /// argument failed, and that handler's call, `h(simpleError(msg, call))`, is the call the error
 /// is reported against.
-unsafe fn evaluate_argument(symbol: Sexp, env: Sexp, generic_name: &dyn Fn() -> String) -> R<Sexp> {
+fn evaluate_argument<'s>(
+    context: &mut Cx<'s>,
+    symbol: Gc<'static, Symbol>,
+    env: Local<'s, Environment>,
+    name: Local<'s>,
+) -> R<Local<'s>> {
     // A value already at hand cannot fail, so it needs no handler.
-    if let Some(cell) = crate::heap().frame_cell(env, symbol)
-        && !cell.has_gp(gp::ACTIVE_BINDING)
+    if let Some(binding) = handles::frame_binding(context, env, symbol)
+        && !binding.is_active()
     {
-        let value = cell.cdr();
-        if value.kind() != SexpType::Promise {
-            return Ok(value);
-        }
-        if value.car() != unbound() {
-            return Ok(value.car());
+        let value = binding.content();
+        match value.downcast::<Promise>() {
+            None => return Ok(context.root(value)),
+            Some(promise) if !handles::is_unbound(promise.result()) => {
+                return Ok(context.root(promise.result()));
+            }
+            Some(_) => {}
         }
     }
-    match catching_errors(env, || eval::eval(symbol, env))? {
+    let expression = handles::interned_symbol(symbol);
+    match catching_errors(context, env.value(), |context| {
+        handles::evaluate(context, expression.value(), env)
+    })? {
         Ok(value) => Ok(value),
-        Err(message) => Err(argument_error(symbol, &generic_name(), &message)),
+        Err(message) => {
+            let generic_name = first_text(context, name);
+            Err(argument_error(context, symbol, &generic_name, &message))
+        }
     }
 }
 
 /// The error dispatch raises when evaluating the signature argument `symbol` of the generic
 /// `generic_name` failed with `message`.
-unsafe fn argument_error(symbol: Sexp, generic_name: &str, message: &str) -> Unwind {
-    let handler_call = match handler_call() {
+fn argument_error(
+    context: &mut Cx<'_>,
+    symbol: Gc<'static, Symbol>,
+    generic_name: &str,
+    message: &str,
+) -> Unwind {
+    let handler_call = match handler_call(context) {
         Ok(call) => call,
         Err(unwind) => return unwind,
     };
-    error_in(
+    handles::error_in(
         handler_call,
         format!(
             "error in evaluating the argument '{}' in selecting a method for function '{generic_name}': {message}",
-            symbol_name(symbol),
+            handles::text(symbol.name()),
         ),
     )
 }
 
 /// `h(simpleError(msg, call))`, the call of the handler GNU R evaluates a signature argument
 /// under.
-unsafe fn handler_call() -> R<Sexp> {
-    let simple_error = values::call(
-        values::install("simpleError")?,
-        &[values::install("msg")?, values::install("call")?],
+fn handler_call<'s>(context: &mut Cx<'s>) -> R<Local<'s>> {
+    let symbol = |context: &mut Cx<'s>, name: &[u8]| {
+        handles::install_bytes(context, name).map(handles::interned_symbol)
+    };
+    let simple_error = symbol(context, b"simpleError")?;
+    let message = symbol(context, b"msg")?;
+    let call = symbol(context, b"call")?;
+    let handler = symbol(context, b"h")?;
+    let simple_error = handles::call_of(
+        context,
+        simple_error.value(),
+        &[message.value(), call.value()],
     )?;
-    values::call(values::install("h")?, &[simple_error])
+    Ok(handles::call_of(context, handler.value(), &[simple_error.value()])?.value())
 }
 
 /// Runs `evaluate` under an exiting handler for errors established from `env`: `Err` holds
 /// the message of the error it caught.
-unsafe fn catching_errors(
-    env: Sexp,
-    evaluate: impl FnOnce() -> R<Sexp>,
-) -> R<Result<Sexp, String>> {
+fn catching_errors<'s>(
+    context: &mut Cx<'s>,
+    env: Local<'s>,
+    evaluate: impl FnOnce(&mut Cx<'s>) -> R<Local<'s>>,
+) -> R<Result<Local<'s>, String>> {
+    let target = handles::new_environment(context, handles::empty_environment())?;
     let state = interp();
     let saved = state.handlers.clone();
-    let target = values::new_env(values::empty_env())?;
-    state.handlers = Some(Rc::new(Handler {
-        class: values::mkchar("error")?,
-        handler: nil(),
+    // The handler stack is a root, so its entries hold the class, the environment and the
+    // target.
+    state.handlers = Some(conditions::new_handler(Handler {
+        class: handles::symbol(|symbols| symbols.error).name().raw(),
+        handler: handles::null().raw(),
         calling: false,
-        calling_below: crate::conditions::calling_established(&saved),
-        parent_env: env,
-        target,
+        calling_below: conditions::calling_established(&saved),
+        parent_env: env.raw(),
+        target: target.raw(),
         next: saved.clone(),
     }));
-    let result = evaluate();
-    interp().handlers = saved;
-    match result {
-        Ok(value) => Ok(Ok(value)),
-        Err(Unwind::Jump(jump)) => match jump {
-            Jump::Return {
-                env: returned_to,
-                value,
-            } if returned_to == target => {
-                let condition = if value.kind() == SexpType::List && length(value) > 0 {
-                    value.element(0)
-                } else {
-                    nil()
-                };
-                if condition == nil() {
-                    Ok(Err(interp().error_message.clone()))
-                } else {
-                    Ok(Err(conditions::condition_message(condition)?))
-                }
-            }
-            other => Err(Unwind::Jump(other)),
-        },
-        Err(other) => Err(other),
+    let result = evaluate(context);
+    conditions::restore_handlers(saved);
+    let unwind = match result {
+        Ok(value) => return Ok(Ok(value)),
+        Err(unwind) => unwind,
+    };
+    let Some(value) = handles::returned_value(context, &unwind, target.value()) else {
+        return Err(unwind);
+    };
+    let condition = match handles::dense::<List>(context, value)? {
+        Some(list) if !list.is_empty() => context.root(list.get(context, 0)),
+        _ => handles::null(),
+    };
+    if condition.is(handles::null()) {
+        Ok(Err(interp().error_message.clone()))
+    } else {
+        Ok(Err(conditions::condition_message(context, condition)?))
     }
 }
 
 /// `.InheritForDispatch(classes, fdef, mtable)`: selects an inherited method and caches it in
 /// the table. The call names the function by value, as GNU R's does, which shows in its errors.
-unsafe fn inherited_method(classes: &[Sexp], generic: Sexp, table: Sexp) -> R<Sexp> {
-    if let Some(method) = crate::methods_core::inherited_method(classes, generic, table)? {
+fn inherited_method<'s>(
+    context: &mut Cx<'s>,
+    classes: &[Local<'s>],
+    generic: Local<'s, Closure>,
+    table: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let raw_classes: SmallVec<[Sexp; 2]> = classes.iter().map(|class| class.raw()).collect();
+    // SAFETY: the classes, the generic and the table are rooted, and the method found is rooted
+    // before anything else allocates.
+    let found = unsafe {
+        crate::methods_core::inherited_method(&raw_classes, generic.raw(), table.raw())?
+            .map(|method| handles::adopt(context, method))
+    };
+    if let Some(method) = found {
         return Ok(method);
     }
-    let function = methods_function(".InheritForDispatch")?;
-    let classes = values::list_vector(classes)?;
-    let call = values::call(function, &[classes, generic, table])?;
-    eval::eval(call, values::base_env())
+    let function = methods_function(context, ".InheritForDispatch")?;
+    let mut list = context.alloc::<List>(classes.len())?;
+    for (index, &class) in classes.iter().enumerate() {
+        list.set(context, index, class);
+    }
+    let list = list.finish();
+    let call = handles::call_of(
+        context,
+        function,
+        &[list.value(), generic.value(), table.value()],
+    )?;
+    handles::evaluate(context, call.value(), handles::base_environment())
 }
 
 /// `R_loadMethod`: binds the dispatch variables of method definition `method` in the generic's
 /// frame. A plain `MethodDefinition` is handled here; any other class of method goes through
 /// the methods package's `loadMethod` generic, except when loading a method of `loadMethod`
 /// itself, which would recurse.
-unsafe fn load_method(method: Sexp, name: Sexp, env: Sexp) -> R<Sexp> {
+fn load_method<'s>(
+    context: &mut Cx<'s>,
+    method: Local<'s>,
+    name: Local<'s>,
+    env: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let symbols = symbols();
     let mut extra = false;
-    let mut attribute = method.attrib();
-    while attribute.kind() == SexpType::Pairlist {
-        let tag = attribute.tag();
-        let symbols = symbols();
-        if tag == symbols.target {
-            eval::define(symbols.dot_target, attribute.car(), env)?;
-        } else if tag == symbols.defined {
-            eval::define(symbols.dot_defined, attribute.car(), env)?;
-        } else if tag != symbols.generic && tag != symbols.class && tag != symbols.srcref {
+    let mut bound: SmallVec<[(Local<'s, Symbol>, Local<'s>); 2]> = SmallVec::new();
+    for (tag, value) in handles::attribute_cells(context, method) {
+        if tag.raw() == symbols.target {
+            bound.push((
+                handles::permanent_symbol(|symbols| symbols.dot_target),
+                context.root(value),
+            ));
+        } else if tag.raw() == symbols.defined {
+            bound.push((
+                handles::permanent_symbol(|symbols| symbols.dot_defined),
+                context.root(value),
+            ));
+        } else if tag.raw() != symbols.generic
+            && tag.raw() != symbols.class
+            && tag.raw() != symbols.srcref
+        {
             extra = true;
         }
-        attribute = attribute.cdr();
     }
-    eval::define(symbols().dot_method, method, env)?;
-    if !extra || values::first_string(name).as_deref() == Some("loadMethod") {
+    for (symbol, value) in bound {
+        eval::define_variable(context, symbol, value, env)?;
+    }
+    let dot_method = handles::permanent_symbol(|symbols| symbols.dot_method);
+    eval::define_variable(context, dot_method, method, env)?;
+    if !extra || first_text(context, name) == "loadMethod" {
         return Ok(method);
     }
-    let function = methods_function("loadMethod")?;
-    let call = values::call(function, &[method, name, env])?;
-    eval::eval(call, methods_namespace()?)
+    let function = methods_function(context, "loadMethod")?;
+    let call = handles::call_of(context, function, &[method, name, env.value()])?;
+    let namespace = methods_namespace(context)?;
+    handles::evaluate(context, call.value(), namespace)
+}
+
+/// What a lookup that may need deferred definitions is after, by name.
+pub(crate) enum Lookup<'a> {
+    /// A class missing from the class cache.
+    Class,
+    Generic,
+    /// A primitive about to dispatch on S4 objects of these classes.
+    Primitive(&'a [&'a [u8]]),
+}
+
+/// Runs the deferred unit that the lookup of `name` needs, if any, and reports whether it ran
+/// one. The unit is marked as run first, so a lookup it makes itself finds nothing deferred.
+pub(crate) fn force_deferred(context: &mut Cx<'_>, name: &[u8], lookup: Lookup<'_>) -> R<bool> {
+    let deferred = &interp().globals.deferred_definitions;
+    for (position, definitions) in deferred.iter().enumerate() {
+        let first = definitions.first_pending
+            && match lookup {
+                Lookup::Class => definitions.classes.contains(name),
+                Lookup::Generic => definitions.generics.contains(name),
+                Lookup::Primitive(classes) => {
+                    definitions.primitives.contains(name)
+                        && classes
+                            .iter()
+                            .any(|class| definitions.classes.contains(*class))
+                }
+            };
+        let lazy = matches!(lookup, Lookup::Generic) && definitions.lazy.contains(name);
+        if first || lazy {
+            run_unit(context, position, lazy.then_some(name))?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Marks the unit of the definitions at `position` as run, and the first unit with it, then
+/// calls their `force` for it unless both ran already. Definitions with no unit left are
+/// unregistered.
+fn run_unit(context: &mut Cx<'_>, position: usize, lazy: Option<&[u8]>) -> R<()> {
+    let deferred = &mut interp().globals.deferred_definitions;
+    let Some(definitions) = deferred.get_mut(position) else {
+        return Ok(());
+    };
+    let first = std::mem::replace(&mut definitions.first_pending, false);
+    let lazy = lazy.filter(|generic| definitions.lazy.remove(*generic));
+    if !first && lazy.is_none() {
+        return Ok(());
+    }
+    // The handle holds `force` while it runs: an entry with no unit left is removed and its
+    // preserve released, and any other may be replaced while the call runs.
+    let force = context.root(definitions.force.get(context));
+    if definitions.lazy.is_empty() {
+        let removed = deferred.remove(position);
+        crate::heap().release(removed.force.raw());
+    }
+    let argument = match lazy {
+        Some(generic) => {
+            handles::text_vector(context, &[String::from_utf8_lossy(generic)])?.value()
+        }
+        None => handles::null(),
+    };
+    let call = handles::call_of(context, force.value(), &[argument])?;
+    handles::evaluate(context, call.value(), handles::global_environment())?;
+    Ok(())
+}
+
+/// What `R_getClassFromCache(class, table)` returns for a string `class` or a class definition.
+pub(crate) fn cached_class_definition<'s>(
+    context: &mut Cx<'s>,
+    class: Local<'s>,
+    table: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    if class.r_type() != SexpType::String {
+        return Ok(class);
+    }
+    let Some(names) = handles::dense::<Str>(context, class)? else {
+        return Ok(class);
+    };
+    if names.is_empty() {
+        return Ok(handles::null());
+    }
+    let symbol = handles::install_name_at(context, names, 0)?;
+    let mut value = frame_forced(context, table, symbol)?;
+    if value.is_none() {
+        let name = names.get(context, 0).bytes().to_vec();
+        if force_deferred(context, &name, Lookup::Class)? {
+            value = frame_forced(context, table, symbol)?;
+        }
+    }
+    let Some(value) = value else {
+        return Ok(handles::null());
+    };
+    let package_symbol = handles::symbol(|symbols| symbols.package);
+    let package = context.root(handles::get_attribute(context, class, package_symbol));
+    if let Some(package) = handles::dense::<Str>(context, package)?
+        && !package.is_empty()
+    {
+        let defined = context.root(handles::get_attribute(context, value, package_symbol));
+        if let Some(defined) = handles::dense::<Str>(context, defined)?
+            && defined.len() == 1
+            && defined.get(context, 0).bytes() != package.get(context, 0).bytes()
+        {
+            return Ok(handles::null());
+        }
+    }
+    Ok(value)
+}
+
+/// `getGeneric(name, where = env)` for a plain name: the generic visible from `env`, after
+/// running whatever deferred definitions create it, or `NULL`.
+pub(crate) fn visible_generic<'s>(
+    context: &mut Cx<'s>,
+    symbol: Gc<'static, Symbol>,
+    env: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    force_deferred(context, symbol.name().bytes(), Lookup::Generic)?;
+    find_generic(context, symbol, env, "")
+}
+
+/// The first generic function bound to `symbol` from `env` outward (from `package`, unless
+/// that is empty): a closure with a `generic` attribute, or the generic the methods package
+/// set up for a primitive.
+pub(crate) fn find_generic<'s>(
+    context: &mut Cx<'s>,
+    symbol: Gc<'static, Symbol>,
+    env: Local<'s, Environment>,
+    package: &str,
+) -> R<Local<'s>> {
+    let generic_symbol = handles::symbol(|symbols| symbols.generic);
+    let package_symbol = handles::symbol(|symbols| symbols.package);
+    let mut frame = env;
+    while !frame.is(handles::empty_environment()) {
+        if let Some(value) = frame_forced(context, frame, symbol)? {
+            let candidate = match value.r_type() {
+                SexpType::Closure
+                    if !handles::get_attribute(context, value, generic_symbol)
+                        .is(handles::null()) =>
+                {
+                    Some(value)
+                }
+                SexpType::Builtin | SexpType::Special => {
+                    dispatch::primitive_methods(context, value)
+                        .map(|(generic, _)| context.root(generic))
+                        .filter(|generic| !generic.is(handles::null()))
+                }
+                _ => None,
+            };
+            if let Some(candidate) = candidate {
+                let defined =
+                    context.root(handles::get_attribute(context, candidate, package_symbol));
+                let matches = package.is_empty()
+                    || handles::first_string(context, defined)
+                        .is_none_or(|defined| defined == package);
+                if matches {
+                    return Ok(candidate);
+                }
+            }
+        }
+        let Some(enclosure) = frame.read(context).enclosure() else {
+            break;
+        };
+        frame = context.root(enclosure);
+    }
+    Ok(handles::null())
 }
 
 // The routines.
 
-unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
+fn set_primitive_methods_routine<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+) -> R<Local<'s>> {
     let (name, op, code, generic, methods) = (
-        call.arg(0),
-        call.arg(1),
-        call.arg(2),
-        call.arg(3),
-        call.arg(4),
+        arguments.value(0),
+        arguments.value(1),
+        arguments.value(2),
+        arguments.value(3),
+        arguments.value(4),
     );
-    let code_text = values::first_string(code)
-        .ok_or_else(|| call.error("argument 'code' must be a character string"))?
+    let code_text = handles::first_string(context, code)
+        .ok_or_else(|| arguments.error("argument 'code' must be a character string"))?
         .into_owned();
-    let primitive_name = values::first_string(name).unwrap_or_default().into_owned();
-    if op == nil() && primitive_name.is_empty() {
+    let primitive_name = first_text(context, name);
+    if op.is(handles::null()) && primitive_name.is_empty() {
         let globals = &mut interp().globals;
         let previous = globals.allow_primitive_methods;
         match code_text.as_bytes().first() {
@@ -1154,29 +1570,30 @@ unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
             Some(b'S' | b's') => globals.allow_primitive_methods = true,
             _ => {}
         }
-        return values::scalar_bool(previous);
+        return handles::logical_constant(context, i32::from(previous));
     }
     // An internal generic such as `as.vector` is a closure whose default method is an
     // `internalDispatchMethod`; its `internal` slot names the `.Internal` function that
     // dispatches, as in GNU R's `R_set_prim_method`.
-    let op = if matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
+    let op = if matches!(op.r_type(), SexpType::Builtin | SexpType::Special) {
         op
-    } else if crate::coerce::is_s4(op) {
-        let internal = slot_value(op, "internal")?;
-        let internal_name = values::first_string(internal)
-            .unwrap_or_default()
-            .into_owned();
-        crate::builtins::internal_function(values::install(&internal_name)?).ok_or_else(|| {
-            call.error(format!(
+    } else if handles::is_s4(op) {
+        let slot = handles::install_bytes(context, b"internal")?;
+        let internal = slot_value(context, op, slot)?;
+        let internal_name = first_text(context, internal);
+        let symbol = handles::install_bytes(context, internal_name.as_bytes())?;
+        handles::internal_function(context, handles::interned_symbol(symbol)).ok_or_else(|| {
+            arguments.error(format!(
                 "'internal' slot does not name an internal function: {internal_name}"
             ))
         })?
     } else {
-        crate::builtins::primitive(&primitive_name).ok_or_else(|| {
-            call.error(format!(
+        let primitive = handles::primitive(&primitive_name).ok_or_else(|| {
+            arguments.error(format!(
                 "object '{primitive_name}' is not a primitive function"
             ))
-        })?
+        })?;
+        context.root(primitive)
     };
     dispatch::set_primitive_methods(op, &code_text, generic, methods)?;
     Ok(name)
@@ -1284,209 +1701,85 @@ fn element_name<'s>(
     Err(arguments.error("invalid element name: expected a single string"))
 }
 
-unsafe fn external_pointer_prototype(_call: &NativeCall<'_>) -> R<Sexp> {
-    let heap = crate::heap();
-    let pointer = heap.alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
-    heap.root(pointer);
-    Ok(pointer)
+fn external_pointer_prototype<'s>(
+    context: &mut Cx<'s>,
+    _arguments: &NativeArgs<'_, 's>,
+) -> R<Local<'s>> {
+    handles::null_external_pointer(context)
 }
 
 /// `R_getClassFromCache(class, table)`: the cached definition of the class `class` names, or
 /// `NULL`. A `package` attribute on the name must match the definition's package; a class
 /// definition passed in is returned as it is.
-unsafe fn class_from_cache(call: &NativeCall<'_>) -> R<Sexp> {
-    let (class, table) = (call.arg(0), call.arg(1));
-    if class.kind() != SexpType::String && !class.has_gp(gp::S4_OBJECT) {
+fn class_from_cache<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (class, table) = (arguments.value(0), arguments.value(1));
+    if class.r_type() != SexpType::String && !handles::is_s4(class) {
         return Err(
-            call.error("class should be either a character-string name or a class definition")
+            arguments.error("class should be either a character-string name or a class definition")
         );
     }
-    cached_class_definition(class, table)
-}
-
-/// What `R_getClassFromCache(class, table)` returns for a string `class` or a class definition.
-pub(crate) unsafe fn cached_class_definition(class: Sexp, table: Sexp) -> R<Sexp> {
-    if class.kind() != SexpType::String {
-        return Ok(class);
-    }
-    if length(class) == 0 {
-        return Ok(nil());
-    }
-    let symbol = values::install_charsxp(class.element(0))?;
-    let mut value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
-    if value == unbound() && force_deferred(class.element(0).bytes(), Lookup::Class)? {
-        value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
-    }
-    if value == unbound() {
-        return Ok(nil());
-    }
-    let package_symbol = symbols().package;
-    let package = values::get_attr(class, package_symbol);
-    if package.kind() == SexpType::String && length(package) > 0 {
-        let defined_package = values::get_attr(value, package_symbol);
-        if defined_package.kind() == SexpType::String
-            && length(defined_package) == 1
-            && defined_package.element(0).bytes() != package.element(0).bytes()
-        {
-            return Ok(nil());
-        }
-    }
-    Ok(value)
-}
-
-unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    let (name, must_find, env, package) = (call.arg(0), call.arg(1), call.arg(2), call.arg(3));
-    let symbol = match name.kind() {
-        SexpType::Symbol => name,
-        SexpType::String if length(name) >= 1 => values::install_charsxp(name.element(0))?,
-        _ => {
-            return Err(
-                call.error("invalid generic function name: expected a character string or a name")
-            );
-        }
+    let Some(table) = table.downcast::<Environment>() else {
+        return Err(arguments.error("invalid class table: expected an environment"));
     };
-    if env.kind() != SexpType::Environment {
-        return Err(call.error("invalid environment for the generic function"));
-    }
-    let package = values::first_string(package)
-        .unwrap_or_default()
-        .into_owned();
-    force_deferred(symbol_name(symbol).as_bytes(), Lookup::Generic)?;
-    let generic = find_generic(symbol, env, &package)?;
-    if generic == nil() && values::as_logical_scalar(must_find) == 1 {
-        return Err(call.error(format!(
-            "no generic function definition found for '{}'",
-            symbol_name(symbol)
+    cached_class_definition(context, class, table)
+}
+
+fn get_generic_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (name, must_find, env, package) = (
+        arguments.value(0),
+        arguments.value(1),
+        arguments.value(2),
+        arguments.value(3),
+    );
+    let symbol = match name.downcast::<Symbol>() {
+        Some(symbol) => handles::permanent(symbol),
+        None => match strings(context, name)? {
+            Some(names) if !names.is_empty() => handles::install_name_at(context, names, 0)?,
+            _ => {
+                return Err(arguments.error(
+                    "invalid generic function name: expected a character string or a name",
+                ));
+            }
+        },
+    };
+    let Some(env) = env.downcast::<Environment>() else {
+        return Err(arguments.error("invalid environment for the generic function"));
+    };
+    let package = first_text(context, package);
+    let generic_name = handles::text(symbol.name());
+    force_deferred(context, generic_name.as_bytes(), Lookup::Generic)?;
+    let generic = find_generic(context, symbol, env, &package)?;
+    if generic.is(handles::null()) && handles::logical_scalar(context, must_find) == 1 {
+        return Err(arguments.error(format!(
+            "no generic function definition found for '{generic_name}'"
         )));
     }
     Ok(generic)
 }
 
-/// `getGeneric(name, where = env)` for a plain name: the generic visible from `env`, after
-/// running whatever deferred definitions create it, or `NULL`.
-pub(crate) unsafe fn visible_generic(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    force_deferred(symbol_name(symbol).as_bytes(), Lookup::Generic)?;
-    find_generic(symbol, env, "")
+fn get_slot<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let symbol = slot_symbol(context, arguments.value(1))
+        .map_err(|_| arguments.error("invalid type or length for slot name"))?;
+    crate::subset::slot_of(
+        context,
+        arguments.value(0),
+        handles::interned_symbol(symbol),
+        Some(arguments.expression()),
+    )
 }
 
-/// What a lookup that may need deferred definitions is after, by name.
-pub(crate) enum Lookup<'a> {
-    /// A class missing from the class cache.
-    Class,
-    Generic,
-    /// A primitive about to dispatch on S4 objects of these classes.
-    Primitive(&'a [&'a [u8]]),
-}
-
-/// Runs the deferred unit that the lookup of `name` needs, if any, and reports whether it ran
-/// one. The unit is marked as run first, so a lookup it makes itself finds nothing deferred.
-pub(crate) unsafe fn force_deferred(name: &[u8], lookup: Lookup<'_>) -> R<bool> {
-    let deferred = &interp().globals.deferred_definitions;
-    for (position, definitions) in deferred.iter().enumerate() {
-        let first = definitions.first_pending
-            && match lookup {
-                Lookup::Class => definitions.classes.contains(name),
-                Lookup::Generic => definitions.generics.contains(name),
-                Lookup::Primitive(classes) => {
-                    definitions.primitives.contains(name)
-                        && classes
-                            .iter()
-                            .any(|class| definitions.classes.contains(*class))
-                }
-            };
-        let lazy = matches!(lookup, Lookup::Generic) && definitions.lazy.contains(name);
-        if first || lazy {
-            run_unit(position, lazy.then_some(name))?;
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Marks the unit of the definitions at `position` as run, and the first unit with it, then
-/// calls their `force` for it unless both ran already. Definitions with no unit left are
-/// unregistered.
-unsafe fn run_unit(position: usize, lazy: Option<&[u8]>) -> R<()> {
-    let deferred = &mut interp().globals.deferred_definitions;
-    let Some(definitions) = deferred.get_mut(position) else {
-        return Ok(());
+fn set_slot<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let name = arguments.value(1);
+    let Some(names) = strings(context, name)?.filter(|names| names.len() == 1) else {
+        return Err(arguments.error("invalid type or length for slot name"));
     };
-    let first = std::mem::replace(&mut definitions.first_pending, false);
-    let lazy = lazy.filter(|generic| definitions.lazy.remove(*generic));
-    if !first && lazy.is_none() {
-        return Ok(());
-    }
-    let force = definitions.force;
-    let exhausted = definitions.lazy.is_empty();
-    let argument = match lazy {
-        Some(generic) => values::scalar_string(&String::from_utf8_lossy(generic))?,
-        None => nil(),
-    };
-    let heap = crate::heap();
-    // The call holds `force` by a preserve of its own: an entry with no unit left is removed
-    // and hands its preserve over, and any other may be replaced while the call runs.
-    if exhausted {
-        deferred.remove(position);
-    } else {
-        heap.preserve(force);
-    }
-    heap.preserve(argument);
-    let result =
-        values::call(force, &[argument]).and_then(|call| eval::eval(call, values::global_env()));
-    heap.release(argument);
-    heap.release(force);
-    result.map(|_| ())
+    let symbol = handles::install_name_at(context, names, 0)?;
+    crate::subset::set_slot_in_place(context, arguments.value(0), symbol, arguments.value(2))
 }
 
-/// The first generic function bound to `symbol` from `env` outward (from `package`, unless
-/// that is empty): a closure with a `generic` attribute, or the generic the methods package
-/// set up for a primitive.
-pub(crate) unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
-    let heap = crate::heap();
-    let generic_symbol = values::install("generic")?;
-    let package_symbol = symbols().package;
-    let mut frame = env;
-    while frame != values::empty_env() {
-        if let Some(cell) = heap.frame_cell(frame, symbol) {
-            let value = eval::value_of(eval::cell_value(cell)?)?;
-            let candidate = match value.kind() {
-                SexpType::Closure if values::get_attr(value, generic_symbol) != nil() => value,
-                SexpType::Builtin | SexpType::Special => {
-                    dispatch::primitive_methods(value).map_or(nil(), |(generic, _)| generic)
-                }
-                _ => nil(),
-            };
-            if candidate != nil() {
-                let defined = values::get_attr(candidate, package_symbol);
-                let matches = package.is_empty()
-                    || values::first_string(defined).is_none_or(|defined| defined == package);
-                if matches {
-                    return Ok(candidate);
-                }
-            }
-        }
-        frame = frame.enclosure();
-    }
-    Ok(nil())
-}
-
-unsafe fn get_slot(call: &NativeCall<'_>) -> R<Sexp> {
-    let symbol =
-        slot_symbol(call.arg(1)).map_err(|_| call.error("invalid type or length for slot name"))?;
-    crate::subset::get_slot(call.arg(0), symbol, call.call)
-}
-
-unsafe fn set_slot(call: &NativeCall<'_>) -> R<Sexp> {
-    let name = call.arg(1);
-    if name.kind() != SexpType::String || length(name) != 1 {
-        return Err(call.error("invalid type or length for slot name"));
-    }
-    let symbol = values::install_charsxp(name.element(0))?;
-    crate::subset::assign_slot(call.arg(0), symbol, call.arg(2))
-}
-
-unsafe fn has_slot_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    values::scalar_bool(has_slot(call.arg(0), call.arg(1))?)
+fn has_slot_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let found = has_slot(context, arguments.value(0), arguments.value(1))?;
+    handles::logical_constant(context, i32::from(found))
 }
 
 fn identical_strings<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
@@ -1502,15 +1795,17 @@ fn identical_strings<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
 }
 
 /// Turns S4 dispatch on, with `where` as the methods namespace.
-unsafe fn init_method_dispatch(call: &NativeCall<'_>) -> R<Sexp> {
-    let namespace = call.arg(0);
+fn init_method_dispatch<'s>(_context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let namespace = arguments.value(0);
     let globals = &mut interp().globals;
-    if namespace.kind() == SexpType::Environment {
-        globals.methods_namespace = namespace;
+    let environment = namespace.downcast::<Environment>();
+    if let Some(environment) = environment {
+        globals.methods_namespace = environment.raw();
     }
     globals.methods_dispatch = true;
-    if namespace.kind() == SexpType::Environment {
-        crate::methods_core::install_fast_paths(namespace)?;
+    if let Some(environment) = environment {
+        // SAFETY: the call's arguments hold the namespace, and the globals hold it from here on.
+        unsafe { crate::methods_core::install_fast_paths(environment.raw())? };
     }
     Ok(namespace)
 }
@@ -1539,53 +1834,59 @@ fn package_meta_name<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
     Ok(text.finish().finish().value())
 }
 
-unsafe fn test_make_class(call: &NativeCall<'_>) -> R<Sexp> {
-    let name = values::first_string(call.arg(0))
-        .ok_or_else(|| call.error("C level MAKE_CLASS macro called with NULL string pointer"))?
-        .into_owned();
-    make_class(&name)
+fn test_make_class<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let name = class_name_argument(context, arguments)?;
+    make_class(context, &name)
 }
 
-unsafe fn test_new(call: &NativeCall<'_>) -> R<Sexp> {
-    let name = values::first_string(call.arg(0))
-        .ok_or_else(|| call.error("C level MAKE_CLASS macro called with NULL string pointer"))?
-        .into_owned();
-    new_object(make_class(&name)?)
+fn test_new<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let name = class_name_argument(context, arguments)?;
+    let class_def = make_class(context, &name)?;
+    new_object(context, class_def)
 }
 
-unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    let (symbol, env) = (call.arg(0), call.arg(1));
-    let symbol = match symbol.kind() {
-        SexpType::Symbol => symbol,
-        SexpType::String if length(symbol) >= 1 => values::install_charsxp(symbol.element(0))?,
-        _ => {
-            let class = dispatch::class_of_raw(symbol)?;
-            return Err(call.error(format!(
-                "invalid symbol in checking for missing argument in method dispatch: expected a name, got an object of class \"{}\"",
-                values::first_string(class).unwrap_or_default()
-            )));
-        }
+fn class_name_argument(context: &mut Cx<'_>, arguments: &NativeArgs<'_, '_>) -> R<String> {
+    handles::first_string(context, arguments.value(0))
+        .map(Cow::into_owned)
+        .ok_or_else(|| arguments.error("C level MAKE_CLASS macro called with NULL string pointer"))
+}
+
+fn missing_arg_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (symbol, env) = (arguments.value(0), arguments.value(1));
+    let symbol = match symbol.downcast::<Symbol>() {
+        Some(symbol) => handles::permanent(symbol),
+        None => match strings(context, symbol)? {
+            Some(names) if !names.is_empty() => handles::install_name_at(context, names, 0)?,
+            _ => {
+                let class = dispatch::class_of(context, symbol)?;
+                return Err(arguments.error(format!(
+                    "invalid symbol in checking for missing argument in method dispatch: expected a name, got an object of class \"{}\"",
+                    first_text(context, class)
+                )));
+            }
+        },
     };
-    let env = if env == nil() {
-        values::global_env()
+    let env = if env.is(handles::null()) {
+        handles::global_environment().value()
     } else {
         env
     };
-    if env.kind() != SexpType::Environment {
-        let class = dispatch::class_of_raw(env)?;
-        return Err(call.error(format!(
+    let Some(env) = env.downcast::<Environment>() else {
+        let class = dispatch::class_of(context, env)?;
+        return Err(arguments.error(format!(
             "invalid environment in checking for missing argument, '{}', in methods dispatch: supplied an object of class \"{}\"",
-            symbol_name(symbol),
-            values::first_string(class).unwrap_or_default()
+            handles::text(symbol.name()),
+            first_text(context, class)
         )));
-    }
-    if crate::heap().frame_cell(env, symbol).is_none() {
-        return Err(call.error(format!(
+    };
+    if handles::frame_binding(context, env, symbol).is_none() {
+        return Err(arguments.error(format!(
             "could not find symbol '{}' in frame of call",
-            symbol_name(symbol)
+            handles::text(symbol.name())
         )));
     }
-    values::scalar_bool(eval::is_missing(symbol, env)?)
+    let missing = eval::formal_is_missing(context, symbol, env.read(context))?;
+    handles::logical_constant(context, i32::from(missing))
 }
 
 /// `R_nextMethodCall(matched_call, env)`: evaluates the method call `matched_call` (from
@@ -1593,47 +1894,62 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
 /// argument passed on as the method frame's own binding of it (`... = ...` for the dots, which
 /// the call shows in errors). A primitive next method is
 /// called directly, with its S4 dispatch suppressed so that it runs its own code.
-unsafe fn next_method_call(call: &NativeCall<'_>) -> R<Sexp> {
-    let (matched_call, env) = (call.arg(0), call.arg(1));
-    let next_symbol = values::install(".nextMethod")?;
-    let mut op = eval::value_of(eval::find_var_in_frame(next_symbol, env)?)?;
-    if op == unbound() {
-        return Err(call.error(
+fn next_method_call<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (matched_call, env) = (arguments.value(0), arguments.value(1));
+    let unassigned = || {
+        arguments.error(
             "internal error in 'callNextMethod': '.nextMethod' was not assigned in the frame of the method call",
-        ));
-    }
-    let mut primitive = matches!(op.kind(), SexpType::Builtin | SexpType::Special);
-    if !primitive && values::inherits(op, "internalDispatchMethod") {
-        let generic = eval::value_of(eval::find_var_in_frame(values::install(".Generic")?, env)?)?;
-        let name = values::first_string(generic).ok_or_else(|| {
-            call.error("internal error in 'callNextMethod': '.Generic' was not assigned in the frame of the method call")
+        )
+    };
+    let Some(env) = env.downcast::<Environment>() else {
+        return Err(unassigned());
+    };
+    let next_symbol = handles::permanent_symbol(|symbols| symbols.dot_next_method);
+    let Some(mut op) = frame_forced(context, env, next_symbol)? else {
+        return Err(unassigned());
+    };
+    let mut primitive = matches!(op.r_type(), SexpType::Builtin | SexpType::Special);
+    if !primitive && handles::inherits(context, op, "internalDispatchMethod") {
+        let generic = frame_forced(context, env, handles::symbol(|symbols| symbols.dot_generic))?;
+        let name = match generic {
+            Some(generic) => handles::first_string(context, generic).map(Cow::into_owned),
+            None => None,
+        }
+        .ok_or_else(|| {
+            arguments.error("internal error in 'callNextMethod': '.Generic' was not assigned in the frame of the method call")
         })?;
-        op = crate::builtins::primitive(&name)
-            .ok_or_else(|| call.error(format!("'{name}' is not a primitive function")))?;
+        let function = handles::primitive(&name)
+            .ok_or_else(|| arguments.error(format!("'{name}' is not a primitive function")))?;
+        op = context.root(function);
         primitive = true;
     }
-    let mut items = vec![(nil(), if primitive { op } else { next_symbol })];
-    for (tag, value) in values::pairlist_items(matched_call.cdr()) {
-        if tag != nil() && value != missing_arg() {
-            items.push((tag, tag));
-        } else {
-            items.push((tag, value));
-        }
+    let mut items: SmallVec<[Tagged<'s>; 8]> = SmallVec::new();
+    let mut cell = match handles::cell_fields(matched_call.read(context)) {
+        Some((_, _, rest)) => context.root(rest),
+        None => handles::null(),
+    };
+    while let Some((value, tag, rest)) = handles::cell_fields(cell.read(context)) {
+        let passed = !tag.is(handles::null()) && !handles::is_missing_argument(value);
+        let tag = handles::root_unless_permanent(context, tag);
+        let value = if passed { tag } else { context.root(value) };
+        items.push(Tagged { tag, value });
+        cell = context.root(rest);
     }
-    let next_call = values::pairlist(&items, SexpType::Language)?;
+    let rest = handles::chain(context, &items, handles::null())?;
+    let head = if primitive { op } else { next_symbol.value() };
+    let next_call = handles::language(context, head, rest)?.value();
     if !primitive {
-        return eval::eval(next_call, env);
+        return handles::evaluate(context, next_call, env);
     }
-    let index = op.primitive_index();
-    let previous = interp()
-        .globals
-        .primitive_methods
-        .get(&index)
-        .map(|entry| entry.state);
-    if let Some(entry) = interp().globals.primitive_methods.get_mut(&index) {
+    let Some(index) = handles::primitive_index(op) else {
+        return handles::evaluate(context, next_call, env);
+    };
+    let primitive_methods = &mut interp().globals.primitive_methods;
+    let previous = primitive_methods.get(&index).map(|entry| entry.state);
+    if let Some(entry) = primitive_methods.get_mut(&index) {
         entry.state = MethodsState::Suppressed;
     }
-    let result = eval::eval(next_call, env);
+    let result = handles::evaluate(context, next_call, env);
     if let (Some(state), Some(entry)) =
         (previous, interp().globals.primitive_methods.get_mut(&index))
     {
@@ -1642,46 +1958,65 @@ unsafe fn next_method_call(call: &NativeCall<'_>) -> R<Sexp> {
     result
 }
 
-unsafe fn quick_method_check_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    quick_method_check(call.arg(0), call.arg(1), call.arg(2))
+fn quick_method_check_routine<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+) -> R<Local<'s>> {
+    quick_method_check(
+        context,
+        arguments.value(0),
+        arguments.value(1),
+        arguments.value(2),
+    )
 }
 
 /// `R_selectMethod(f, env, mlist, evalArgs)`: method selection in a `MethodsList`, the
 /// representation of methods the package used before methods tables. Each level of the list
 /// dispatches on one argument (its `argument` slot) through the named list in its `methods`
 /// slot, falling back to `"ANY"`.
-unsafe fn select_method(call: &NativeCall<'_>) -> R<Sexp> {
-    let (env, mut methods_list, evaluate) = (call.arg(1), call.arg(2), call.arg(3));
-    let evaluate = values::as_logical_scalar(evaluate) == 1;
+fn select_method<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (env, mut methods_list, evaluate) =
+        (arguments.value(1), arguments.value(2), arguments.value(3));
+    let Some(env) = env.downcast::<Environment>() else {
+        return Err(arguments.error("invalid environment for method selection"));
+    };
+    let evaluate = handles::logical_scalar(context, evaluate) == 1;
+    let argument_slot = handles::install_bytes(context, b"argument")?;
+    let methods_slot = handles::install_bytes(context, b"methods")?;
     loop {
-        if values::is_function(methods_list) || methods_list == nil() {
+        if is_function(methods_list) || methods_list.is(handles::null()) {
             return Ok(methods_list);
         }
-        let argument = slot_value(methods_list, "argument")?;
-        let methods = slot_value(methods_list, "methods")?;
-        let class = if argument.kind() != SexpType::Symbol
-            || bound_missing(argument, env).unwrap_or(true)
-        {
-            "missing".to_owned()
-        } else {
-            let value = if evaluate {
-                eval::eval(argument, env)?
-            } else {
-                eval::value_of(eval::find_var_in_frame(argument, env)?)?
-            };
-            let class = dispatch_class(value)?;
-            values::first_string(class).unwrap_or_default().into_owned()
+        let argument = slot_value(context, methods_list, argument_slot)?;
+        let methods = slot_value(context, methods_list, methods_slot)?;
+        let class = match argument.downcast::<Symbol>() {
+            Some(symbol)
+                if !bound_missing(context, handles::permanent(symbol), env).unwrap_or(true) =>
+            {
+                let value = if evaluate {
+                    handles::evaluate(context, argument, env)?
+                } else {
+                    frame_forced(context, env, symbol)?.unwrap_or_else(handles::unbound)
+                };
+                let class = dispatch_class(context, value)?;
+                first_text(context, class)
+            }
+            _ => "missing".to_owned(),
         };
-        let mut selected = values::list_get(methods, &class);
-        if selected == nil() {
-            selected = values::list_get(methods, "ANY");
+        let mut selected = named_element(context, methods, &class)?;
+        if selected.is(handles::null()) {
+            selected = named_element(context, methods, "ANY")?;
         }
         methods_list = selected;
     }
 }
 
-unsafe fn standard_generic(call: &NativeCall<'_>) -> R<Sexp> {
-    dispatch_generic(call.arg(0), call.arg(1), call.arg(2))
+fn standard_generic<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (name, env, generic) = (arguments.value(0), arguments.value(1), arguments.value(2));
+    let Some(env) = env.downcast::<Environment>() else {
+        return Err(arguments.error("invalid environment for the generic function"));
+    };
+    dispatch_generic(context, name, env, generic)
 }
 
 /// `substitute(object, frame)` where `object` is the value itself, not the expression that
@@ -1727,10 +2062,8 @@ fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
     eval::substitute(context, object, environment)
 }
 
-unsafe fn alloc_s4_object(_call: &NativeCall<'_>) -> R<Sexp> {
-    let object = values::triple(SexpType::Object, nil(), nil(), nil())?;
-    object.set_gp_bits(gp::S4_OBJECT, true);
-    Ok(object)
+fn alloc_s4_object<'s>(context: &mut Cx<'s>, _arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::new_s4_object(context)?.finish().value())
 }
 
 /// Reports whether table dispatch is on, which it always is here: GNU R can switch back to its
@@ -1743,41 +2076,107 @@ fn set_method_dispatch<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>)
     handles::logical_constant(context, i32::from(previous))
 }
 
-unsafe fn primitive_name(call: &NativeCall<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if !matches!(object.kind(), SexpType::Builtin | SexpType::Special) {
-        return Err(call.error("'R_get_primname' called on a non-primitive"));
+fn primitive_name<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    if !matches!(object.r_type(), SexpType::Builtin | SexpType::Special) {
+        return Err(arguments.error("'R_get_primname' called on a non-primitive"));
     }
-    values::scalar_string(values::primitive_name(object))
+    let name = handles::builtin_definition(object)?.name;
+    Ok(handles::text_vector(context, &[name])?.value())
 }
 
-unsafe fn new_object_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    new_object_copying(call.arg(0), false)
+fn new_object_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    new_object_copying(context, arguments.value(0), false)
 }
 
 // Helpers.
 
-unsafe fn slot_value(object: Sexp, name: &str) -> R<Sexp> {
-    crate::subset::get_slot(object, values::install(name)?, nil())
+/// The slot `slot` of `object`, as `R_do_slot` reads it.
+fn slot_value<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Gc<'static, Symbol>,
+) -> R<Local<'s>> {
+    crate::subset::slot_of(
+        context,
+        object,
+        handles::interned_symbol(slot),
+        Some(handles::null()),
+    )
 }
 
-unsafe fn methods_namespace() -> R<Sexp> {
-    let namespace = interp().globals.methods_namespace;
-    if namespace.kind() == SexpType::Environment {
-        Ok(namespace)
-    } else {
-        Err(error("the methods package is not loaded"))
+/// The value `symbol` has in the frame of `env` itself, its promise forced, or `None` when the
+/// frame does not bind it.
+fn frame_forced<'s>(
+    context: &mut Cx<'s>,
+    env: Local<'_, Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> R<Option<Local<'s>>> {
+    match eval::frame_content(context, env, symbol)? {
+        Some(value) if !handles::is_unbound(value) => handles::force(context, value).map(Some),
+        _ => Ok(None),
     }
+}
+
+/// The element of the list `list` named `name`, or `NULL`.
+fn named_element<'s>(context: &mut Cx<'s>, list: Local<'s>, name: &str) -> R<Local<'s>> {
+    let names = handles::names_of(context, list)?;
+    let Some(names) = handles::dense::<Str>(context, names)? else {
+        return Ok(handles::null());
+    };
+    let Some(index) = names
+        .iter(context)
+        .position(|element| element.bytes() == name.as_bytes())
+    else {
+        return Ok(handles::null());
+    };
+    if let Some(elements) = handles::dense::<List>(context, list)?
+        && index < elements.len()
+    {
+        return Ok(context.root(elements.get(context, index)));
+    }
+    if let Some(expressions) = handles::dense::<Expression>(context, list)?
+        && index < expressions.len()
+    {
+        return Ok(context.root(expressions.get(context, index)));
+    }
+    Ok(handles::null())
+}
+
+/// `value` as a character vector, when it is one.
+fn strings<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, Str>>> {
+    if value.r_type() != SexpType::String {
+        return Ok(None);
+    }
+    handles::dense::<Str>(context, value)
+}
+
+/// The first string of `value` as text, empty when there is none.
+fn first_text(context: &mut Cx<'_>, value: Local<'_>) -> String {
+    handles::first_string(context, value)
+        .unwrap_or_default()
+        .into_owned()
+}
+
+fn is_function(value: Local<'_>) -> bool {
+    matches!(
+        value.r_type(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    )
+}
+
+fn methods_namespace<'s>(context: &Cx<'s>) -> R<Local<'s, Environment>> {
+    handles::methods_namespace(context).ok_or_else(|| error("the methods package is not loaded"))
 }
 
 /// A function of the methods namespace, looked up by name.
-unsafe fn methods_function(name: &str) -> R<Sexp> {
-    let namespace = methods_namespace()?;
-    let value = eval::value_of(eval::find_var_in_frame(values::install(name)?, namespace)?)?;
-    if !values::is_function(value) {
-        return Err(error(format!(
+fn methods_function<'s>(context: &mut Cx<'s>, name: &str) -> R<Local<'s>> {
+    let namespace = methods_namespace(context)?;
+    let symbol = handles::install_bytes(context, name.as_bytes())?;
+    match frame_forced(context, namespace, symbol)? {
+        Some(value) if is_function(value) => Ok(value),
+        _ => Err(error(format!(
             "could not find function \"{name}\" in the methods package"
-        )));
+        ))),
     }
-    Ok(value)
 }
