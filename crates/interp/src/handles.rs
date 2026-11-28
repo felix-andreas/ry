@@ -4896,7 +4896,8 @@ pub fn pending_promise<'s>(
 #[inline(always)]
 pub fn root_unless_permanent<'s>(context: &Cx<'s>, value: Gc<'_>) -> Local<'s> {
     if matches!(value.r_type(), SexpType::Symbol | SexpType::Nil) {
-        // SAFETY: the symbol table keeps every symbol, and `NULL` is a permanent root.
+        // SAFETY: every symbol is interned (`Rf_allocSExp` refuses to make one) and the symbol
+        // table keeps it, and `NULL` is a permanent root.
         return unsafe { Local::adopt(value.raw()) };
     }
     context.root(value)

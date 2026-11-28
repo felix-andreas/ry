@@ -12936,6 +12936,11 @@ fn slot_eager_value<'c>(
     frame: RunningFrame<'_, '_, '_>,
     symbol: Gc<'_, Symbol>,
 ) -> Option<Gc<'c>> {
+    // A native entry forces promises between its lookups, and R code they run can give the
+    // frame an environment, which then holds its variables instead of the slots.
+    if frame.has_environment() {
+        return None;
+    }
     if let Some(slot) = frame.slot_named(symbol) {
         let value = frame.read(context, slot);
         if handles::is_missing_argument(value) {
@@ -12948,7 +12953,6 @@ fn slot_eager_value<'c>(
             });
         }
     }
-    debug_assert!(!frame.has_environment());
     effects::eager_value(
         context,
         symbol,
