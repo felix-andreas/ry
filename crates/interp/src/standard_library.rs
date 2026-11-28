@@ -3031,32 +3031,117 @@ unsafe fn str_to_utf8(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
-    let [bytes] = arguments(call, ["bytes"])?;
-    let decoded = utf8_bytes(call, bytes)?;
-    // R strings cannot hold a NUL byte, so one is reported as bad UTF-8 like any other byte a
-    // string cannot carry.
-    match String::from_utf8(decoded) {
-        Ok(string) if !string.contains('\0') => ok(scalar_string(&string)?),
-        _ => err("BadUtf8"),
+    from_units(call, Encoding::Utf8, false)
+}
+
+/// A Unicode encoding the standard library converts strings to and from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+    Utf16,
+    Utf32,
+}
+
+/// What decoding a list of code units gives.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decoded {
+    Text(String),
+    /// The units are not valid in the encoding, which only a strict decoding reports.
+    Invalid,
+    /// The unit at a 0-based position cannot be a code unit of the encoding at all, which is an
+    /// error in both decodings: a UTF-8 unit outside 0 to 255 or a UTF-16 unit outside 0 to
+    /// 65535. Every number is a possible UTF-32 unit, valid or not.
+    OutOfRange { position: usize, unit: i64 },
+}
+
+/// Decodes code units, the one definition of `Str.from_utf8`, `Str.from_utf16` and
+/// `Str.from_utf32` and their lossy forms in every tier. A lossy decoding replaces each invalid
+/// sequence with U+FFFD. R strings cannot hold NUL, so a NUL is invalid like any other unit a
+/// string cannot carry.
+pub fn decode(encoding: Encoding, units: &[i64], lossy: bool) -> Decoded {
+    let out_of_range = |range: std::ops::RangeInclusive<i64>| {
+        units
+            .iter()
+            .position(|unit| !range.contains(unit))
+            .map(|position| Decoded::OutOfRange {
+                position,
+                unit: units[position],
+            })
+    };
+    let text = match encoding {
+        Encoding::Utf8 => {
+            if let Some(error) = out_of_range(0..=255) {
+                return error;
+            }
+            let bytes: Vec<u8> = units.iter().map(|&unit| unit as u8).collect();
+            if lossy {
+                String::from_utf8_lossy(&bytes).into_owned()
+            } else {
+                match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => return Decoded::Invalid,
+                }
+            }
+        }
+        Encoding::Utf16 => {
+            if let Some(error) = out_of_range(0..=65535) {
+                return error;
+            }
+            let units: Vec<u16> = units.iter().map(|&unit| unit as u16).collect();
+            if lossy {
+                String::from_utf16_lossy(&units)
+            } else {
+                match String::from_utf16(&units) {
+                    Ok(text) => text,
+                    Err(_) => return Decoded::Invalid,
+                }
+            }
+        }
+        Encoding::Utf32 => {
+            let mut text = String::with_capacity(units.len());
+            for &unit in units {
+                match u32::try_from(unit).ok().and_then(char::from_u32) {
+                    Some(character) if character != '\0' => text.push(character),
+                    _ if lossy => text.push('\u{FFFD}'),
+                    _ => return Decoded::Invalid,
+                }
+            }
+            return Decoded::Text(text);
+        }
+    };
+    if !text.contains('\0') {
+        Decoded::Text(text)
+    } else if lossy {
+        Decoded::Text(text.replace('\0', "\u{FFFD}"))
+    } else {
+        Decoded::Invalid
     }
 }
 
-/// The bytes of a list of numbers from 0 to 255.
-unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
-    let mut decoded = Vec::new();
-    for (position, item) in list_elements(call, "bytes", bytes)?.into_iter().enumerate() {
-        let byte = whole(call, "bytes", item)?;
-        match u8::try_from(byte) {
-            Ok(byte) => decoded.push(byte),
-            Err(_) => {
-                return Err(call.error(format!(
-                    "`bytes` must hold numbers from 0 to 255, but item {} is {byte}",
-                    position + 1
-                )));
-            }
+/// `Str.from_utf8`, `Str.from_utf16` or `Str.from_utf32`, or a lossy form.
+unsafe fn from_units(call: &Call<'_>, encoding: Encoding, lossy: bool) -> R<Sexp> {
+    let (parameter, reason) = match encoding {
+        Encoding::Utf8 => ("bytes", "BadUtf8"),
+        Encoding::Utf16 => ("units", "BadUtf16"),
+        Encoding::Utf32 => ("code_points", "BadUtf32"),
+    };
+    let [list] = arguments(call, [parameter])?;
+    let mut units = Vec::new();
+    for item in list_elements(call, parameter, list)? {
+        units.push(whole(call, parameter, item)?);
+    }
+    match decode(encoding, &units, lossy) {
+        Decoded::Text(text) if lossy => scalar_string(&text),
+        Decoded::Text(text) => ok(scalar_string(&text)?),
+        Decoded::Invalid => err(reason),
+        Decoded::OutOfRange { position, unit } => {
+            let largest = if encoding == Encoding::Utf8 { 255 } else { 65535 };
+            Err(call.error(format!(
+                "`{parameter}` must hold numbers from 0 to {largest}, but item {} is {unit}",
+                position + 1
+            )))
         }
     }
-    Ok(decoded)
 }
 
 unsafe fn str_to_i64(call: &Call<'_>) -> R<Sexp> {
@@ -3118,11 +3203,7 @@ unsafe fn str_walk_utf8_with_index(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf8_lossy(call: &Call<'_>) -> R<Sexp> {
-    let [bytes] = arguments(call, ["bytes"])?;
-    let decoded = utf8_bytes(call, bytes)?;
-    // R strings cannot hold a NUL byte, so it is replaced like a byte that is not UTF-8.
-    let string = String::from_utf8_lossy(&decoded).replace('\0', "\u{FFFD}");
-    scalar_string(&string)
+    from_units(call, Encoding::Utf8, true)
 }
 
 unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
@@ -3131,37 +3212,11 @@ unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf16(call: &Call<'_>) -> R<Sexp> {
-    let [units] = arguments(call, ["units"])?;
-    let units = utf16_units(call, units)?;
-    match String::from_utf16(&units) {
-        Ok(string) if !string.contains('\0') => ok(scalar_string(&string)?),
-        _ => err("BadUtf16"),
-    }
+    from_units(call, Encoding::Utf16, false)
 }
 
 unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
-    let [units] = arguments(call, ["units"])?;
-    let units = utf16_units(call, units)?;
-    let string = String::from_utf16_lossy(&units).replace('\0', "\u{FFFD}");
-    scalar_string(&string)
-}
-
-/// The code units of a list of numbers from 0 to 65535.
-unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
-    let mut decoded = Vec::new();
-    for (position, item) in list_elements(call, "units", units)?.into_iter().enumerate() {
-        let unit = whole(call, "units", item)?;
-        match u16::try_from(unit) {
-            Ok(unit) => decoded.push(unit),
-            Err(_) => {
-                return Err(call.error(format!(
-                    "`units` must hold numbers from 0 to 65535, but item {} is {unit}",
-                    position + 1
-                )));
-            }
-        }
-    }
-    Ok(decoded)
+    from_units(call, Encoding::Utf16, true)
 }
 
 unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
@@ -3170,39 +3225,11 @@ unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf32(call: &Call<'_>) -> R<Sexp> {
-    let [code_points] = arguments(call, ["code_points"])?;
-    let mut string = String::new();
-    for code_point in utf32_code_points(call, code_points)? {
-        match code_point {
-            Some(character) => string.push(character),
-            None => return err("BadUtf32"),
-        }
-    }
-    ok(scalar_string(&string)?)
+    from_units(call, Encoding::Utf32, false)
 }
 
 unsafe fn str_from_utf32_lossy(call: &Call<'_>) -> R<Sexp> {
-    let [code_points] = arguments(call, ["code_points"])?;
-    let string: String = utf32_code_points(call, code_points)?
-        .into_iter()
-        .map(|code_point| code_point.unwrap_or('\u{FFFD}'))
-        .collect();
-    scalar_string(&string)
-}
-
-/// The characters of a list of whole numbers, `None` for a number that is not a Unicode scalar
-/// value. NUL counts as one, because an R string cannot hold it.
-unsafe fn utf32_code_points(call: &Call<'_>, code_points: Sexp) -> R<Vec<Option<char>>> {
-    let mut decoded = Vec::new();
-    for item in list_elements(call, "code_points", code_points)? {
-        let number = whole(call, "code_points", item)?;
-        let character = u32::try_from(number)
-            .ok()
-            .and_then(char::from_u32)
-            .filter(|&character| character != '\0');
-        decoded.push(character);
-    }
-    Ok(decoded)
+    from_units(call, Encoding::Utf32, true)
 }
 
 // Num.

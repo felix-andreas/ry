@@ -9,7 +9,7 @@
 //! value must be shared and a `Drop` where a local dies, and lists what a failing instruction
 //! must drop before it gives up.
 
-use {smallvec::SmallVec, std::fmt};
+use {interp::standard_library::Encoding, smallvec::SmallVec, std::fmt};
 
 /// A local's index into [`Function::locals`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -234,9 +234,9 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub struct Inst {
     /// The local the instruction assigns. An [`Op::CountTrue`] has none and assigns the locals
-    /// of its counts, an [`Op::Parse`] also assigns whether the string parsed, and an
-    /// [`Op::SplitBounds`] also assigns where each piece lies, so read [`Inst::assigned`] for
-    /// what an instruction writes.
+    /// of its counts, an [`Op::Parse`] also assigns whether the string parsed, a strict
+    /// [`Op::Decode`] whether the units are valid, and an [`Op::SplitBounds`] where each piece
+    /// lies, so read [`Inst::assigned`] for what an instruction writes.
     pub dest: Option<Local>,
     pub op: Op,
     /// The operands this instruction takes ownership of, by position in [`Op::operands`]. The
@@ -266,6 +266,9 @@ impl Inst {
         match &self.op {
             Op::CountTrue { counts, .. } => counts.iter().map(|&(_, local)| local).collect(),
             Op::Parse { parsed, .. } => self.dest.into_iter().chain([*parsed]).collect(),
+            Op::Decode {
+                valid: Some(valid), ..
+            } => self.dest.into_iter().chain([*valid]).collect(),
             Op::SplitBounds { bounds, .. } => {
                 let bounds = bounds.iter().flat_map(|&(_, start, end)| [start, end]);
                 self.dest.into_iter().chain(bounds).collect()
@@ -614,10 +617,18 @@ pub enum Op {
     ShapeOf(Local),
     /// `Str.count_utf8_bytes`, as an `I64`.
     ByteCount(Local),
-    /// `Str.to_utf8`: the string's bytes, as a list of `I64`s.
-    ToUtf8(Local),
-    /// `Str.from_utf8_lossy` of a list of `I64`s, failing for an item outside 0 to 255.
-    FromUtf8Lossy(Local),
+    /// `Str.to_utf8`, `Str.to_utf16` or `Str.to_utf32`: the string's code units, as a list of
+    /// `I64`s.
+    Encode(Encoding, Local),
+    /// A string decoded from a list of `I64` code units ([`interp::standard_library::decode`]),
+    /// failing for a unit out of the encoding's range. A strict decoding assigns into `valid`
+    /// whether the units are valid, and an empty string when they are not; a lossy one has no
+    /// `valid`.
+    Decode {
+        encoding: Encoding,
+        units: Local,
+        valid: Option<Local>,
+    },
     /// `Str.repeat(string, count)`, failing for a negative count.
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
@@ -721,8 +732,8 @@ impl Op {
             | Take(a, _, _)
             | ShapeOf(a)
             | ByteCount(a)
-            | ToUtf8(a)
-            | FromUtf8Lossy(a)
+            | Encode(_, a)
+            | Decode { units: a, .. }
             | DictLen(a)
             | DictKeys(a)
             | DictValues(a)
@@ -861,13 +872,15 @@ impl Op {
             | DictAt(..)
             | Push(..)
             | Swap(..)
-            | ToUtf8(_)
+            | Encode(..)
             | DictLen(_)
             | DictKeys(_)
             | DictValues(_)
             | Overflowing(..) => false,
             // A split string has at least one piece, so only a later piece can be missing.
             Piece { index, .. } => *index != 1,
+            // Every number is a possible UTF-32 unit, valid or not.
+            Decode { encoding, .. } => *encoding != Encoding::Utf32,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

@@ -696,3 +696,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `Op::Pick` takes an `I64`, an R integer, a whole double or a `List<I64>` of positions, and `ry_list_pick` reads them as `interp::arrays::positions` does: positive positions in order, negative ones left out (a bitset of the items), zeros select nothing. A position past the end, mixed signs and `NA` return null, so the interpreter runs the call again and raises its error, and the error text has one source.
 - The checker claims single brackets compile for an `I64` or `List<I64>` index, a `List<Bool>` mask and a whole-number literal, negated or not; `xs[]` and a fractional literal stay `interpreted`. The lowerer compiles a fractional literal too, and the call fails at run time and reruns in the interpreter, which truncates it; an `F64` index is a type error.
 - Picked and masked items take a reference each (`dup_items`), records and nested lists included.
+
+## The UTF conversions decode through one function in every tier
+
+**Status:** settled.
+
+- `interp::standard_library::decode` is the one definition of `Str.from_utf8`, `from_utf16`, `from_utf32` and their lossy forms: which units are out of range, which are invalid, and that a NUL is invalid because an R string cannot hold it. The interpreter's builtins and the typed core's `ry_list_decode` both call it, so the tiers cannot disagree on an edge case.
+- The typed IR has two ops, `Op::Encode(Encoding, _)` and `Op::Decode { encoding, units, valid }`, instead of one per function. A strict decoding assigns `valid` and builds its `Result` with the same branch as `Str.to_i64` (`Lowerer::checked_result`); a unit out of range fails, and the interpreter runs the call again to raise its error. UTF-32 has no range error, so its decoding cannot fail.
+- `Str.walk_utf8` lowers as `List.walk` over the encoded bytes, and `List.concat_utf8` as `List.concat` with them, so both reuse those loops (`typed-str-unicode.scenario`, `crates/ry/tests/native/clean-std-utf.R`).
