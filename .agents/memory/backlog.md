@@ -1083,6 +1083,7 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
   and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
   give native entry a stack-limit check, before raising the depth limit.
 - **Tier 0 makes `return(y <- x)` invisible.** GNU R and the scalar natives keep it visible. The typed core refuses such a `return` (`lower::Visibilities::tail`) so that it agrees with tier 0, with no `ry check` finding; once tier 0 follows GNU R, make it visible there.
+- **Dead statements after a loop that only `return` leaves decide a typed call's visibility.** `{ while (TRUE) { ... return(x) }; y <- 2 }` is always visible in R, but the typed core refuses it as disagreeing paths and `ry check` warns at `y <- 2`. In a `{`, both walks (`lower::Visibilities::tail`, `native::ShownWalk::tail`) should stop at the first statement that gives no value.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
   but whether a slot is stored unboxed is per object (only length-1, attribute-free, non-ALTREP

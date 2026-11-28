@@ -4015,11 +4015,9 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Jump(header));
         }
         self.builder.switch_to(exit);
-        // A `while (TRUE)` that only a `return` leaves gives no value, like a `repeat`.
+        // A `while (TRUE)` that only a `return` leaves gives no value, like a `repeat`. Its exit
+        // block keeps the `Fail` a new block ends in, which never runs.
         if is_true(condition_expression) && !breaks(body) {
-            self.builder.terminate(Terminator::Fail);
-            let unreachable = self.builder.block();
-            self.builder.switch_to(unreachable);
             return Ok(None);
         }
         Ok(Some(
@@ -12894,8 +12892,18 @@ impl Visibilities {
                 Some(caller) => self.arguments(formals, args, caller),
                 None => SmallVec::new(),
             };
+            // A recursion that passes a new literal at each level (`nest(n - 1, \(k) f(k))`)
+            // writes it in a new frame each time, so the guard compares literals, not frames.
             let recursive = self.frames.iter().any(|frame| {
-                frame.body == body && frame.parent == parent && frame.arguments == arguments
+                frame.body == body
+                    && frame.arguments.len() == arguments.len()
+                    && frame
+                        .arguments
+                        .iter()
+                        .zip(&arguments)
+                        .all(|(held, passed)| {
+                            held.0 == passed.0 && identity(held.1) == identity(passed.1)
+                        })
             });
             if recursive {
                 continue;
@@ -13156,6 +13164,15 @@ unsafe fn breaks(expression: Sexp) -> bool {
         items = items.cdr();
     }
     false
+}
+
+/// The function a reached callee is, whatever frame its literal is written in.
+fn identity(callee: Callee) -> Option<Sexp> {
+    match callee {
+        Callee::Literal { literal, .. } => Some(literal),
+        Callee::Typed(closure) => Some(closure),
+        Callee::Opaque => None,
+    }
 }
 
 unsafe fn is_true(value: Sexp) -> bool {

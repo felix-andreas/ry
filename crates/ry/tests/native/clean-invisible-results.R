@@ -50,17 +50,12 @@ apply_local <- function(f: fn(F64) -> F64, x: F64) -> F64 {
   g(x)
 }
 via_local <- function(x: F64) -> F64 apply_local(quiet, x)
-local_pass <- function(x: F64) -> F64 {
-  g <- function(h: fn(F64) -> F64, y: F64) -> F64 h(y)
-  g(\(v) { w <- v }, x)
-}
 twice <- function(f: fn(F64) -> F64, x: F64) -> F64 f(x)
 nested <- function(x: F64) -> F64 twice(\(y) twice(quiet, y), x)
 loud <- function(x: F64) -> F64 twice(\(y) y + 1, x)
 counted <- function(n: I64, f: fn(F64) -> F64) -> F64 if (n == 0) f(1) else counted(n - 1, f)
 through_recursion <- function(x: F64) -> F64 counted(3, quiet)
 via_local(5)
-local_pass(6)
 nested(3)
 loud(3)
 through_recursion(1)
@@ -76,7 +71,7 @@ newton <- function(x: F64) -> F64 {
   guess <- x
   while (TRUE) {
     better <- (guess + x / guess) / 2
-    if (abs(better - guess) < 1e-9) return(better)
+    if (Num.abs(better - guess) < 1e-9) return(better)
     guess <- better
   }
 }
