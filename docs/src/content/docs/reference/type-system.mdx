@@ -476,13 +476,16 @@ when a typed function passes it on as `...` (one it names, such as `..1`, is com
 computes it where the body first reads the parameter, so an R call the body makes before that read can change what it is. With `y <- 1` and
 `rebind <- function() y <<- 100`, `twice <- function(x: F64) -> F64 { rebind(); x * 2 }` gives 200
 for `twice(y)`, compiled or not. Native code computes an R call argument, such as `step(as.double(i))`,
-at entry when the body reads the parameter before it runs anything else, because R would compute
-it there too: base builtins and typed functions that take their arguments left to right
-(`half(sq(x)) + sqrt(x)` reads `x` first) count as reading, and anything else, such as a call of
-an R closure, an assignment or an `if`, ends the reads. The argument's code runs in the call's
-frame, after the entry checks, and `swapped <- function(a: F64, b: F64) -> F64 b - a` computes
-`b`'s argument before `a`'s. Otherwise the call runs in the interpreter, which computes the
-argument at the read.
+at entry when the body reads the parameter before it runs any other code, because R would compute
+it at that point too. A read reaches into the arguments of a call of a builtin or a typed function,
+which take their arguments left to right, but the call itself ends the reads: `x + sqrt(y)` reads
+`x` and then `y`, and `sqrt(x) + y` reads only `x`. A call of an R closure, an assignment, an `if`
+or a name that is not a parameter ends the reads too, and a body that is nothing but reads, such as
+`function(x: F64) -> F64 x`, reads nothing this way, so that `ident(invisible(1))` keeps R's
+visibility. The argument's code runs in a frame for the call, after the entry checks, and
+`swapped <- function(a: F64, b: F64) -> F64 b - a` computes `b`'s argument before `a`'s.
+Otherwise the call runs in the interpreter, which computes the argument at the read, and so does a
+call whose argument's code rebinds a function the body calls later.
 
 ```r
 first <- function(a: double, b: double) -> double a

@@ -3179,7 +3179,13 @@ unsafe fn gather_values(
 /// the call's frame. `None` declines the call, which the interpreter then runs.
 unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<()>> {
     let function = typed.function;
-    let reads = leading_reads(function);
+    // Forcing for code the typed core refuses would only add a frame to the interpreter's.
+    if let Some(refusal) = typed::settled_refusal(function) {
+        annotations::decline(|| refusal);
+        return None;
+    }
+    let walk = leading_reads(function);
+    let reads = &walk.positions;
     // The reads up to the last of the promises, or none when the body may not read one first.
     let prefix = unread
         .positions
@@ -3200,8 +3206,8 @@ unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<(
         annotations::decline(|| {
             format!(
                 "argument {} is `{}`, which R code wrote, so it stays lazy until the function \
-                 uses it, as in R, and the function does other work before it reads it: compute \
-                 it into a variable before the call",
+                 uses it, as in R, and the function may run other code before it reads it, or \
+                 never read it",
                 item + 1,
                 interp::deparse::deparse_first_line(source)
             )
@@ -3216,7 +3222,23 @@ unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<(
             }
         }
         annotations::enter(typed.call, function, env, interp::interp().frames.len())?;
-        for &position in prefix {
+        for (index, &position) in prefix.iter().enumerate() {
+            // R looks a call's head up after the arguments before it, so an argument forced
+            // here may have rebound a later head, which the interpreter then finds.
+            let rebound = walk.heads.iter().find(|&&(before, symbol, callee)| {
+                before <= index
+                    && resolve_function(symbol, walk.env).is_none_or(|now| now.function != callee)
+            });
+            if let Some(&(_, symbol, _)) = rebound {
+                annotations::decline(|| {
+                    format!(
+                        "computing an argument changed which function `{}` names, so the \
+                         interpreter runs the call",
+                        values::symbol_name(symbol)
+                    )
+                });
+                break;
+            }
             let Some(formal) = formals.get(position as usize) else {
                 continue;
             };
@@ -3231,63 +3253,61 @@ unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<(
     }))
 }
 
-/// The positions of the formals `function`'s body reads, in the order it reads them, before it
-/// runs anything that could see a difference between an argument forced then and one forced at
-/// the call: the walk stops at a call of anything but a base builtin or a typed closure, which
-/// takes its arguments strictly from typed code, at the first such call's own work, at a
-/// variable that is not a formal, whose lookup may force a promise, and at control flow other
-/// than a sequence. A formal read twice appears once.
-unsafe fn leading_reads(function: Sexp) -> SmallVec<[u32; 4]> {
-    let mut reads = SmallVec::new();
-    let body = bytecode::source_of_body(bytecode::closure_body(function));
+/// The formals `function`'s body reads, in the order it reads them, before it runs anything that
+/// could tell an argument forced then from one forced at the call. The walk follows `{`, `(`,
+/// constants and the arguments of calls of builtins and typed closures, which evaluate their
+/// arguments left to right before they run, and stops at every call once its arguments are read,
+/// at a name that is not a formal (its lookup may force a promise), at the first operand of other
+/// control flow and at a named, empty or `...` argument. A body made only of reads gives none:
+/// its value would be the forced argument's, whose visibility R keeps from the forcing.
+unsafe fn leading_reads(function: Sexp) -> LeadingReads {
     let mut env = function.tag();
     let mut resolvable = true;
     while env.kind() == SexpType::Environment && env != values::global_env() {
         resolvable &= !env.has_gp(gp::PENDING_FRAME);
         env = env.enclosure();
     }
-    let walk = LeadingReads {
+    let mut walk = LeadingReads {
         formals: function.car(),
         env: function.tag(),
         resolvable,
+        positions: SmallVec::new(),
+        heads: SmallVec::new(),
     };
-    read_expression(&walk, body, &mut reads, 0);
-    reads
+    let body = bytecode::source_of_body(bytecode::closure_body(function));
+    if read_expression(&mut walk, body, 0) {
+        walk.positions.clear();
+    }
+    walk
 }
 
-/// What [`leading_reads`] walks a body with.
+/// What [`leading_reads`] found, and what it walks a body with.
 struct LeadingReads {
     formals: Sexp,
     env: Sexp,
     /// Whether a function name resolves from `env` without asking a slot frame.
     resolvable: bool,
+    /// The positions of the formals read, each once, in the order the body reads them.
+    positions: SmallVec<[u32; 4]>,
+    /// Each call head the walk resolved, with the number of reads before R would look it up and
+    /// the function it found. Forcing an earlier argument can rebind it.
+    heads: SmallVec<[(usize, Sexp, Sexp); 4]>,
 }
 
-/// Adds the formals `expression` reads before it runs anything to `reads`, and whether the
-/// walk goes on past it.
-unsafe fn read_expression(
-    walk: &LeadingReads,
-    expression: Sexp,
-    reads: &mut SmallVec<[u32; 4]>,
-    depth: usize,
-) -> bool {
+/// Adds the formals `expression` reads before it runs anything to `walk`, and whether the walk
+/// goes on past it.
+unsafe fn read_expression(walk: &mut LeadingReads, expression: Sexp, depth: usize) -> bool {
     match expression.kind() {
-        SexpType::Symbol => {
-            let mut formal = walk.formals;
-            let mut position = 0u32;
-            while formal.kind() == SexpType::Pairlist {
-                if formal.tag() == expression {
-                    if !reads.contains(&position) {
-                        reads.push(position);
-                    }
-                    return true;
+        SexpType::Symbol => match formal_position(walk.formals, expression) {
+            Some(position) => {
+                if !walk.positions.contains(&position) {
+                    walk.positions.push(position);
                 }
-                formal = formal.cdr();
-                position += 1;
+                true
             }
-            false
-        }
-        SexpType::Language if depth < MAX_PURE_DEPTH => read_call(walk, expression, reads, depth),
+            None => false,
+        },
+        SexpType::Language if depth < MAX_PURE_DEPTH => read_call(walk, expression, depth),
         SexpType::Integer
         | SexpType::Real
         | SexpType::Logical
@@ -3297,19 +3317,14 @@ unsafe fn read_expression(
     }
 }
 
-unsafe fn read_call(
-    walk: &LeadingReads,
-    call: Sexp,
-    reads: &mut SmallVec<[u32; 4]>,
-    depth: usize,
-) -> bool {
+unsafe fn read_call(walk: &mut LeadingReads, call: Sexp, depth: usize) -> bool {
     let symbols = values::symbols();
     let head = call.car();
     let args = call.cdr();
     if head == symbols.brace {
         let mut item = args;
         while item.kind() == SexpType::Pairlist {
-            if !read_expression(walk, item.car(), reads, depth + 1) {
+            if !read_expression(walk, item.car(), depth + 1) {
                 return false;
             }
             item = item.cdr();
@@ -3317,10 +3332,11 @@ unsafe fn read_call(
         return true;
     }
     if head == symbols.paren {
-        return args.kind() == SexpType::Pairlist
-            && read_expression(walk, args.car(), reads, depth + 1);
+        return args.kind() == SexpType::Pairlist && read_expression(walk, args.car(), depth + 1);
     }
     // Each of these runs its first operand and then does something the walk does not follow.
+    // `return(x)` returns with the visibility forcing `x` left, so a bare formal there is no
+    // read the entry may take over.
     if [
         symbols.return_,
         symbols.if_,
@@ -3336,12 +3352,17 @@ unsafe fn read_call(
         } else {
             args
         };
-        if first.kind() == SexpType::Pairlist {
-            read_expression(walk, first.car(), reads, depth + 1);
+        if first.kind() == SexpType::Pairlist
+            && !(head == symbols.return_ && first.car().kind() == SexpType::Symbol)
+        {
+            read_expression(walk, first.car(), depth + 1);
         }
         return false;
     }
-    if head.kind() != SexpType::Symbol || !walk.resolvable || is_formal(walk, head) {
+    if head.kind() != SexpType::Symbol
+        || !walk.resolvable
+        || formal_position(walk.formals, head).is_some()
+    {
         return false;
     }
     let Some(resolved) = resolve_function(head, walk.env) else {
@@ -3356,12 +3377,13 @@ unsafe fn read_call(
     if !strict {
         return false;
     }
+    walk.heads.push((walk.positions.len(), head, callee));
     let mut item = args;
     while item.kind() == SexpType::Pairlist {
         if item.tag() != values::nil()
             || item.car() == values::missing_arg()
             || item.car() == values::symbols().dots
-            || !read_expression(walk, item.car(), reads, depth + 1)
+            || !read_expression(walk, item.car(), depth + 1)
         {
             return false;
         }
@@ -3371,15 +3393,18 @@ unsafe fn read_call(
     false
 }
 
-unsafe fn is_formal(walk: &LeadingReads, symbol: Sexp) -> bool {
-    let mut formal = walk.formals;
+/// The position of `symbol` among `formals`, if it names one.
+unsafe fn formal_position(formals: Sexp, symbol: Sexp) -> Option<u32> {
+    let mut formal = formals;
+    let mut position = 0;
     while formal.kind() == SexpType::Pairlist {
         if formal.tag() == symbol {
-            return true;
+            return Some(position);
         }
         formal = formal.cdr();
+        position += 1;
     }
-    false
+    None
 }
 
 /// Whether the formals `left_out` can be left to the typed core's code: each has a default.

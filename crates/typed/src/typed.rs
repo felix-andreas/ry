@@ -795,6 +795,31 @@ unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>, exhausted: bool, tripped:
     }
 }
 
+/// Why the typed core refused `function`, when it refused every argument types it tried, at least
+/// one, and none of the refusals waits on something the interpreter may yet do.
+pub fn settled_refusal(function: Sexp) -> Option<String> {
+    let awaiting =
+        AWAITING.with_borrow(|awaiting| awaiting.keys().any(|(closure, _)| *closure == function));
+    if awaiting {
+        return None;
+    }
+    COMPILED.with_borrow(|compiled| {
+        let mut refusal = None;
+        for ((closure, params), entry) in compiled.iter() {
+            if *closure != function {
+                continue;
+            }
+            match entry {
+                Ok(_) => return None,
+                Err(error) => {
+                    refusal.get_or_insert_with(|| format!("no code for {params:?}: {}", error.0));
+                }
+            }
+        }
+        refusal
+    })
+}
+
 /// Whether `function` has compiled code for some argument types.
 pub fn has_compiled(function: Sexp) -> bool {
     COMPILED.with_borrow(|compiled| {
