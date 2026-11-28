@@ -15051,6 +15051,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let callee_ty = match self.naming.non_locals.get(&callee) {
+            Some(name)
+                if name == "Reduce"
+                    && self.calls_base(callee)
+                    && self.reduces_from_the_right(arguments) =>
+            {
+                let resolved = self.table.shallow_resolve(self.db, callee_ty);
+                reduce_from_the_right(self.db, resolved)
+            }
+            _ => callee_ty,
+        };
         // Reading a base function no stub declares is left unchecked, because intrinsics such
         // as `c` are typed at their calls. A call that reaches this point is not one of them, so
         // its `Unknown` result enters here, as a library function's does.
@@ -23841,7 +23852,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.infer(init);
             }
             self.check_reduce_flags(&bound);
-            let Some(right) = literal_flag(self.module, bound.value(3), false) else {
+            let Some(right) = self.literal_flag(bound.value(3), false) else {
                 return Some(unknown(db));
             };
             let element = self.join_all(&elements);
@@ -23869,8 +23880,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 );
                 let (next, findings) = results.into_iter().next()?;
                 self.report_once(findings);
-                // A step whose type is not known decides nothing about the accumulator, so
-                // joining it in would keep the start's type (`Reduce(c, 1:3)` is `1:3`).
+                // A step whose type is not known decides nothing about the accumulator, which
+                // joining it in would hide behind the start's type.
+                let next = self.table.shallow_resolve(db, next);
                 if matches!(next.kind(db), TyKind::Any | TyKind::Unknown) {
                     return Some(next);
                 }
@@ -24157,12 +24169,35 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(fold) => fold,
             None => self.infer_ordinary_call(id, range, callee, arguments),
         };
-        let simplify = literal_flag(self.module, bound.value(5), true);
-        Some(match literal_flag(self.module, bound.value(4), false) {
+        let simplify = self.literal_flag(bound.value(5), true);
+        Some(match self.literal_flag(bound.value(4), false) {
             Some(false) => fold,
             Some(true) => self.accumulated(fold, simplify),
             None => union_of(db, [fold, self.accumulated(fold, simplify)]),
         })
+    }
+
+    /// Whether a `Reduce` call passes `right = TRUE`, so its callback takes the element first.
+    fn reduces_from_the_right(&self, arguments: &[Argument]) -> bool {
+        let bound = bind_formals(self.module, arguments, REDUCE_FORMALS);
+        self.literal_flag(bound.value(3), false) == Some(true)
+    }
+
+    /// A logical argument's value: `default` when it is left out, the literal when it is `TRUE`,
+    /// `FALSE` or base's `T` or `F`, and `None` when its value is not known.
+    fn literal_flag(&self, value: Option<ExprId>, default: bool) -> Option<bool> {
+        let Some(value) = value else {
+            return Some(default);
+        };
+        match self.module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::Logical(value)) => Some(*value),
+            ExpressionKind::NameRef(name) if self.calls_base(value) => match name.as_str() {
+                "T" => Some(true),
+                "F" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Checks `Reduce`'s `right`, `accumulate` and `simplify` as the logical flags R reads them as.
@@ -24245,7 +24280,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if !eligible {
             return None;
         }
-        let right = literal_flag(module, bound.value(3), false)?;
+        let right = self.literal_flag(bound.value(3), false)?;
         let recorded_errors = self.errors.len();
         let recorded_origins = self.strict_origins.len();
         let first_var = self.table.next_var().0;
@@ -24316,13 +24351,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             named_function: None,
         };
         let mut callback_ty = callback_ty;
-        // A base operator's value signature returns `Any`, so its steps type as the operator does.
+        // A base operator's value signature returns `Any`, so its steps type as the operator
+        // does. An operand open to the caller keeps the signature: the operator's rule would
+        // constrain it to numbers, and a class with an operator method also folds.
+        let open = |ty: Ty<'db>| contains_inference_var(self.db, self.table.resolve(self.db, ty));
         let operator = match module.kind(function) {
-            ExpressionKind::NameRef(_) => self
-                .naming
-                .non_locals
-                .get(&function)
-                .and_then(|name| arithmetic_operator(name)),
+            ExpressionKind::NameRef(name) if self.calls_base(function) => {
+                arithmetic_operator(name.as_str()).filter(|_| !open(accumulator) && !open(element))
+            }
             _ => None,
         };
         // Each step can only add members to the accumulator, so a few rounds reach the
@@ -24362,6 +24398,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             };
             // A step of unknown type, such as `c`'s, says nothing about the accumulator, which
             // joining would hide (`Reduce(c, 1:3)` is not an integer).
+            let returned = self.table.shallow_resolve(self.db, returned);
             if matches!(returned.kind(self.db), TyKind::Any | TyKind::Unknown) {
                 return returned;
             }
@@ -26470,17 +26507,36 @@ fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<&'db [RecordField<
 const REDUCE_FORMALS: &[&str] = &["f", "x", "init", "right", "accumulate", "simplify"];
 
 /// The arguments of a call to an R function with these `formals`, bound as R binds them:
-/// exact names first, then the unnamed arguments in order.
+/// exact names first, then a name that is the prefix of one formal alone, then the unnamed
+/// arguments in order. Every formal given precedes the function's `...`, as R partially
+/// matches only those.
 fn bind_formals(module: &Module, arguments: &[Argument], formals: &[&str]) -> BoundFormals {
+    let names: SmallVec<[Option<Symbol>; 8]> = arguments
+        .iter()
+        .map(|argument| module.argument_name(argument))
+        .collect();
+    let exact = |formal: &str| {
+        names
+            .iter()
+            .position(|name| name.as_deref() == Some(formal))
+    };
     let mut values: Vec<Option<ExprId>> = formals
         .iter()
-        .map(|formal| {
-            arguments
-                .iter()
-                .find(|argument| module.argument_name(argument).as_deref() == Some(*formal))
-                .and_then(|argument| argument.value)
-        })
+        .map(|formal| exact(formal).and_then(|index| arguments[index].value))
         .collect();
+    for (index, name) in names.iter().enumerate() {
+        let Some(name) = name else { continue };
+        if formals.contains(&&**name) {
+            continue;
+        }
+        let mut open = formals
+            .iter()
+            .enumerate()
+            .filter(|&(_, formal)| formal.starts_with(&**name) && exact(formal).is_none());
+        if let (Some((slot, _)), None) = (open.next(), open.next()) {
+            values[slot] = arguments[index].value;
+        }
+    }
     let mut positional = arguments
         .iter()
         .filter(|argument| argument.name.is_none())
@@ -26543,18 +26599,6 @@ fn simplify_flag(module: &Module, arguments: &[Argument], name: &str) -> Option<
     };
     match argument.value.map(|value| module.kind(value)) {
         Some(ExpressionKind::Literal(LiteralKind::Logical(value))) => Some(*value),
-        _ => None,
-    }
-}
-
-/// A logical argument's value: `default` when it is left out, the literal when it is `TRUE` or
-/// `FALSE`, and `None` when its value is not known.
-fn literal_flag(module: &Module, value: Option<ExprId>, default: bool) -> Option<bool> {
-    let Some(value) = value else {
-        return Some(default);
-    };
-    match module.kind(value) {
-        ExpressionKind::Literal(LiteralKind::Logical(value)) => Some(*value),
         _ => None,
     }
 }
@@ -27431,6 +27475,45 @@ fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
         return None;
     }
     lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
+}
+
+/// `Reduce`'s signature with its callback `fn(U, T) -> U` turned into `fn(T, U) -> U`, the
+/// order R calls it in with `right = TRUE`; unchanged when it has no such callback.
+fn reduce_from_the_right<'db>(db: &'db dyn Db, reduce: Ty<'db>) -> Ty<'db> {
+    let swap = |callback: Ty<'db>| match callback.kind(db) {
+        TyKind::Function(function) => match function.positional {
+            &[accumulator, element] => Some(Ty::new(
+                db,
+                TyKind::Function(&FunctionType {
+                    positional: &[element, accumulator],
+                    ..**function
+                }),
+            )),
+            _ => None,
+        },
+        _ => None,
+    };
+    let TyKind::Function(function) = reduce.kind(db) else {
+        return reduce;
+    };
+    let mut positional = function.positional.to_vec();
+    let mut named = function.named.to_vec();
+    let swapped = match (positional.first_mut(), named.first_mut()) {
+        (Some(first), _) => swap(*first).map(|callback| *first = callback),
+        (None, Some(first)) => swap(first.ty).map(|callback| first.ty = callback),
+        (None, None) => None,
+    };
+    if swapped.is_none() {
+        return reduce;
+    }
+    Ty::new(
+        db,
+        TyKind::Function(&FunctionType {
+            positional: &positional,
+            named: &named,
+            ..**function
+        }),
+    )
 }
 
 /// The arithmetic operator a base operator's name reads as a value.

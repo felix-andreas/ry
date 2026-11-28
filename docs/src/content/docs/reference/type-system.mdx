@@ -3557,12 +3557,12 @@ to such a name is resolved separately at each call site:
   argument, so `Reduce(add, list(1, 2), "start")` with a numeric `add` is reported at `"start"`. A
   function that closes over the enclosing function's own type variables keeps the stub's
   signature. A base arithmetic operator folds as the operator types its operands, so
-  ``Reduce(`/`, 1:3)`` is `integer | double` (a one-element `x` comes back unchanged). A function whose return is not known, such as `c`, gives that
-  return: `Reduce(c, 1:3)` is `Any`, since R's result is the whole vector. With `right = TRUE` the fold hands the element first and the accumulator second, as R
-  does, so ``Reduce(max, 1:3, right = TRUE)`` is `integer`. An inline function keeps the stub's
-  `fn(U, T) -> U` order, so with `right = TRUE` it is checked with its parameters swapped:
-  `Reduce(function(x, acc) acc + nchar(x), c("a", "bb"), 0, right = TRUE)` is reported at
-  `c("a", "bb")`, although R runs it.
+  ``Reduce(`/`, 1:3)`` is `integer | double` (a one-element `x` comes back unchanged). A
+  function whose return is not known, such as `c`, gives that return: `Reduce(c, 1:3)` is `Any`,
+  since R's result is the whole vector. With `right = TRUE` the fold hands the element first and
+  the accumulator second, as R does, so ``Reduce(max, 1:3, right = TRUE)`` is `integer`, and any
+  other function is checked against `fn(T, U) -> U`:
+  `Reduce(function(x, acc) acc + nchar(x), c("a", "bb"), 0, right = TRUE)` is `double`.
 - `Reduce(..., accumulate = TRUE)` is every accumulator in turn. R unlists them when each has
   length one, so an accumulator that is an atomic scalar gives a vector of the type `c()` makes of
   them: ``Reduce(`+`, 1:3, accumulate = TRUE)`` is `integer[]`, and with an init of `0` it is
