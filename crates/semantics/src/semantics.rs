@@ -610,6 +610,8 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
                             .is_some_and(|spelled| {
                                 spelled.contains('\\')
                                     || spelled.trim_matches(['`', '"', '\'']) == definition.name
+                                    || spelled.get(1..spelled.len().saturating_sub(1))
+                                        == Some(definition.name.as_str())
                             }),
                     "the name range {:?} of `{}` does not spell it",
                     definition.name_range,

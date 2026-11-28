@@ -342,6 +342,11 @@ impl<'db> InferenceTable<'db> {
                         FamilyResult::Arithmetic => operand,
                         FamilyResult::Comparison => self.family(db, result, representation),
                     },
+                    // A class's arithmetic methods give the class (`Sys.Date() - 0.5` is a
+                    // `Date`, a `matrix` times 2 a `matrix`), as a fold's accumulator does.
+                    _ if result == FamilyResult::Arithmetic && self.has_arithmetic(*name) => {
+                        operand
+                    }
                     _ => result.r_outcome(db),
                 };
             }
@@ -370,6 +375,12 @@ impl<'db> InferenceTable<'db> {
             }
             _ => family_result(db, result, operand),
         }
+    }
+
+    /// Whether `name` is a class with arithmetic methods.
+    fn has_arithmetic(&self, name: Name<'db>) -> bool {
+        self.arithmetic_classes
+            .is_some_and(|classes| classes.contains(name.symbol()))
     }
 
     /// Also expands aliases. Self-referential bindings and aliases cut to
@@ -1228,6 +1239,9 @@ impl<'db> InferenceTable<'db> {
     ) -> Result<(), UnifyError<'db>> {
         match (result, other.kind(db)) {
             (FamilyResult::Arithmetic, TyKind::Native(native)) if native.is_number() => {
+                self.unify(db, operand, other)
+            }
+            (FamilyResult::Arithmetic, TyKind::Named(name, _)) if self.has_arithmetic(*name) => {
                 self.unify(db, operand, other)
             }
             (FamilyResult::Comparison, TyKind::Native(NativeScalar::Bool)) => self
