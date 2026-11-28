@@ -634,9 +634,11 @@ pub unsafe fn print_warnings(heading: &str) -> R<()> {
     handles::with(|context| print_deferred(context, heading))
 }
 
-/// [`signal`] for raw code, which keeps both alive.
+/// [`signal`] for the `signalCondition` fast path, which keeps both alive. It runs in the scope
+/// of `signalCondition`'s own frame, which releases what this roots, so it opens no scope of its
+/// own.
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
-    handles::with_result(|context| {
+    handles::in_caller_scope(|context| {
         let condition = handles::adopt(context, condition);
         let call = handles::adopt(context, condition_call);
         Ok(signal(context, condition, call)?.raw())
