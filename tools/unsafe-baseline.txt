@@ -41,7 +41,7 @@
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-284 crates/interp/src/handles.rs
+285 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 24 crates/interp/src/interp.rs

@@ -10852,47 +10852,34 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             // From a slot frame, a call whose arguments need no promise over the frame leaves
             // it without an environment, and the callee finds its caller as the frame below its
             // own.
-            let collected = (|| {
-                if state.in_slots()
-                    && collect_slot_arguments(
+            let from_slots = if state.in_slots() {
+                collect_slot_arguments(
+                    context,
+                    RunningFrame { state: &*state },
+                    cells,
+                    eager,
+                    plan.is_some(),
+                    &mut args,
+                )
+            } else {
+                Ok(false)
+            };
+            let collected = match from_slots {
+                Ok(true) => Ok(handles::null()),
+                Ok(false) => match state.env(Reify::Site(Site::GenericCallArguments)) {
+                    // The frame's header register holds the environment from here on.
+                    Ok(env) => environment_call_arguments(
                         context,
-                        RunningFrame { state: &*state },
                         cells,
+                        Local::adopt(env),
                         eager,
                         plan.is_some(),
                         &mut args,
-                    )?
-                {
-                    return Ok(handles::null());
-                }
-                args.clear();
-                let env = state.env(Reify::Site(Site::GenericCallArguments))?;
-                // The frame's header register holds the environment from here on.
-                let environment = Local::<Environment>::adopt(env);
-                if eager {
-                    eval::collect_arguments::<{ eval::EAGER }>(
-                        context,
-                        cells,
-                        environment,
-                        &mut args,
-                    )?;
-                } else if plan.is_some() {
-                    eval::collect_arguments::<{ eval::REFERENCES }>(
-                        context,
-                        cells,
-                        environment,
-                        &mut args,
-                    )?;
-                } else {
-                    eval::collect_arguments::<{ eval::COMPILED }>(
-                        context,
-                        cells,
-                        environment,
-                        &mut args,
-                    )?;
-                }
-                Ok(environment.value())
-            })();
+                    ),
+                    Err(unwind) => Err(unwind),
+                },
+                Err(unwind) => Err(unwind),
+            };
             // A failed collection gives back the references its arguments took.
             let sys_parent = match collected {
                 Ok(sys_parent) => sys_parent,
@@ -12759,11 +12746,11 @@ fn collect_slot_arguments<'s>(
         let Some((expression, tag, rest)) = handles::cell_fields(cursor.read(context)) else {
             break;
         };
-        let (expression, tag) = (
-            context.root(expression),
-            handles::argument_tag(context, tag),
+        let (expression, tag, rest) = (
+            handles::root_unless_permanent(context, expression),
+            handles::root_unless_permanent(context, tag),
+            handles::root_unless_permanent(context, rest),
         );
-        let rest = context.root(rest);
         let value = if handles::is_missing_argument(expression) {
             Some(expression)
         } else if let Some(symbol) = expression.downcast::<Symbol>() {
@@ -12817,6 +12804,29 @@ fn collect_slot_arguments<'s>(
         cursor = rest;
     }
     Ok(true)
+}
+
+/// The arguments of tier 0's generic closure call from a frame with the environment
+/// `environment` ([`eval::collect_arguments`]), which it returns as the callee's caller. Out of
+/// line, so that a call from slots saves no registers for it.
+#[inline(never)]
+fn environment_call_arguments<'s>(
+    context: &mut Cx<'s>,
+    cells: Local<'s>,
+    environment: Local<'s, Environment>,
+    eager: bool,
+    references: bool,
+    args: &mut eval::CallArgs<'s>,
+) -> R<Local<'s>> {
+    args.clear();
+    if eager {
+        eval::collect_arguments::<{ eval::EAGER }, _>(context, cells, environment, args)?;
+    } else if references {
+        eval::collect_arguments::<{ eval::REFERENCES }, _>(context, cells, environment, args)?;
+    } else {
+        eval::collect_arguments::<{ eval::COMPILED }, _>(context, cells, environment, args)?;
+    }
+    Ok(environment.value())
 }
 
 /// Whether the compiled argument `code` runs on its frame's slots: its code has a slot table.

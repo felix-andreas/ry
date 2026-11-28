@@ -4844,30 +4844,62 @@ pub fn promise<'s>(
     }
 }
 
-/// A promise to run the compiled argument `code` in `environment`, the frame of the code it
-/// was compiled with ([`crate::eval::compiled_promise`]).
-pub fn compiled_promise<'s>(
+/// A promise of the expression that the rooted argument cell `cell` holds, to evaluate in
+/// `environment`, or for compiled code to run in it ([`crate::eval::compiled_promise`]). The cell
+/// keeps the expression alive, so the caller roots none of its own.
+pub fn head_promise<'s>(
     _context: &mut Cx<'s>,
-    code: Local<'_>,
+    cell: Local<'_>,
     environment: Local<'_, Environment>,
 ) -> R<Local<'s, Promise>> {
-    // SAFETY: the code and the environment are rooted while the promise allocates, which
-    // `&mut Cx` permits, and the allocation roots it in the context's scope.
+    // SAFETY: the rooted cell holds the expression while the promise allocates, which `&mut Cx`
+    // permits and which rewrites no cell, and the allocation roots the promise in the context's
+    // scope.
     unsafe {
-        let promise = crate::eval::compiled_promise(code.raw(), environment.raw())?;
+        let code = cell.raw().car();
+        let promise = if code.kind() == SexpType::Bytecode {
+            crate::eval::compiled_promise(code, environment.raw())?
+        } else {
+            crate::eval::make_promise(code, environment.raw())?
+        };
         Ok(Local::adopt(promise))
     }
 }
 
-/// An argument cell's tag as a handle of the context's scope: a symbol or `NULL`, which the
-/// heap keeps for its whole life, needs no root of its own.
-#[inline(always)]
-pub fn argument_tag<'s>(context: &Cx<'s>, tag: Gc<'_>) -> Local<'s> {
-    if matches!(tag.r_type(), SexpType::Symbol | SexpType::Nil) {
-        // SAFETY: the symbol table keeps every symbol, and `NULL` is a permanent root.
-        return unsafe { Local::adopt(tag.raw()) };
+/// A promise of `code` over the environment that [`crate::eval::pending_environment`] gave the
+/// slot frame at `owner`, as [`crate::eval::slot_promise`] makes it. The interpreter frame keeps
+/// the environment alive, so the caller roots none.
+pub fn pending_promise<'s>(
+    context: &mut Cx<'s>,
+    owner: usize,
+    code: Local<'_>,
+) -> R<Local<'s, Promise>> {
+    let Some(environment) = live_frame(context, owner).pending() else {
+        panic!("a slot frame lost the environment it was given");
+    };
+    let env = environment.raw();
+    // SAFETY: the interpreter frame, which every collection marks, holds the environment and the
+    // caller roots the code while the promise allocates, which `&mut Cx` permits. The allocation
+    // roots the promise in the context's scope.
+    unsafe {
+        let promise = if code.r_type() == SexpType::Bytecode {
+            crate::eval::compiled_promise(code.raw(), env)?
+        } else {
+            crate::eval::make_promise(code.raw(), env)?
+        };
+        Ok(Local::adopt(promise))
     }
-    context.root(tag)
+}
+
+/// `value` as a handle of the context's scope, rooted unless it is a symbol or `NULL`, which the
+/// heap keeps for its whole life.
+#[inline(always)]
+pub fn root_unless_permanent<'s>(context: &Cx<'s>, value: Gc<'_>) -> Local<'s> {
+    if matches!(value.r_type(), SexpType::Symbol | SexpType::Nil) {
+        // SAFETY: the symbol table keeps every symbol, and `NULL` is a permanent root.
+        return unsafe { Local::adopt(value.raw()) };
+    }
+    context.root(value)
 }
 
 /// The arguments `args` as raw arguments, for a raw entry that takes them while the handles
