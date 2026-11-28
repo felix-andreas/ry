@@ -2808,10 +2808,17 @@ pub unsafe extern "C" fn jit_loop_element(
 /// an assignment into a variable the body changes. An attribute-free plain vector of `kind`,
 /// such as the one `a:a` gives, comes back as it is, and anything else gives null, which fails
 /// the caller's guard. The sequence itself stays compact, as GNU R's element reads leave it.
+///
+/// A load of a variable the body never assigns into passes its `pc`, and there a sequence
+/// longer than [`SEQUENCE_COPY_LIMIT`] gives null too and marks the load
+/// [`feedback::LONG_SEQUENCE`], so the recompile keeps the variable boxed: R never expands that
+/// sequence, and `seq_len(.Machine$integer.max)` would take 8 GB. A negative `pc` copies any
+/// length, for a variable the body assigns into, which R expands on the assignment anyway.
 pub unsafe extern "C" fn jit_sequence_contents(
     activation: *mut Activation,
     value: *mut Header,
     kind: i64,
+    pc: i64,
 ) -> *mut Header {
     unsafe {
         guarded(activation, std::ptr::null_mut(), |activation| {
@@ -2824,7 +2831,20 @@ pub unsafe extern "C" fn jit_sequence_contents(
             if !value.is_altrep() {
                 return value.as_ptr();
             }
-            if values::compact_sequence(value).is_none() {
+            if let Ok(pc) = usize::try_from(pc)
+                && values::compact_sequence(value)
+                    .is_none_or(|(count, _, _)| count > SEQUENCE_COPY_LIMIT)
+            {
+                let code = machine(&*activation).code;
+                if crate::logging() {
+                    eprintln!(
+                        "jit: pc {pc} of {} keeps a long sequence boxed",
+                        crate::describe(code)
+                    );
+                }
+                if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+                    *bits |= feedback::LONG_SEQUENCE as i32;
+                }
                 return std::ptr::null_mut();
             }
             match scoped(|| values::read_contents(value)) {
@@ -2837,6 +2857,11 @@ pub unsafe extern "C" fn jit_sequence_contents(
         })
     }
 }
+
+/// The most elements [`jit_sequence_contents`] copies for a variable the body never assigns
+/// into (a megabyte of integers, two of doubles), which bounds the memory a speculation adds
+/// to what R allocates.
+const SEQUENCE_COPY_LIMIT: usize = 1 << 18;
 
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {

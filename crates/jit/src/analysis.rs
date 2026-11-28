@@ -1189,6 +1189,9 @@ pub struct Plan<'a> {
     /// By slot, a bitset of the variables loaded at every read because a read called an
     /// active binding.
     pub volatile: List<'a, u64>,
+    /// By slot, a bitset of the variables the body assigns into (`x[i] <- v`, `names(x) <-
+    /// v`), which turns a compact sequence the variable held into a plain vector.
+    pub modified: List<'a, u64>,
 }
 
 impl fmt::Debug for Plan<'_> {
@@ -1911,6 +1914,7 @@ unsafe fn plan_at<'a>(
         locals,
         hints: List::new_in(arena),
         modified: List::new_in(arena),
+        long_sequences: List::new_in(arena),
         declared: List::new_in(arena),
         callees: Map::with_hasher_in(FxBuildHasher, arena),
         formals: values::pairlist_items(formals)
@@ -2015,6 +2019,7 @@ unsafe fn plan_at<'a>(
         loop_headers,
         continuations,
         volatile: builder.volatile,
+        modified: builder.modified,
     })
 }
 
@@ -2196,9 +2201,11 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
-    /// By slot, whether the body assigns into the variable's value (`x[i] <- v`, `names(x) <-
-    /// v`), which turns a compact sequence the variable held into a plain vector.
-    modified: List<'a, bool>,
+    /// [`Plan::modified`].
+    modified: List<'a, u64>,
+    /// By slot, a bitset of the variables a compiled load found holding a sequence too long to
+    /// copy ([`feedback::LONG_SEQUENCE`]), so that every load of the variable keeps it boxed.
+    long_sequences: List<'a, u64>,
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
     /// The plan of each closure asked to be inlined with a frame of its own and the type of
@@ -2257,11 +2264,15 @@ impl<'a> Builder<'a> {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
-                    self.modified.push(false);
                     self.declared.push(Ty::Boxed);
                 }
                 if matches!(inst.op, Op::SubAssign | Op::SubAssignMatrix | Op::Replace) {
-                    self.modified[self.slot_of[&symbol]] = true;
+                    let slot = self.slot_of[&symbol];
+                    let words = (slot + 1).div_ceil(64);
+                    if self.modified.len() < words {
+                        self.modified.resize(words, 0);
+                    }
+                    set_bit(&mut self.modified, slot, true);
                 }
                 let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
                 if matches!(inst.op, Op::GetVar | Op::Subscript)
@@ -2273,6 +2284,14 @@ impl<'a> Builder<'a> {
                         self.volatile.resize(words, 0);
                     }
                     set_bit(&mut self.volatile, slot, true);
+                }
+                if bits & feedback::LONG_SEQUENCE != 0 {
+                    let slot = self.slot_of[&symbol];
+                    let words = (slot + 1).div_ceil(64);
+                    if self.long_sequences.len() < words {
+                        self.long_sequences.resize(words, 0);
+                    }
+                    set_bit(&mut self.long_sequences, slot, true);
                 }
             }
         }
@@ -2370,7 +2389,7 @@ impl<'a> Builder<'a> {
     /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
     /// before it has read anything, the type the closure's signature declares for that formal.
     fn load_ty(&self, pc: usize, slot: usize) -> Ty {
-        if self.never_ran(pc) {
+        if self.never_ran(pc) && !bit(&self.long_sequences, slot) {
             return self.declared[slot];
         }
         // A variable that has held both an integer and a double scalar, such as the argument
@@ -2389,15 +2408,22 @@ impl<'a> Builder<'a> {
     /// r`, holds a compact sequence only until the first assignment, so it loads as the plain
     /// vector, which also covers feedback that has seen both: the load copies a sequence it
     /// still finds compact (see `sequence_contents` in codegen), where a guess of a sequence
-    /// would fail on the next pass, deoptimize and recompile the body.
+    /// would fail on the next pass, deoptimize and recompile the body. An unmodified variable
+    /// that has held a sequence too long to copy ([`feedback::LONG_SEQUENCE`]) stays boxed,
+    /// since R never expands it.
     fn variable_ty(&self, slot: usize, bits: u32) -> Ty {
+        let modified = bit(&self.modified, slot);
+        if bit(&self.long_sequences, slot) && !modified {
+            return Ty::Boxed;
+        }
+        let bits = bits & !feedback::LONG_SEQUENCE;
         let within = |mask: u32| bits & !mask == 0;
         let integers =
             feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR | feedback::INTEGER_SEQUENCE;
         let doubles = feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR | feedback::DOUBLE_SEQUENCE;
         match from_feedback(bits) {
-            Ty::IntSeq if self.modified[slot] => Ty::IntVec,
-            Ty::DblSeq if self.modified[slot] => Ty::DblVec,
+            Ty::IntSeq if modified => Ty::IntVec,
+            Ty::DblSeq if modified => Ty::DblVec,
             Ty::Boxed if bits != 0 && within(integers) => Ty::IntVec,
             Ty::Boxed if bits != 0 && within(doubles) => Ty::DblVec,
             ty => ty,
@@ -2738,7 +2764,7 @@ impl<'a> Builder<'a> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                let expand = self.modified[slot] && matches!(ty, Ty::IntSeq | Ty::DblSeq);
+                let expand = bit(&self.modified, slot) && matches!(ty, Ty::IntSeq | Ty::DblSeq);
                 let ty = match ty {
                     Ty::IntSeq if expand => Ty::IntVec,
                     Ty::DblSeq if expand => Ty::DblVec,
