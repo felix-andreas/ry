@@ -1003,12 +1003,14 @@ fn do_exists<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
 }
 
 fn do_remove<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
-    let names = handles::dense::<Str>(context, arguments.value(0))?;
+    if arguments.value(0).r_type() == SexpType::Nil {
+        return Ok(handles::null());
+    }
+    let Some(names) = handles::dense::<Str>(context, arguments.value(0))? else {
+        return Err(arguments.error("invalid first argument"));
+    };
     let environment = environment_arg(context, arguments.value(1), "envir")?;
     let inherits = handles::logical_scalar(context, arguments.value(2)) == 1;
-    let Some(names) = names else {
-        return Ok(handles::null());
-    };
     for index in 0..names.len() {
         let name = names.get(context, index);
         let name = if handles::is_na(name) {
@@ -1547,6 +1549,7 @@ pub unsafe fn options() -> Sexp {
 
 /// The options as a tagged pairlist. GNU R keeps them as the base environment's `.Options`
 /// binding, which R code reads directly.
+#[inline]
 pub fn option_list<'a>(context: &'a Cx<'_>) -> Gc<'a> {
     match handles::frame_binding(
         context,
@@ -1559,6 +1562,7 @@ pub fn option_list<'a>(context: &'a Cx<'_>) -> Gc<'a> {
 }
 
 /// The cells of the options list, in order.
+#[inline]
 fn option_cells<'a>(context: &'a Cx<'_>) -> impl Iterator<Item = Gc<'a, Pairlist>> {
     let mut next = option_list(context).downcast::<Pairlist>();
     std::iter::from_fn(move || {
@@ -1569,6 +1573,7 @@ fn option_cells<'a>(context: &'a Cx<'_>) -> impl Iterator<Item = Gc<'a, Pairlist
 }
 
 /// The name of the option a cell of the options list holds.
+#[inline]
 fn option_name(cell: Gc<'_, Pairlist>) -> Option<Gc<'_, Chars>> {
     Some(cell.tag().downcast::<Symbol>()?.name())
 }
@@ -1588,15 +1593,31 @@ fn set_options(context: &mut Cx<'_>, list: Local<'_>) -> R<()> {
 }
 
 /// The value of option `name`, or `NULL`, for raw callers.
+#[inline]
 pub unsafe fn get_option(name: &str) -> Sexp {
     handles::reading(|context| option_named(context, name).raw())
 }
 
 /// The value of option `name`, or `NULL`.
+#[inline]
 pub fn option_named<'a>(context: &'a Cx<'_>, name: &str) -> Gc<'a> {
     option_cells(context)
         .find(|&cell| option_name(cell).is_some_and(|option| option.bytes() == name.as_bytes()))
         .map_or_else(|| handles::null().read(context), |cell| cell.head())
+}
+
+/// The option `symbol` names, or `NULL`, for a caller that reads an option often: each option's
+/// tag is its symbol, so the walk compares one pointer per option.
+#[inline]
+pub fn option_at<'a>(context: &'a Cx<'_>, symbol: Gc<'_, Symbol>) -> Gc<'a> {
+    let mut cell = option_list(context);
+    while let Some(pair) = cell.downcast::<Pairlist>() {
+        if pair.tag().raw() == symbol.raw() {
+            return pair.head();
+        }
+        cell = pair.rest();
+    }
+    handles::null().read(context)
 }
 
 /// The option the string `name` (a `CHARSXP`) names, or `NULL`, for raw callers.

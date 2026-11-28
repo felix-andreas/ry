@@ -55,7 +55,9 @@ impl Settings {
     /// `options(scipen)` alone. Callers formatting many values read it once, because
     /// `.Options` can be reassigned from R code, which rules out caching it here.
     pub unsafe fn current_scipen() -> i32 {
-        let scipen = crate::envir::get_option("scipen");
+        let scipen = crate::handles::reading(|context| {
+            crate::envir::option_at(context, crate::handles::symbol(|symbols| symbols.scipen)).raw()
+        });
         if scipen == nil() {
             return 0;
         }
