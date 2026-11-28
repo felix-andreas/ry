@@ -4,16 +4,19 @@
 use {
     crate::{
         apply_results::VapplyResults,
-        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        builtins::{Arg, BuiltinDef, BuiltinFn, Call, Generic, builtin, internal, present},
         bytecode,
-        eval::{self, define, find_var, find_var_in_frame, value_of},
-        handles, interp,
+        eval::{self, Reify, Site, define, find_var, find_var_in_frame, value_of},
+        handles::{
+            self, Args, Binding, Bytecode, Cells, Chars, Closure, Cx, Environment, Gc, Integer,
+            List, Local, Logical, Owned, Pairlist, Str, StringFill, Symbol, Tagged, safe,
+        },
+        interp,
         sort::collation_order,
         unwind::{ArgumentReader, R, error, missing_argument},
         values::{
-            self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env,
-            length, missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string,
-            string_at, string_vector, symbol_name, symbols, unbound,
+            self, alloc, base_namespace, char_str, empty_env, global_env, length, missing_arg, nil,
+            scalar_integer, string_vector, symbol_name, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
@@ -27,9 +30,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("new.env", 3, safe!(do_new_env)),
     internal("parent.env", 1, safe!(do_parent_env)),
     internal("parent.env<-", 2, safe!(do_set_parent_env)),
-    builtin("globalenv", 0, |_| Ok(global_env())),
-    builtin("emptyenv", 0, |_| Ok(empty_env())),
-    builtin("baseenv", 0, |_| Ok(base_env())),
+    builtin("globalenv", 0, safe!(do_global_environment)),
+    builtin("emptyenv", 0, safe!(do_empty_environment)),
+    builtin("baseenv", 0, safe!(do_base_environment)),
     internal("topenv", 2, safe!(do_topenv)),
     internal("environmentName", 1, safe!(do_environment_name)),
     internal("assign", 4, safe!(do_assign)).invisible(),
@@ -48,7 +51,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindingIsLocked", 2, safe!(do_binding_is_locked)),
     internal("makeActiveBinding", 3, safe!(do_make_active_binding)).invisible(),
     internal("bindingIsActive", 2, safe!(do_binding_is_active)),
-    internal("activeBindingFunction", 2, safe!(do_active_binding_function)),
+    internal(
+        "activeBindingFunction",
+        2,
+        safe!(do_active_binding_function),
+    ),
     internal("sys.call", 1, safe!(do_sys_call)),
     internal("sys.function", 1, safe!(do_sys_function)),
     internal("sys.frame", 1, safe!(do_sys_frame)),
@@ -64,33 +71,35 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("search", 0, safe!(do_search)),
     internal("attach", 3, safe!(do_attach)),
     internal("detach", 1, safe!(do_detach)),
-    internal("options", -1, do_options).keep_visibility(),
-    internal("getOption", 1, do_get_option),
-    builtin("interactive", 0, |_| unsafe {
-        scalar_bool(interp().interactive)
-    }),
-    internal("getRegisteredNamespace", 1, do_get_registered_namespace),
-    internal("isRegisteredNamespace", 1, do_is_registered_namespace),
-    internal("registerNamespace", 2, do_register_namespace).invisible(),
-    internal("unregisterNamespace", 1, do_unregister_namespace).invisible(),
-    internal("getNamespaceRegistry", 0, |_| {
-        Ok(crate::heap().known().namespace_registry)
-    }),
-    internal("importIntoEnv", 4, do_import_into_env).invisible(),
-    internal("ryLocalS4Generics", 3, do_local_s4_generics),
-    internal("ryRegisterS3Methods", 5, do_register_s3_methods),
-    internal("isNamespaceEnv", 1, |call| unsafe {
-        scalar_bool(is_namespace(call.arg(0)))
-    }),
+    internal("options", -1, OPTIONS).keep_visibility(),
+    internal("getOption", 1, safe!(do_get_option)),
+    builtin("interactive", 0, safe!(do_interactive)),
+    internal(
+        "getRegisteredNamespace",
+        1,
+        safe!(do_get_registered_namespace),
+    ),
+    internal(
+        "isRegisteredNamespace",
+        1,
+        safe!(do_is_registered_namespace),
+    ),
+    internal("registerNamespace", 2, safe!(do_register_namespace)).invisible(),
+    internal("unregisterNamespace", 1, safe!(do_unregister_namespace)).invisible(),
+    internal("getNamespaceRegistry", 0, safe!(do_get_namespace_registry)),
+    internal("importIntoEnv", 4, safe!(do_import_into_env)).invisible(),
+    internal("ryLocalS4Generics", 3, safe!(do_local_s4_generics)),
+    internal("ryRegisterS3Methods", 5, safe!(do_register_s3_methods)),
+    internal("isNamespaceEnv", 1, safe!(do_is_namespace_environment)),
     internal("do.call", 3, do_do_call).keep_visibility(),
     internal("lapply", 2, do_lapply),
     internal("vapply", 4, do_vapply),
     internal("mapply", 3, do_mapply),
     internal("rapply", 5, do_rapply),
-    internal("eapply", 4, do_eapply),
-    internal("Filter", -1, |_| Ok(nil())),
+    internal("eapply", 4, safe!(do_eapply)),
+    internal("Filter", -1, safe!(do_nothing)),
     internal("env.profile", 1, do_env_profile),
-    internal("emptyenv", 0, |_| Ok(empty_env())),
+    internal("emptyenv", 0, safe!(do_empty_environment)),
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt).keep_visibility(),
     builtin("...names", 0, do_dots_names),
@@ -107,8 +116,38 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("args", 1, do_args),
     internal("bodyCode", 1, do_body_code),
     internal("match.call", 4, do_match_call),
-    internal("sys.source", -1, |_| Ok(nil())),
+    internal("sys.source", -1, safe!(do_nothing)),
 ];
+
+fn do_global_environment<'s>(_context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::global_environment().value())
+}
+
+fn do_empty_environment<'s>(_context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::empty_environment().value())
+}
+
+fn do_base_environment<'s>(_context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::base_environment().value())
+}
+
+fn do_interactive<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical_constant(context, interp().interactive as i32)
+}
+
+fn do_get_namespace_registry<'s>(_context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::namespace_registry().value())
+}
+
+fn do_is_namespace_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let namespace = is_namespace_environment(context, arguments.value(0).read(context));
+    handles::logical_constant(context, namespace as i32)
+}
+
+/// The `.Internal`s of `Filter` and `sys.source`, which answer `NULL`.
+fn do_nothing<'s>(_context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(handles::null())
+}
 
 /// An environment argument: an environment, or what `as.environment` makes of anything but
 /// `NULL`. `what` names the argument in the error for a value that stands for none.
@@ -587,7 +626,9 @@ pub fn top_environment<'s>(
 
 /// Whether `env` is a namespace, for raw callers.
 pub unsafe fn is_namespace(env: Sexp) -> bool {
-    handles::reading(|context| is_namespace_environment(context, handles::held(context, env).read(context)))
+    handles::reading(|context| {
+        is_namespace_environment(context, handles::held(context, env).read(context))
+    })
 }
 
 /// Whether `environment` is a namespace: the base namespace, or an environment holding
@@ -659,7 +700,12 @@ pub fn namespace_spec_name<'s>(context: &mut Cx<'s>, environment: Local<'s>) -> 
     let Some(information) = information.downcast::<Environment>() else {
         return Ok(None);
     };
-    let Some(spec) = eval::frame_content(context, information, handles::symbol(|symbols| symbols.spec))? else {
+    let Some(spec) = eval::frame_content(
+        context,
+        information,
+        handles::symbol(|symbols| symbols.spec),
+    )?
+    else {
         return Ok(None);
     };
     let spec = eval::forced_value(context, spec)?;
@@ -994,10 +1040,15 @@ fn do_remove<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
 /// The symbols bound in `env`, in the order `ls()` lists their names, for raw callers.
 pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
     handles::reading(|context| {
-        environment_symbols(context, handles::held(context, env).read(context), all, sorted)
-            .into_iter()
-            .map(Gc::raw)
-            .collect()
+        environment_symbols(
+            context,
+            handles::held(context, env).read(context),
+            all,
+            sorted,
+        )
+        .into_iter()
+        .map(Gc::raw)
+        .collect()
     })
 }
 
@@ -1162,13 +1213,12 @@ fn do_lock_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<
     if handles::logical_scalar(context, arguments.value(1)) == 1 {
         for symbol in handles::bound_symbols(context, environment, false) {
             if let Some(binding) = handles::frame_binding(context, environment, symbol) {
-                handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, true);
+                handles::set_binding_locked(binding, true);
             }
         }
     }
-    if !environment.is(handles::base_environment()) && !environment.is(handles::base_namespace())
-    {
-        handles::lock_frame(context, environment);
+    if !environment.is(handles::base_environment()) && !environment.is(handles::base_namespace()) {
+        handles::lock_frame(environment);
     }
     Ok(handles::null())
 }
@@ -1218,13 +1268,13 @@ fn simple_as_environment<'s>(context: &Cx<'s>, value: Local<'s>) -> Option<Local
 
 fn do_lock_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let binding = binding_cell(context, arguments)?;
-    handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, true);
+    handles::set_binding_locked(binding, true);
     Ok(handles::null())
 }
 
 fn do_unlock_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let binding = binding_cell(context, arguments)?;
-    handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, false);
+    handles::set_binding_locked(binding, false);
     Ok(handles::null())
 }
 
@@ -1250,7 +1300,7 @@ fn do_make_active_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) ->
     } else {
         handles::define_binding(context, environment, symbol, function)?;
         if let Some(binding) = handles::frame_binding(context, environment, symbol) {
-            handles::set_binding_flags(context, binding, gp::ACTIVE_BINDING, true);
+            handles::make_binding_active(binding);
         }
     }
     Ok(handles::null())
@@ -1262,10 +1312,7 @@ fn do_binding_is_active<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R
     handles::logical_constant(context, active as i32)
 }
 
-fn do_active_binding_function<'s>(
-    context: &mut Cx<'s>,
-    arguments: &Args<'_, 's>,
-) -> R<Local<'s>> {
+fn do_active_binding_function<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let binding = binding_cell(context, arguments)?;
     if !binding.read(context).is_active() {
         return Err(arguments.error("no active binding"));
@@ -1289,9 +1336,9 @@ pub fn search_environments<'a>(context: &'a Cx<'_>) -> impl Iterator<Item = Gc<'
     let mut next = Some(handles::global_environment().read(context));
     std::iter::from_fn(move || {
         let environment = next?;
-        next = environment
-            .enclosure()
-            .filter(|enclosure| !environment.is(base) && !enclosure.is(handles::empty_environment()));
+        next = environment.enclosure().filter(|enclosure| {
+            !environment.is(base) && !enclosure.is(handles::empty_environment())
+        });
         Some(environment)
     })
 }
@@ -1434,7 +1481,7 @@ fn do_attach<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
             handles::define_binding(context, environment, symbol, content)?;
             // An active binding stays active, so reading the copy still calls its function.
             if active && let Some(copy) = handles::frame_binding(context, environment, symbol) {
-                handles::set_binding_flags(context, copy, gp::ACTIVE_BINDING, true);
+                handles::make_binding_active(copy);
             }
         }
     }
@@ -1466,16 +1513,19 @@ fn do_detach<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
     if position < 2 {
         return Err(arguments.error("invalid 'pos' argument"));
     }
-    let mut path = search_environments(context).skip(position as usize - 2);
-    let (Some(previous), Some(environment)) = (path.next(), path.next()) else {
+    let neighbors = {
+        let mut path = search_environments(context).skip(position as usize - 2);
+        (path.next(), path.next())
+    };
+    let (Some(previous), Some(environment)) = neighbors else {
         return Err(arguments.error("invalid 'pos' argument"));
     };
     if environment.is(handles::base_environment()) {
         return Err(arguments.error("detaching \"package:base\" is not allowed"));
     }
     let (previous, environment) = (context.root(previous), context.root(environment));
-    if let Some(enclosure) = environment.read(context).enclosure() {
-        let enclosure = context.root(enclosure);
+    let enclosure = environment.read(context).enclosure();
+    if let Some(enclosure) = enclosure.map(|enclosure| context.root(enclosure)) {
         handles::set_enclosure(context, previous, enclosure);
     }
     interp()
@@ -1559,7 +1609,7 @@ pub fn option_of<'a>(context: &'a Cx<'_>, name: Gc<'_, Chars>) -> Gc<'a> {
     option_cells(context)
         .find(|&cell| {
             option_name(cell).is_some_and(|printname| {
-                printname.is(name) || (!ascii && printname.bytes() == name.bytes())
+                printname.raw() == name.raw() || (!ascii && printname.bytes() == name.bytes())
             })
         })
         .map_or_else(|| handles::null().read(context), |cell| cell.head())
@@ -1691,7 +1741,7 @@ fn do_options<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>
     let mut entries: SmallVec<[(Local<'s, Chars>, Local<'s>); 4]> = SmallVec::new();
     for item in &items {
         if let Some(symbol) = item.tag.downcast::<Symbol>() {
-            let symbol = symbol.read(context);
+            let symbol = handles::permanent(symbol);
             let value = validate_option(context, &handles::text(symbol.name()), item.value)?;
             let old = set_option(context, symbol, value)?;
             entries.push((context.root(symbol.name()), old));
@@ -1964,85 +2014,108 @@ fn default_options(context: &mut Cx<'_>) -> R<()> {
 
 // Namespaces.
 
-unsafe fn registry_symbol(name: Sexp) -> R<Sexp> {
-    match name.kind() {
-        SexpType::Symbol => Ok(name),
-        SexpType::String if length(name) >= 1 => values::install_charsxp(name.element(0)),
+fn registry_symbol<'s>(context: &mut Cx<'s>, name: Local<'s>) -> R<Local<'s, Symbol>> {
+    if let Some(symbol) = name.downcast::<Symbol>() {
+        return Ok(symbol);
+    }
+    match handles::dense::<Str>(context, name)? {
+        Some(names) if !names.is_empty() => handles::install_element(context, names, 0),
         _ => Err(error("bad namespace name")),
     }
 }
 
-unsafe fn do_get_registered_namespace(call: &Call<'_>) -> R<Sexp> {
-    let symbol = registry_symbol(call.arg(0))?;
-    let registry = crate::heap().known().namespace_registry;
-    let value = find_var_in_frame(symbol, registry)?;
-    Ok(if value == unbound() { nil() } else { value })
+fn do_get_registered_namespace<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = registry_symbol(context, arguments.value(0))?;
+    let value = eval::frame_content(context, handles::namespace_registry(), symbol)?;
+    Ok(value.unwrap_or_else(handles::null))
 }
 
-unsafe fn do_is_registered_namespace(call: &Call<'_>) -> R<Sexp> {
-    let symbol = registry_symbol(call.arg(0))?;
-    let registry = crate::heap().known().namespace_registry;
-    scalar_bool(crate::heap().frame_cell(registry, symbol).is_some())
+fn do_is_registered_namespace<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = registry_symbol(context, arguments.value(0))?;
+    let registered = handles::frame_binding(context, handles::namespace_registry(), symbol);
+    handles::logical_constant(context, registered.is_some() as i32)
 }
 
-unsafe fn do_register_namespace(call: &Call<'_>) -> R<Sexp> {
-    let symbol = registry_symbol(call.arg(0))?;
-    let env = call.arg(1);
-    let registry = crate::heap().known().namespace_registry;
-    if crate::heap().frame_cell(registry, symbol).is_some() {
-        return Err(call.error("namespace already registered"));
+fn do_register_namespace<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = registry_symbol(context, arguments.value(0))?;
+    let registry = handles::namespace_registry();
+    if handles::frame_binding(context, registry, symbol).is_some() {
+        return Err(arguments.error("namespace already registered"));
     }
-    define(symbol, env, registry)?;
-    Ok(nil())
+    eval::define_variable(context, symbol, arguments.value(1), registry)?;
+    Ok(handles::null())
 }
 
-unsafe fn do_unregister_namespace(call: &Call<'_>) -> R<Sexp> {
-    let symbol = registry_symbol(call.arg(0))?;
-    let registry = crate::heap().known().namespace_registry;
-    if !crate::heap().remove_binding(registry, symbol)? {
-        return Err(call.error("namespace not registered"));
+fn do_unregister_namespace<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = registry_symbol(context, arguments.value(0))?;
+    if !handles::remove_binding(context, handles::namespace_registry(), symbol)? {
+        return Err(arguments.error("namespace not registered"));
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
-    let target = environment_arg(call.arg(0), "impenv")?;
-    let target_names = call.arg(1);
-    let source = environment_arg(call.arg(2), "expenv")?;
-    let source_names = call.arg(3);
-    if length(target_names) != length(source_names) {
-        return Err(call.error("length of import and export names must match"));
+fn do_import_into_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let target = environment_arg(context, arguments.value(0), "impenv")?;
+    let target_names = handles::character_vector(context, arguments.value(1))?;
+    let source = environment_arg(context, arguments.value(2), "expenv")?;
+    let source_names = handles::character_vector(context, arguments.value(3))?;
+    if target_names.len() != source_names.len() {
+        return Err(arguments.error("length of import and export names must match"));
     }
-    let heap = crate::heap();
-    for index in 0..length(target_names) {
-        let target_symbol = values::install_charsxp(target_names.element(index))?;
-        let source_symbol = values::install_charsxp(source_names.element(index))?;
-        let mut env = source;
-        let mut cell = None;
-        while env != empty_env() {
-            if let Some(found) = heap.frame_cell(env, source_symbol) {
-                cell = Some(found);
+    for index in 0..target_names.len() {
+        let target_symbol = handles::install_element(context, target_names, index)?;
+        let source_symbol = handles::install_element(context, source_names, index)?;
+        let mut environment = Some(source.read(context));
+        let mut found = None;
+        while let Some(scope) = environment {
+            if let Some(binding) = handles::frame_binding(context, scope, source_symbol) {
+                found = Some(binding);
                 break;
             }
-            env = env.enclosure();
+            environment = scope.enclosure();
         }
-        let Some(cell) = cell else {
-            return Err(call.error(format!(
+        let Some(binding) = found else {
+            return Err(arguments.error(format!(
                 "exported symbol '{}' has no value",
-                symbol_name(source_symbol)
+                symbol_text(context, source_symbol)
             )));
         };
-        if cell.has_gp(gp::ACTIVE_BINDING) {
-            let function = cell.cdr();
-            heap.define(target, target_symbol, function)?;
-            if let Some(new_cell) = heap.frame_cell(target, target_symbol) {
-                new_cell.set_gp_bits(gp::ACTIVE_BINDING, true);
+        let active = binding.is_active();
+        let content = context.root(binding.content());
+        if active {
+            handles::define_binding(context, target, target_symbol, content)?;
+            if let Some(binding) = handles::frame_binding(context, target, target_symbol) {
+                handles::make_binding_active(binding);
             }
         } else {
-            define(target_symbol, cell.cdr(), target)?;
+            eval::define_variable(context, target_symbol, content, target)?;
         }
     }
-    Ok(nil())
+    Ok(handles::null())
+}
+
+/// Whether `value` is the logical `TRUE` of length one, as `isTRUE` asks.
+fn is_true(context: &Cx<'_>, value: Local<'_>) -> bool {
+    value
+        .standard::<Logical>()
+        .is_some_and(|value| matches!(value.as_slice(context), [1]))
+}
+
+/// `function` called with `values` as its unnamed arguments, from `environment`.
+fn call_with<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'s>,
+    values: &[Local<'s>],
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let arguments: SmallVec<[Tagged<'s>; 2]> = values
+        .iter()
+        .map(|&value| Tagged {
+            tag: handles::null(),
+            value,
+        })
+        .collect();
+    handles::apply(context, handles::null(), function, &arguments, environment)
 }
 
 /// `ryLocalS4Generics(names, env, is_generic)`: for each name bound in the namespace `env`,
@@ -2050,49 +2123,92 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
 /// (`register_s3_methods.R`) asks of every S3 generic a package defines. `is_generic` is
 /// `methods::is(f, "genericFunction")`, called only for a value that is an object at all, since
 /// `is()` answers `FALSE` for every other one.
-unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
+fn do_local_s4_generics<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     /// The serialization type code of a closure (`CLOSXP`).
     const CLOSURE_RECORD: u32 = 3;
-    let names = call.arg(0);
-    let env = environment_arg(call.arg(1), "env")?;
-    let is_generic = call.arg(2);
-    let mut generic = Vec::with_capacity(length(names));
+    let names = handles::character_vector(context, arguments.value(0))?;
+    let environment = environment_arg(context, arguments.value(1), "env")?;
+    let is_generic = arguments.value(2);
+    let caller = arguments.environment(context)?;
+    let mut generic = Vec::with_capacity(names.len());
     // A generic appears once per method registered for it, and its answer is the same each time.
     let mut answered = rustc_hash::FxHashMap::<Sexp, i32>::default();
-    for index in 0..length(names) {
-        let symbol = values::install_charsxp(names.element(index))?;
-        if let Some(&answer) = answered.get(&symbol) {
+    for index in 0..names.len() {
+        let symbol = handles::install_element(context, names, index)?;
+        if let Some(&answer) = answered.get(&symbol.raw()) {
             generic.push(answer);
             continue;
         }
-        let binding = find_var(symbol, env)?;
+        let Some(binding) = eval::variable(context, symbol, environment)? else {
+            return Err(arguments.error(format!(
+                "object '{}' not found",
+                symbol_text(context, symbol)
+            )));
+        };
         // A generic still in its lazy-load database whose record is a closure without a class
         // or the S4 bit cannot be an S4 generic, so registering methods for it leaves it
         // unfetched until something calls it.
-        if let Some((kind, is_object, levels)) = crate::serialize::lazy_record_header(binding)?
+        if let Some((kind, is_object, levels)) = handles::lazy_record_header(context, binding)?
             && kind == CLOSURE_RECORD
             && !is_object
             && levels & gp::S4_OBJECT == 0
         {
-            answered.insert(symbol, 0);
+            answered.insert(symbol.raw(), 0);
             generic.push(0);
             continue;
         }
-        let value = value_of(binding)?;
-        if value == unbound() {
-            return Err(call.error(format!("object '{}' not found", symbol_name(symbol))));
-        }
-        let is_s4_generic = (value.is_object() || value.has_gp(gp::S4_OBJECT))
-            && values::is_true(eval::apply(
-                nil(),
-                is_generic,
-                &eval::value_args(&[value]),
-                call.env()?,
-            )?);
-        answered.insert(symbol, i32::from(is_s4_generic));
+        let value = eval::forced_value(context, binding)?;
+        let is_s4_generic = (handles::is_object(value) || handles::is_s4(value)) && {
+            let answer = call_with(context, is_generic, &[value], caller)?;
+            is_true(context, answer)
+        };
+        answered.insert(symbol.raw(), i32::from(is_s4_generic));
         generic.push(i32::from(is_s4_generic));
     }
-    values::logical_vector(&generic)
+    let mut result = context.alloc::<Logical>(generic.len())?;
+    result.as_mut_slice().copy_from_slice(&generic);
+    Ok(result.finish().value())
+}
+
+/// What every row of `ryRegisterS3Methods()` reads: its arguments, the closures of the steps
+/// that stay in R and the symbols it binds.
+#[derive(Clone, Copy)]
+struct Registration<'s> {
+    fin: Local<'s, Str>,
+    rows: usize,
+    environment: Local<'s, Environment>,
+    frame: Local<'s, Environment>,
+    method_code: Local<'s>,
+    caller: Local<'s, Environment>,
+    namespace: Local<'s>,
+    missing: Local<'s>,
+    generic: Local<'s>,
+    default: Local<'s>,
+    new_table: Local<'s>,
+    existing: Local<'s>,
+    home: Local<'s>,
+    known: Option<Local<'s, Str>>,
+}
+
+impl<'s> Registration<'s> {
+    fn pass<'inner>(self, outer: heap::handle::Enclosing<'s, 'inner>) -> Registration<'inner> {
+        Registration {
+            fin: outer.pass(self.fin),
+            rows: self.rows,
+            environment: outer.pass(self.environment),
+            frame: outer.pass(self.frame),
+            method_code: outer.pass(self.method_code),
+            caller: outer.pass(self.caller),
+            namespace: outer.pass(self.namespace),
+            missing: outer.pass(self.missing),
+            generic: outer.pass(self.generic),
+            default: outer.pass(self.default),
+            new_table: outer.pass(self.new_table),
+            existing: outer.pass(self.existing),
+            home: outer.pass(self.home),
+            known: self.known.map(|known| outer.pass(known)),
+        }
+    }
 }
 
 /// `ryRegisterS3Methods(fin, env, frame, method_code, helpers)`: the loop of GNU R's
@@ -2105,134 +2221,203 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
 /// `helpers` closures run the steps that stay in R: `namespace`, `missing`, `generic`,
 /// `default`, `table`, `existing` and `home` (see `register_s3_methods.R`). The value is the
 /// overwritten methods, as the rows of a two-column matrix flattened by row.
-unsafe fn do_register_s3_methods(call: &Call<'_>) -> R<Sexp> {
-    let fin = call.arg(0);
-    let env = environment_arg(call.arg(1), "env")?;
-    let frame = environment_arg(call.arg(2), "frame")?;
-    let method_code = call.arg(3);
-    let helpers = call.arg(4);
-    let helper = |name: &str| -> R<Sexp> {
-        let names = values::names(helpers);
-        (0..length(helpers))
-            .find(|&index| string_at(names, index).as_deref() == Some(name))
-            .map(|index| helpers.element(index))
+fn do_register_s3_methods<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let fin = handles::character_vector(context, arguments.value(0))?;
+    let environment = environment_arg(context, arguments.value(1), "env")?;
+    let frame = environment_arg(context, arguments.value(2), "frame")?;
+    let helpers = arguments.value(4);
+    let helper_names = handles::names_attribute(context, helpers);
+    let helper_names = handles::dense::<Str>(context, helper_names)?;
+    let helpers = handles::dense::<List>(context, helpers)?;
+    let helper = |context: &Cx<'s>, name: &str| -> R<Local<'s>> {
+        let (Some(helpers), Some(names)) = (helpers, helper_names) else {
+            return Err(error(format!("no '{name}' helper")));
+        };
+        (0..helpers.len().min(names.len()))
+            .find(|&index| {
+                let label = names.get(context, index);
+                !handles::is_na(label) && label.bytes() == name.as_bytes()
+            })
+            .map(|index| context.root(helpers.get(context, index)))
             .ok_or_else(|| error(format!("no '{name}' helper")))
     };
-    let run = |function: Sexp, arguments: &[Sexp]| {
-        eval::apply(nil(), function, &eval::value_args(arguments), call.env()?)
+    let known_symbol = handles::install_bytes(context, b".knownS3Generics")?;
+    let known = eval::frame_content(context, handles::base_namespace(), known_symbol)?;
+    let known = match known {
+        Some(known) => {
+            let known = eval::forced_value(context, known)?;
+            handles::dense::<Str>(context, known)?
+        }
+        None => None,
     };
-    let (namespace, missing, generic, default, new_table, existing, home) = (
-        helper("namespace")?,
-        helper("missing")?,
-        helper("generic")?,
-        helper("default")?,
-        helper("table")?,
-        helper("existing")?,
-        helper("home")?,
-    );
-    let known = value_of(find_var_in_frame(
-        values::install(".knownS3Generics")?,
-        base_namespace(),
-    )?)?;
-    let known_names = values::names(known);
-    let known_generics: rustc_hash::FxHashMap<String, Sexp> = (0..length(known_names))
-        .rev()
-        .filter_map(|index| {
-            Some((
-                string_at(known_names, index)?.into_owned(),
-                known.element(index),
-            ))
-        })
-        .collect();
-    let table_symbol = values::install(".__S3MethodsTable__.")?;
-    let (x_symbol, method_symbol, home_symbol, envir_symbol) = (
-        values::install("x")?,
-        values::install("method")?,
-        values::install("home")?,
-        values::install("envir")?,
-    );
-    let dispatch = interp().globals.methods_dispatch;
-    let rows = length(fin) / 5;
-    let mut overwritten = Vec::new();
-    for row in 0..rows {
-        let column = |index: usize| fin.element(row + index * rows);
-        crate::scope(|| {
-            let genname = column(0);
-            let generic_name = char_str(genname);
-            let defenv = match known_generics.get(generic_name.as_ref()) {
-                Some(&package) if package != values::na_string() => {
-                    let registry = crate::heap().known().namespace_registry;
-                    let package_symbol = values::install_charsxp(package)?;
-                    let loaded = value_of(find_var_in_frame(package_symbol, registry)?)?;
-                    if loaded.kind() == SexpType::Environment {
-                        loaded
-                    } else {
-                        run(namespace, &[scalar_string(&char_str(package))?])?
-                    }
-                }
-                _ => {
-                    let symbol = values::install_charsxp(genname)?;
-                    let mut function = value_of(find_var(symbol, env.enclosure())?)?;
-                    if function == unbound() || function == nil() {
-                        run(missing, &[scalar_string(&generic_name)?])?;
-                    }
-                    if dispatch
-                        && (function.is_object() || function.has_gp(gp::S4_OBJECT))
-                        && values::is_true(run(generic, &[function])?)
-                    {
-                        function = run(default, &[function])?;
-                    }
-                    if function.kind() == SexpType::Closure {
-                        function.tag()
-                    } else {
-                        base_namespace()
-                    }
-                }
-            };
-            let mut table = value_of(find_var_in_frame(table_symbol, defenv)?)?;
-            if table == unbound() || table == nil() {
-                table = run(new_table, &[defenv])?;
-            }
-            let name = column(3);
-            let name_symbol = values::install_charsxp(name)?;
-            let current = match crate::heap().frame_cell(table, name_symbol) {
-                None => nil(),
-                Some(cell)
-                    if cell.has_gp(gp::ACTIVE_BINDING)
-                        || (cell.cdr().kind() == SexpType::Promise
-                            && cell.cdr().car() == unbound()) =>
-                {
-                    run(existing, &[table, scalar_string(&char_str(name))?])?
-                }
-                Some(cell) => value_of(cell.cdr())?,
-            };
-            let method = column(2);
-            if current != nil() {
-                let own = value_of(find_var(values::install_charsxp(method)?, env)?)?;
-                if !crate::sort::identical(current, own, &crate::sort::IdenticalFlags::default()) {
-                    let current_home = run(home, &[current])?;
-                    overwritten.push(char_str(name).into_owned());
-                    overwritten.push(string_at(current_home, 0).unwrap_or_default().into_owned());
+    let registration = Registration {
+        fin,
+        rows: fin.len() / 5,
+        environment,
+        frame,
+        method_code: arguments.value(3),
+        caller: arguments.environment(context)?,
+        namespace: helper(context, "namespace")?,
+        missing: helper(context, "missing")?,
+        generic: helper(context, "generic")?,
+        default: helper(context, "default")?,
+        new_table: helper(context, "table")?,
+        existing: helper(context, "existing")?,
+        home: helper(context, "home")?,
+        known,
+    };
+    // Each generic's package, as the index of its entry; the first entry for a name wins.
+    let mut known_generics = rustc_hash::FxHashMap::<String, usize>::default();
+    if let Some(known) = known {
+        let names = handles::names_attribute(context, known.value());
+        if let Some(names) = handles::dense::<Str>(context, names)? {
+            for index in (0..names.len().min(known.len())).rev() {
+                let name = names.get(context, index);
+                if !handles::is_na(name) {
+                    known_generics.insert(handles::text(name).into_owned(), index);
                 }
             }
-            let promise_env = new_env(frame)?;
-            let heap = crate::heap();
-            heap.define(promise_env, x_symbol, scalar_string(&char_str(name))?)?;
-            heap.define(
-                promise_env,
-                method_symbol,
-                scalar_string(&char_str(method))?,
-            )?;
-            heap.define(promise_env, home_symbol, env)?;
-            heap.define(promise_env, envir_symbol, table)?;
-            define(
-                name_symbol,
-                eval::make_promise(method_code, promise_env)?,
-                table,
-            )
-        })?;
+        }
     }
-    string_vector(&overwritten)
+    let mut overwritten = Vec::new();
+    for row in 0..registration.rows {
+        let replaced = context.scope_reading(|context, outer| {
+            register_method(context, registration.pass(outer), &known_generics, row)
+        })?;
+        if let Some((name, home)) = replaced {
+            overwritten.push(name);
+            overwritten.push(home);
+        }
+    }
+    strings(context, &overwritten)
+}
+
+/// Registers the method of row `row`, answering the name and the home of the method it
+/// replaces, if it replaces a different one.
+fn register_method<'s>(
+    context: &mut Cx<'s>,
+    registration: Registration<'s>,
+    known_generics: &rustc_hash::FxHashMap<String, usize>,
+    row: usize,
+) -> R<Option<(String, String)>> {
+    let Registration {
+        fin,
+        rows,
+        environment,
+        caller,
+        ..
+    } = registration;
+    let column =
+        |context: &Cx<'s>, index: usize| context.root(fin.get(context, row + index * rows));
+    let generic_name = column(context, 0);
+    let generic_text = handles::text(generic_name.read(context)).into_owned();
+    let package = match (known_generics.get(&generic_text), registration.known) {
+        (Some(&index), Some(known)) if !handles::is_na(known.get(context, index)) => {
+            Some(context.root(known.get(context, index)))
+        }
+        _ => None,
+    };
+    let defining = match package {
+        Some(package) => {
+            let package_symbol = handles::install(context, package)?;
+            let registry = handles::namespace_registry().value();
+            match handles::frame_symbol_value(context, registry, package_symbol)? {
+                Some(loaded) if loaded.r_type() == SexpType::Environment => loaded,
+                _ => {
+                    let text = handles::text(package.read(context)).into_owned();
+                    let name = strings(context, &[text])?;
+                    call_with(context, registration.namespace, &[name], caller)?
+                }
+            }
+        }
+        None => {
+            let symbol = handles::install(context, generic_name)?;
+            let enclosure = environment.read(context).enclosure();
+            let enclosure = match enclosure {
+                Some(enclosure) => context.root(enclosure),
+                None => handles::empty_environment(),
+            };
+            let found = eval::variable(context, symbol, enclosure)?;
+            let mut function = match found {
+                Some(found) => eval::forced_value(context, found)?,
+                None => handles::null(),
+            };
+            if function.r_type() == SexpType::Nil {
+                let name = strings(context, &[generic_text.as_str()])?;
+                call_with(context, registration.missing, &[name], caller)?;
+            }
+            if interp().globals.methods_dispatch
+                && (handles::is_object(function) || handles::is_s4(function))
+                && {
+                    let answer = call_with(context, registration.generic, &[function], caller)?;
+                    is_true(context, answer)
+                }
+            {
+                function = call_with(context, registration.default, &[function], caller)?;
+            }
+            match function.downcast::<Closure>() {
+                Some(closure) => context.root(closure.read(context).environment()).value(),
+                None => handles::base_namespace().value(),
+            }
+        }
+    };
+    let table_symbol = handles::install_bytes(context, b".__S3MethodsTable__.")?;
+    let table = match handles::frame_symbol_value(context, defining, table_symbol)? {
+        Some(table) if table.r_type() != SexpType::Nil => table,
+        _ => call_with(context, registration.new_table, &[defining], caller)?,
+    };
+    let Some(table_environment) = table.downcast::<Environment>() else {
+        return Err(error("an S3 methods table is not an environment"));
+    };
+    let name = column(context, 3);
+    let name_symbol = handles::install(context, name)?;
+    let name_text = handles::text(name.read(context)).into_owned();
+    // `None` when the table binds nothing, and whether an R helper must read the binding.
+    let existing = handles::frame_binding(context, table_environment, name_symbol).map(|binding| {
+        let content = binding.content();
+        let pending = content
+            .downcast::<heap::handle::Promise>()
+            .is_some_and(|promise| handles::is_unbound(promise.result()));
+        (binding.is_active() || pending, context.root(content))
+    });
+    let current = match existing {
+        None => handles::null(),
+        Some((true, _)) => {
+            let label = strings(context, &[name_text.as_str()])?;
+            call_with(context, registration.existing, &[table, label], caller)?
+        }
+        Some((false, content)) => eval::forced_value(context, content)?,
+    };
+    let method = column(context, 2);
+    let method_text = handles::text(method.read(context)).into_owned();
+    let mut replaced = None;
+    if current.r_type() != SexpType::Nil {
+        let method_symbol = handles::install(context, method)?;
+        let own = match eval::variable(context, method_symbol, environment)? {
+            Some(own) => eval::forced_value(context, own)?,
+            None => handles::unbound(),
+        };
+        if !handles::identical(context, current, own) {
+            let current_home = call_with(context, registration.home, &[current], caller)?;
+            let home = handles::first_string(context, current_home).unwrap_or_default();
+            replaced = Some((name_text.clone(), home.into_owned()));
+        }
+    }
+    let promise_environment = handles::new_environment(context, registration.frame)?;
+    let bindings = [
+        ("x", strings(context, &[name_text.as_str()])?),
+        ("method", strings(context, &[method_text.as_str()])?),
+        ("home", environment.value()),
+        ("envir", table),
+    ];
+    for (symbol, value) in bindings {
+        let symbol = handles::install_bytes(context, symbol.as_bytes())?;
+        let symbol = context.root(symbol);
+        handles::define_binding(context, promise_environment, symbol, value)?;
+    }
+    let promise = handles::promise(context, registration.method_code, promise_environment)?;
+    eval::define_variable(context, name_symbol, promise.value(), table_environment)?;
+    Ok(replaced)
 }
 
 // Calling functions.
@@ -2676,30 +2861,56 @@ unsafe fn rapply_leaf(
     }
 }
 
-unsafe fn do_eapply(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
-    let all = values::as_logical_scalar(call.arg(2)) == 1;
-    let use_names = values::as_logical_scalar(call.arg(3)) != 0;
-    let bound = env_symbols(env, all, false);
-    let result = alloc(SexpType::List, bound.len())?;
-    crate::heap().root(result);
+fn do_eapply<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = environment_arg(context, arguments.value(0), "env")?;
+    let all = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let use_names = handles::logical_scalar(context, arguments.value(3)) != 0;
+    let bound = environment_symbols(context, environment.read(context).value(), all, false);
+    let caller = arguments.environment(context)?;
+    let mut result = context.alloc::<List>(bound.len())?;
     // GNU R evaluates `FUN(quote(value), ...)` in the `eapply` closure's frame, so the extra
     // arguments reach `FUN`.
-    let fun_symbol = values::install("FUN")?;
-    let quote_symbol = values::install("quote")?;
+    let function = handles::install_bytes(context, b"FUN")?;
+    let quote = handles::install_bytes(context, b"quote")?;
     for (index, &symbol) in bound.iter().enumerate() {
-        let value = crate::scope(|| {
-            let value = value_of(find_var_in_frame(symbol, env)?)?;
-            let quoted = values::call(quote_symbol, &[value])?;
-            let fun_call = values::call(fun_symbol, &[quoted, symbols().dots])?;
-            eval::force_and_call(fun_call, 1, call.env()?)
+        let value = context.scope_enclosed(|context, outer| {
+            let (environment, caller) = (outer.pass(environment), outer.pass(caller));
+            let value = match eval::frame_content(context, environment, symbol)? {
+                Some(value) => eval::forced_value(context, value)?,
+                None => handles::unbound(),
+            };
+            let quoted = handles::cons(context, handles::null(), value, handles::null())?;
+            let quoted = handles::language(context, context.root(quote).value(), quoted)?;
+            let rest = handles::chain(
+                context,
+                &[
+                    Tagged {
+                        tag: handles::null(),
+                        value: quoted.value(),
+                    },
+                    Tagged {
+                        tag: handles::null(),
+                        value: handles::permanent_symbol(|symbols| symbols.dots).value(),
+                    },
+                ],
+                handles::null(),
+            )?;
+            let call = handles::language(context, context.root(function).value(), rest)?;
+            handles::force_and_call(context, call, 1, caller)
         })?;
-        values::set_elt(result, index, value);
+        result.set(context, index, value);
     }
+    let mut result = result.owned();
     if use_names {
-        values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+        let names = symbol_names(context, &bound)?;
+        handles::set_attribute(
+            context,
+            &mut result,
+            handles::symbol(|symbols| symbols.names),
+            names,
+        )?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 unsafe fn dots_of(env: Sexp) -> R<Sexp> {

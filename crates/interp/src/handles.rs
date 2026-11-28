@@ -2831,6 +2831,21 @@ pub fn mark_shared(value: Local<'_>) {
     unsafe { value.raw().mark_not_mutable() }
 }
 
+/// The call `call` evaluated in `environment` with its first `count` arguments forced before
+/// the function runs, as `forceAndCall` evaluates it.
+pub fn force_and_call<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_, Language>,
+    count: usize,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and the call runs R code, which `&mut Cx` permits.
+    unsafe {
+        let value = crate::eval::force_and_call(call.raw(), count, environment.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
 /// `expression` evaluated in `environment`.
 pub fn evaluate<'s>(
     context: &mut Cx<'s>,
@@ -4608,7 +4623,10 @@ pub fn bound_symbols(
         } else {
             heap.bound_symbols(environment.raw())
         };
-        symbols.into_iter().map(|symbol| Gc::adopt(symbol)).collect()
+        symbols
+            .into_iter()
+            .map(|symbol| Gc::adopt(symbol))
+            .collect()
     }
 }
 
@@ -4682,6 +4700,21 @@ pub fn rebound_closure<'s>(
         )?;
         Ok(Owned::assume(rooted(context, copy)))
     }
+}
+
+/// Whether `x` and `y` are `identical()` with the default flags.
+pub fn identical(_context: &mut Cx<'_>, x: Local<'_>, y: Local<'_>) -> bool {
+    // SAFETY: both are rooted, and comparing may expand an ALTREP object, which `&mut Cx`
+    // permits.
+    unsafe { crate::sort::identical(x.raw(), y.raw(), &crate::sort::IdenticalFlags::default()) }
+}
+
+/// The kind and header flags of the record the unforced lazy-load promise `value` would fetch
+/// ([`crate::serialize::lazy_record_header`]), `None` for any other value.
+pub fn lazy_record_header(_context: &mut Cx<'_>, value: Local<'_>) -> R<Option<(u32, bool, u16)>> {
+    // SAFETY: the value is rooted, and reading the header installs symbols and may call an
+    // active binding, which `&mut Cx` permits.
+    unsafe { crate::serialize::lazy_record_header(value.raw()) }
 }
 
 /// The table of loaded namespaces, by name.

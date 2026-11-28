@@ -13,7 +13,7 @@ use {
         builtins::{BuiltinDef, Call, internal},
         bytecode,
         envir::{self, frame_of, get_option, sys_parent_number, top_env},
-        eval, interp,
+        eval, handles, interp,
         unwind::R,
         values::{self, global_env, install, length, na_string, nil, symbols},
     },
@@ -256,7 +256,8 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     for index in 0..count {
         let entry = &interp().frames[index];
         let function = entry.function.raw();
-        let copy = envir::call_with_srcref(entry)?;
+        let copy =
+            handles::with_result(|context| Ok(envir::call_with_srcref(context, index)?.raw()))?;
         if copy.is_object() {
             return decline();
         }
@@ -460,7 +461,7 @@ unsafe fn trace_context(call: Sexp, function: Sexp) -> R<Option<TraceContext>> {
             scope: Some(Scope::Global),
         }));
     }
-    let top = top_env(env, get_option("topLevelEnvironment"));
+    let top = top_env(env, get_option("topLevelEnvironment"))?;
     if !envir::is_namespace(top) {
         return Ok(Some(NO_CONTEXT));
     }
