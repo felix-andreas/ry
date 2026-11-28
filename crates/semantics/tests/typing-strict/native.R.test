@@ -624,7 +624,6 @@ I64
 
 #---- variable_that_changes_type
 #~~~~ script.R
-# blocked: widened
 widened <- function(n: I64) -> F64 {
   value <- n
   value <- Num.to_f64(value)
@@ -635,7 +634,6 @@ cat(widened(2), "\n")
 == script.R
 widened: fn(n: I64) -> F64
 NULL
-71..97 warning[interpreted] this function runs in the interpreter, because `value` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
 
 #---- tag_variable_assigned_again
 #~~~~ script.R
@@ -1457,9 +1455,6 @@ nested: fn(xs: List<I64>) -> I64
 131..135 warning[unused] `held` is assigned but never used
 165..171 warning[unused] `nested` is assigned but never used
 210..212 warning[unused] `ys` is assigned but never used
-69..79 warning[interpreted] this function runs in the interpreter, because `point` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
-146..155 warning[interpreted] this function runs in the interpreter, because `held` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
-221..235 warning[interpreted] this function runs in the interpreter, because `ys` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
 
 #---- parameter_and_loop_variable_that_change_type
 #~~~~ script.R
@@ -1487,8 +1482,94 @@ same_type: fn(n: I64) -> I64
 0..9 warning[unused] `parameter` is assigned but never used
 70..83 warning[unused] `loop_variable` is assigned but never used
 217..226 warning[unused] `same_type` is assigned but never used
-41..63 warning[interpreted] this function runs in the interpreter, because `n` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
-157..179 warning[interpreted] this function runs in the interpreter, because `x` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+
+#---- variable_that_changes_type_inside_a_branch_or_loop
+#~~~~ script.R
+in_branch <- function(n: I64) -> I64 {
+  x <- n
+  if (n > 1) {
+    x <- Num.to_f64(n)
+  }
+  n
+}
+in_loop <- function(xs: List<I64>) -> I64 {
+  last <- 0
+  for (x in xs) {
+    last <- Num.to_str(x)
+  }
+  List.len(xs)
+}
+in_operand <- function(n: I64) -> I64 {
+  x <- n
+  if (n > 1 && { x <- "big"; TRUE }) n else 0
+}
+in_condition <- function(n: I64) -> I64 {
+  x <- 0.5
+  i <- 0
+  while ({ x <- Num.to_str(i); i < n }) {
+    i <- i + 1
+  }
+  i
+}
+after_local <- function(n: I64) -> I64 {
+  x <- n
+  g <- function() -> I64 {
+    x <- "inner"
+    Str.count_utf8_bytes(x)
+  }
+  if (n > 1) {
+    x <- "big"
+  }
+  g()
+}
+in_local <- function(n: I64) -> I64 {
+  x <- n
+  g <- function() -> I64 {
+    x <- "inner"
+    Str.count_utf8_bytes(x)
+  }
+  g() + x
+}
+bound_inside <- function(n: I64) -> Str {
+  if (n > 1) {
+    label <- n * 10
+    label <- Num.to_str(label)
+    label
+  } else {
+    "small"
+  }
+}
+#++++
+== script.R
+in_branch: fn(n: I64) -> I64
+in_loop: fn(xs: List<I64>) -> I64
+in_operand: fn(n: I64) -> I64
+in_condition: fn(n: I64) -> I64
+after_local: fn(n: I64) -> I64
+in_local: fn(n: I64) -> I64
+bound_inside: fn(n: I64) -> Str
+0..9 warning[unused] `in_branch` is assigned but never used
+41..42 warning[unused] `x` is assigned but never used
+67..68 warning[unused] `x` is assigned but never used
+96..103 warning[unused] `in_loop` is assigned but never used
+142..146 warning[unused] `last` is assigned but never used
+174..178 warning[unused] `last` is assigned but never used
+217..227 warning[unused] `in_operand` is assigned but never used
+259..260 warning[unused] `x` is assigned but never used
+283..284 warning[unused] `x` is assigned but never used
+314..326 warning[unused] `in_condition` is assigned but never used
+358..359 warning[unused] `x` is assigned but never used
+387..388 warning[unused] `x` is assigned but never used
+443..454 warning[unused] `after_local` is assigned but never used
+486..487 warning[unused] `x` is assigned but never used
+588..589 warning[unused] `x` is assigned but never used
+611..619 warning[unused] `in_local` is assigned but never used
+746..758 warning[unused] `bound_inside` is assigned but never used
+67..85 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+174..195 warning[interpreted] this function runs in the interpreter, because `last` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+283..293 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+387..405 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
+588..598 warning[interpreted] this function runs in the interpreter, because `x` holds one type before this branch or loop and takes another inside it, which is not compiled natively yet. Use a new name for the new value
 
 #---- branches_that_disagree_on_a_type
 #~~~~ script.R
@@ -1700,7 +1781,6 @@ shifted <- function(n: I64) -> I64 {
 == script.R
 shifted: fn(n: I64) -> I64
 0..7 warning[unused] `shifted` is assigned but never used
-93..102 warning[interpreted] this function runs in the interpreter, because `step` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
 
 #---- operator_on_an_aliased_table_expression
 #~~~~ script.R

@@ -122,11 +122,13 @@ const ARRAY: Mask = 1 << 31;
 const SCALAR: Mask = 1 << 30;
 
 /// A signature is a list: the masks by slot, the annotation texts by slot, the formal names by
-/// formal position, and the definition's body.
+/// formal position, the definition's body, and the text of its type parameter list (`<T>`, or
+/// `""` for a signature that is not generic).
 const MASKS: usize = 0;
 pub(crate) const TEXTS: usize = 1;
 const NAMES: usize = 2;
 const BODY: usize = 3;
+pub(crate) const BINDERS: usize = 4;
 
 /// Slot 0 of a signature is the return value, slot 1 the rest parameter, and slot `2 + i` the
 /// formal at position `i`.
@@ -185,7 +187,11 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
     let masks = values::integer_vector(&masks)?;
     let texts = values::string_vector(&texts)?;
     let names = values::string_vector(&names)?;
-    let signature = values::list_vector(&[masks, texts, names, body])?;
+    let binders = signature
+        .binders
+        .map_or_else(String::new, |binders| binders.text().to_string());
+    let binders = values::string_vector(&[binders.as_str()])?;
+    let signature = values::list_vector(&[masks, texts, names, body, binders])?;
     register(key, signature)
 }
 
@@ -194,31 +200,45 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
 pub const STREAM_ATTRIBUTE: &str = ".ry_signature";
 
 /// What a stream must carry for `function`'s signature to outlive the session: the masks, the
-/// annotation texts and the formal names. `None` for an untyped closure.
+/// annotation texts, the formal names and, for a generic signature only, its type parameter
+/// list, so a stream without type parameters has the shape every ry reads. `None` for an
+/// untyped closure.
 pub unsafe fn stream_signature(function: Sexp) -> R<Option<Sexp>> {
     let Some(signature) = signature_of(function) else {
         return Ok(None);
     };
-    let carried = values::list_vector(&[
+    let binders = signature.element(BINDERS);
+    let mut carried = vec![
         signature.element(MASKS),
         signature.element(TEXTS),
         signature.element(NAMES),
-    ])?;
-    Ok(Some(carried))
+    ];
+    if !values::string_elt(binders, 0).bytes().is_empty() {
+        carried.push(binders);
+    }
+    Ok(Some(values::list_vector(&carried)?))
 }
 
 /// Registers the signature a stream carried for `function`, as [`stream_signature`] wrote it. A
 /// value of any other shape registers nothing, so the closure is untyped, as it would be read
 /// by an R that knows no annotations.
 pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
-    if carried.kind() != SexpType::List || values::length(carried) != 3 {
+    let elements = values::length(carried);
+    if carried.kind() != SexpType::List || !(3..=4).contains(&elements) {
         return Ok(());
     }
     let (masks, texts, names) = (carried.element(0), carried.element(1), carried.element(2));
+    let binders = if elements == 4 {
+        carried.element(3)
+    } else {
+        values::string_vector(&[""])?
+    };
     let slots = values::length(masks);
     if masks.kind() != SexpType::Integer
         || texts.kind() != SexpType::String
         || names.kind() != SexpType::String
+        || binders.kind() != SexpType::String
+        || values::length(binders) != 1
         || slots < FIRST_FORMAL_SLOT
         || values::length(texts) != slots
         || values::length(names) + FIRST_FORMAL_SLOT != slots
@@ -234,7 +254,7 @@ pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
     } else {
         return Ok(());
     };
-    let signature = values::list_vector(&[masks, texts, names, body])?;
+    let signature = values::list_vector(&[masks, texts, names, body, binders])?;
     register(key, signature)
 }
 

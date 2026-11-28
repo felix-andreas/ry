@@ -5,7 +5,7 @@
 
 use {
     crate::{
-        annotations::{self, FIRST_FORMAL_SLOT, RETURN_SLOT, TEXTS},
+        annotations::{self, BINDERS, FIRST_FORMAL_SLOT, RETURN_SLOT, TEXTS},
         builtins::{BuiltinDef, Call, internal},
         format, records, standard_library, strings,
         unwind::{R, Unwind, error},
@@ -653,11 +653,17 @@ impl Deparser {
         self.opts &= !(options::QUOTE_EXPRESSIONS | options::SHOW_ATTRIBUTES | options::USE_SOURCE);
         // A typed closure shows the annotation texts its signature keeps, so a function without
         // source, such as an installed package's, prints as the typed definition it is.
-        let types = match self.opts & options::TYPED_SIGNATURES {
+        let signature = match self.opts & options::TYPED_SIGNATURES {
             0 => None,
-            _ => annotations::signature_of(function).map(|signature| signature.element(TEXTS)),
+            _ => annotations::signature_of(function),
         };
-        self.print("function (");
+        let types = signature.map(|signature| signature.element(TEXTS));
+        self.print("function");
+        if let Some(signature) = signature {
+            let binders = values::string_elt(signature.element(BINDERS), 0);
+            self.print(&annotation_line(binders.bytes()));
+        }
+        self.print(" (");
         self.formal_types = types;
         self.arguments(function.car(), true);
         self.print(")");

@@ -420,8 +420,8 @@ impl Uncompiled {
                  before the branch or loop"
             ),
             Uncompiled::TypeChange(name) => format!(
-                "`{name}` holds values of different types, which {YET}: a native variable keeps \
-                 one type. Use a new name for the second value"
+                "`{name}` holds one type before this branch or loop and takes another inside \
+                 it, which {YET}. Use a new name for the new value"
             ),
             Uncompiled::BranchTypes => format!(
                 "the branches give values of different types, which {YET}: a native value has one \
@@ -805,6 +805,8 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         reported: FxHashSet::default(),
         reported_keyed: false,
         control_depth: 0,
+        region_mark: 0,
+        frame_mark: 0,
         probing: 0,
         nested: 0,
         early_reads: Vec::new(),
@@ -1016,6 +1018,12 @@ struct Judge<'a, 'db> {
     reported: FxHashSet<Symbol>,
     reported_keyed: bool,
     control_depth: u32,
+    /// Where the innermost branch or loop body starts in `scope`: a name bound from there on
+    /// leaves scope with it, so it may change type (the assignment arm of [`Judge::walk`]).
+    region_mark: usize,
+    /// Where the innermost local function or function literal starts in `scope`: an assignment
+    /// to a name bound before it binds a name of the body's own.
+    frame_mark: usize,
     /// How many loop trials enclose the walk ([`Judge::in_loop`]).
     probing: u32,
     /// How many local functions or function literals enclose the walk inside the judged function.
@@ -1049,6 +1057,9 @@ struct Judge<'a, 'db> {
 
 /// The names a loop declares before it, with their types ([`Judge::in_loop`]).
 type Declared<'db> = SmallVec<[(Symbol, Option<Ty<'db>>); 2]>;
+
+/// A `for` loop's variable: where it is written, its name and the type of its items.
+type LoopVariable<'db> = (TextRange, Symbol, Option<Ty<'db>>);
 
 /// What a walk changes, which a loop trial puts back ([`Judge::in_loop`]).
 #[derive(Clone)]
@@ -1158,6 +1169,8 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.locals.clear();
         self.hidden.clear();
         self.control_depth = 0;
+        self.region_mark = 0;
+        self.frame_mark = 0;
         self.nested = 0;
         self.local_functions.clear();
         self.r_arguments = None;
@@ -1478,6 +1491,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 let mark = self.scope.len();
                 self.control_depth += 1;
+                let region_mark = std::mem::replace(&mut self.region_mark, mark);
                 let hoist = self.hoist.take();
                 self.walk(then_branch, branch_use);
                 let then_names = self.scope.split_off(mark);
@@ -1490,6 +1504,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 self.hoist = hoist;
                 self.control_depth -= 1;
+                self.region_mark = region_mark;
                 let mut ends = Vec::new();
                 if !self.diverges(then_branch) {
                     ends.push(then_names);
@@ -1522,21 +1537,27 @@ impl<'a, 'db> Judge<'a, 'db> {
             } => {
                 self.walk(sequence, Use::Value);
                 let mark = self.scope.len();
-                if let Some(variable) = variable {
+                let variable = variable.map(|variable| {
                     let item = self
                         .ty(sequence)
                         .and_then(|ty| array_element(db, self.peel(ty)));
-                    self.bind_assigned(module.name_range(variable), module.name(variable), item);
-                }
-                self.in_loop(body, mark);
+                    (module.name_range(variable), module.name(variable), item)
+                });
+                self.in_loop(body, mark, variable);
             }
             ExpressionKind::While { condition, body } => {
+                // The condition runs on every pass, so it is a region of its own, whose names
+                // stay in scope after it, as the typed core lowers it.
                 let hoist = self.hoist.take();
+                self.control_depth += 1;
+                let region_mark = std::mem::replace(&mut self.region_mark, self.scope.len());
                 self.walk(condition, Use::Value);
+                self.region_mark = region_mark;
+                self.control_depth -= 1;
                 self.hoist = hoist;
-                self.in_loop(body, self.scope.len());
+                self.in_loop(body, self.scope.len(), None);
             }
-            ExpressionKind::Repeat { body } => self.in_loop(body, self.scope.len()),
+            ExpressionKind::Repeat { body } => self.in_loop(body, self.scope.len(), None),
             ExpressionKind::Local { .. } => {
                 self.r_position(id, Symbol::from("local"), ROrigin::Library, usage);
             }
@@ -1585,9 +1606,13 @@ impl<'a, 'db> Judge<'a, 'db> {
                 BinaryOperator::And2 | BinaryOperator::Or2 => {
                     self.walk(lhs, Use::Value);
                     let mark = self.scope.len();
+                    self.control_depth += 1;
+                    let region_mark = std::mem::replace(&mut self.region_mark, mark);
                     let hoist = self.hoist.take();
                     self.walk(rhs, Use::Value);
                     self.hoist = hoist;
+                    self.region_mark = region_mark;
+                    self.control_depth -= 1;
                     self.scope.truncate(mark);
                 }
                 _ => {
@@ -1765,6 +1790,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     }
                     let mark = self.scope.len();
                     self.control_depth += 1;
+                    let region_mark = std::mem::replace(&mut self.region_mark, mark);
                     for &binding in &module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = *module.kind(binding) {
                             self.bind_assigned(module.range(binding), name, self.ty(binding));
@@ -1785,6 +1811,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                         ends.push(names);
                     }
                     self.control_depth -= 1;
+                    self.region_mark = region_mark;
                 }
                 self.join(&ends);
                 if branch_use == Use::Value && self.ty(id).is_some_and(|ty| self.is_mixed_union(ty))
@@ -1899,7 +1926,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     /// gives it, round by round as earlier names' types show more, as the typed core declares
     /// it (`lower::Lowering::looped`). A read inside a local function or a function literal is
     /// not declared, because the core inlines that body in a scope of its own.
-    fn in_loop(&mut self, body: ExprId, mark: usize) {
+    fn in_loop(&mut self, body: ExprId, mark: usize, variable: Option<LoopVariable<'db>>) {
         let entry = self.walk_state();
         let remembers = self.nested == 0;
         let module = self.judged.module;
@@ -1911,7 +1938,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             .unwrap_or_default();
         loop {
             self.declare(&declared);
-            self.loop_body(body, mark);
+            self.loop_body(body, mark, variable);
             let mut forward: SmallVec<[Symbol; 2]> = SmallVec::new();
             for &(name, nested) in &self.early_reads[entry.early_reads..] {
                 if nested == self.nested
@@ -1933,7 +1960,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.restore(entry.clone());
             self.declare(&declared);
             self.probing += 1;
-            self.loop_body(body, mark);
+            self.loop_body(body, mark, variable);
             self.probing -= 1;
             let learned: Declared<'db> = forward
                 .into_iter()
@@ -1945,7 +1972,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.restore(entry.clone());
             if learned.is_empty() {
                 self.declare(&declared);
-                self.loop_body(body, mark);
+                self.loop_body(body, mark, variable);
                 return;
             }
             declared.extend(learned);
@@ -1984,11 +2011,19 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.converted_locals = state.converted_locals;
     }
 
-    fn loop_body(&mut self, body: ExprId, mark: usize) {
+    /// Walks a loop body, whose names from `mark` on leave scope with it. The names declared
+    /// before the body ([`Judge::declare`]) stand outside the body's region, since the typed
+    /// core binds them before it enters the body, and the loop variable is the region's first.
+    fn loop_body(&mut self, body: ExprId, mark: usize, variable: Option<LoopVariable<'db>>) {
         self.control_depth += 1;
+        let region_mark = std::mem::replace(&mut self.region_mark, self.scope.len());
+        if let Some((at, name, item)) = variable {
+            self.bind_assigned(at, name, item);
+        }
         let hoist = self.hoist.take();
         self.walk(body, Use::Unused);
         self.hoist = hoist;
+        self.region_mark = region_mark;
         self.control_depth -= 1;
         for (name, slot) in self.scope.split_off(mark) {
             let ty = match slot {
@@ -2324,6 +2359,8 @@ impl<'a, 'db> Judge<'a, 'db> {
                 let ty = self.ty(value);
                 // A name set on some paths takes a new variable. A variable holding tags widens
                 // to every tag assigned to it, so only another kind of value changes its type.
+                // That takes a new variable too wherever no later code can read the old one:
+                // outside any branch or loop, or for a name the innermost one bound.
                 let held = match self.lookup(name) {
                     Some(Slot::Value(first) | Slot::Parameter(first)) => Some(first),
                     Some(Slot::FunctionParameter) => Some(None),
@@ -2334,7 +2371,20 @@ impl<'a, 'db> Judge<'a, 'db> {
                         if let (Some(first), Some(later)) = (first, ty)
                             && self.layout_differs(first, later)
                         {
-                            self.uncompiled(id, Uncompiled::TypeChange(name));
+                            let index = self.scope.iter().rposition(|&(bound, _)| bound == name);
+                            // A local function's assignment binds a name of its own, as in R,
+                            // so the enclosing function's slot keeps its type.
+                            let enclosing = index.is_some_and(|index| index < self.frame_mark);
+                            let bound_here = self.control_depth == 0
+                                || enclosing
+                                || index.is_some_and(|index| index >= self.region_mark);
+                            if enclosing {
+                                self.scope.push((name, Slot::Value(ty)));
+                            } else if bound_here {
+                                self.bind(name, Slot::Value(ty));
+                            } else {
+                                self.uncompiled(id, Uncompiled::TypeChange(name));
+                            }
                         }
                     }
                     None => self.bind(name, Slot::Value(ty)),
@@ -2484,6 +2534,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.scope.push((parameter.name, Slot::Parameter(None)));
         }
         let control_depth = std::mem::replace(&mut self.control_depth, 0);
+        let frame_mark = std::mem::replace(&mut self.frame_mark, mark);
         let r_arguments = self.r_arguments.take();
         let hoist = self.hoist.take();
         self.nested += 1;
@@ -2492,6 +2543,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.hoist = hoist;
         self.r_arguments = r_arguments;
         self.control_depth = control_depth;
+        self.frame_mark = frame_mark;
         self.scope.truncate(mark);
     }
 

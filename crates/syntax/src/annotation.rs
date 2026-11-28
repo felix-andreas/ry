@@ -17,6 +17,9 @@ use crate::{
 pub struct Signature {
     pub formals: Vec<Option<SyntaxNode>>,
     pub ret: Option<SyntaxNode>,
+    /// The type parameter list (`<T: numeric>`) of a generic signature, written on the literal
+    /// or in its `#:` block.
+    pub binders: Option<SyntaxNode>,
 }
 
 impl Signature {
@@ -64,16 +67,31 @@ pub fn signature_from(
         return Signature {
             formals: formals.iter().map(|_| None).collect(),
             ret: None,
+            binders: None,
         };
     }
-    let declaration = match binding_type {
-        Some(ascription) => ascription
-            .first_child()
-            .and_then(|written| written_function_type(&written))
-            .map(|function_type| compact_declaration(&function_type)),
-        None => block.and_then(block_declaration),
-    }
-    .unwrap_or_default();
+    let binder_list = |node: &SyntaxNode| {
+        node.children()
+            .find(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+    };
+    // A binding's written type takes no type parameters, so only a `#:` block declares them.
+    let (declaration, declared_binders) = match &binding_type {
+        Some(ascription) => (
+            ascription
+                .first_child()
+                .and_then(|written| written_function_type(&written))
+                .map(|function_type| compact_declaration(&function_type)),
+            None,
+        ),
+        None => {
+            let declaration = block.and_then(block_declaration);
+            let binders = block
+                .filter(|_| declaration.is_some())
+                .and_then(binder_list);
+            (declaration, binders)
+        }
+    };
+    let declaration = declaration.unwrap_or_default();
 
     let named: Vec<(&str, &Option<SyntaxNode>)> = declaration
         .parameters
@@ -121,9 +139,13 @@ pub fn signature_from(
         .as_ref()
         .and_then(SyntaxNode::first_child)
         .or(declaration.ret);
+    let binders = binder_list(function)
+        .filter(|_| inline)
+        .or(declared_binders);
     Signature {
         formals: governing,
         ret,
+        binders,
     }
 }
 
