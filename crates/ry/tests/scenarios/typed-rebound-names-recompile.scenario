@@ -2,8 +2,11 @@
 # name finds, so rebinding one after many calls switches to the new one, as in the interpreter: a
 # global function, one rebound by `assign` from inside a function, a function an enclosing
 # function's frame binds after the first calls, and a global removed by `rm()`, which uncovers the
-# one an attached environment binds. A global value is read at each call. `--aot` compiles `g`
-# before `h` is defined and gives the same output.
+# one an attached environment binds. A global value is read at each call. Native code that is
+# already running checks again after each R call it makes: `relay` calls `cb`, which rebinds `k`,
+# and then `scaled`, which calls `k`, so the interpreter runs `relay` again with what `cb`
+# returned, and `cb` prints once. `--aot` compiles `g` before `h` is defined and gives the same
+# output.
 
 requires ry-runtime
 
@@ -39,6 +42,17 @@ file rebind.R
 | for (i in 1:3) print(g(2))
 | rm(h)
 | print(g(2))
+| k <- function(x: F64) -> F64 x + 1
+| scaled <- function(x: F64) -> F64 k(x) * 10
+| cb <- function() {
+|   cat("rebinding k\n")
+|   k <<- function(x: F64) -> F64 x + 100
+| }
+| relay <- function(x: F64) -> F64 {
+|   cb()
+|   scaled(x)
+| }
+| for (i in 1:3) print(relay(1))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry rebind.R
@@ -47,7 +61,9 @@ expect stdout "[1] 2\n[1] 2\n[1] 2\n[1] 101\n"
 expect stdout "[1] 2.5\n[1] 2.5\n[1] 2.5\n[1] 5.5\n[1] 8\n"
 expect stdout "[1]   10   10   10 1000"
 expect stdout "[1] 9\n[1] 9\n[1] 9\n[1] 6\n"
+expect stdout "rebinding k\n[1] 1010\nrebinding k\n[1] 1010\nrebinding k\n[1] 1010\n"
 expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr "typed: `relay` runs in the interpreter: an R call it made rebound a function its native code calls"
 
 run ry run --runtime ry --aot rebind.R
 expect exit 0
@@ -55,3 +71,4 @@ expect stdout "[1] 2\n[1] 2\n[1] 2\n[1] 101\n"
 expect stdout "[1] 2.5\n[1] 2.5\n[1] 2.5\n[1] 5.5\n[1] 8\n"
 expect stdout "[1]   10   10   10 1000"
 expect stdout "[1] 9\n[1] 9\n[1] 9\n[1] 6\n"
+expect stdout "rebinding k\n[1] 1010\nrebinding k\n[1] 1010\nrebinding k\n[1] 1010\n"
