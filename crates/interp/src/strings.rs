@@ -15,6 +15,7 @@ use {
         },
         builtins::{BuiltinDef, builtin, internal},
         coerce::integer_digits,
+        conditions,
         format::{display_width, push_fixed, push_general, push_scientific},
         handles::{
             self, Args, Chars, Cx, Environment, Fresh, Gc, Integer, List, Local, Logical, Raw,
@@ -931,7 +932,7 @@ fn format_call<'s>(
         };
         // GNU R names the format only when there is one.
         if format_count == 1 {
-            handles::warning(
+            conditions::warn(
                 context,
                 format!(
                     "{what} not used by format '{}'",
@@ -939,7 +940,7 @@ fn format_call<'s>(
                 ),
             )?;
         } else {
-            handles::warning(context, format!("{what} not used by format"))?;
+            conditions::warn(context, format!("{what} not used by format"))?;
         }
     }
     Ok(result.finish().value())
@@ -1234,7 +1235,7 @@ fn format_conversion<'s>(
                         });
                         argument.whole = Some(whole);
                         if whole && numbers.contains(&-2147483648.0) {
-                            handles::warning(
+                            conditions::warn(
                                 context,
                                 "NAs introduced by coercion to integer range",
                             )?;
@@ -2259,7 +2260,7 @@ fn do_abbreviate<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
         }
     }
     if use_classes != 0 && shortened_non_ascii {
-        handles::warning(context, "abbreviate used with non-ASCII chars")?;
+        conditions::warn(context, "abbreviate used with non-ASCII chars")?;
     }
     handles::copy_attributes(context, arguments.value(0), &mut result)?;
     Ok(result.finish().value())
@@ -2377,7 +2378,7 @@ fn single_string<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
         _ => return Err(error("argument must be a character vector of length 1")),
     };
     if text.len() > 1 {
-        handles::warning(
+        conditions::warn(
             context,
             "argument should be a character vector of length 1\nall but the first element will be ignored",
         )?;
@@ -2758,7 +2759,7 @@ fn substitute<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) 
         _ => return Err(error("invalid 'replacement' argument")),
     };
     if replacement.len() > 1 {
-        handles::warning(
+        conditions::warn(
             context,
             "argument 'replacement' has length > 1 and only the first element will be used",
         )?;
@@ -3138,7 +3139,7 @@ fn do_grep_raw<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
     let all = is_true(context, arguments.value(6));
     let mut invert = is_true(context, arguments.value(7));
     if invert && !value {
-        handles::warning(context, "argument 'invert = TRUE' will be ignored")?;
+        conditions::warn(context, "argument 'invert = TRUE' will be ignored")?;
         invert = false;
     }
     let needle = pattern.as_slice(context).to_vec();
@@ -3146,7 +3147,7 @@ fn do_grep_raw<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
     let start = offset as usize - 1;
     let regex = if fixed {
         if ignore_case {
-            handles::warning(context, "argument 'ignore.case = TRUE' will be ignored")?;
+            conditions::warn(context, "argument 'ignore.case = TRUE' will be ignored")?;
         }
         None
     } else {
@@ -3495,7 +3496,7 @@ fn pattern_options(
     fixed: bool,
 ) -> R<PatternOptions> {
     for message in overridden_flags(ignore_case, perl, fixed) {
-        handles::warning(context, message)?;
+        conditions::warn(context, message)?;
     }
     Ok(effective_options(ignore_case, perl, fixed))
 }
@@ -3579,7 +3580,7 @@ fn pattern_argument<'s>(
         _ => return Err(error("invalid 'pattern' argument")),
     };
     if pattern.len() > 1 {
-        handles::warning(
+        conditions::warn(
             context,
             "argument 'pattern' has length > 1 and only the first element will be used",
         )?;
@@ -3704,12 +3705,12 @@ fn valid_subject(
         }
     };
     if let Some(translation) = translation {
-        handles::warning(context, translation)?;
+        conditions::warn(context, translation)?;
     }
     if fatal {
         return Err(error(message));
     }
-    handles::warning(context, message)?;
+    conditions::warn(context, message)?;
     Ok(false)
 }
 
@@ -5151,7 +5152,7 @@ impl CompileFailure {
 fn compile_failure(context: &mut Cx<'_>, failure: CompileFailure) -> Unwind {
     match failure
         .warning
-        .map(|message| handles::warning(context, message))
+        .map(|message| conditions::warn(context, message))
     {
         Some(Err(unwind)) => unwind,
         _ => failure.error,

@@ -11,8 +11,8 @@ use {
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
             self, Cx, Environment, Gc, Held, Integer, Language, Local, Pairlist, Promise, Str,
-            StringFill, Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense,
-            get_attribute, is_s4, null, safe, set_class, symbol, unreferenced,
+            Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense, get_attribute,
+            is_s4, null, safe, set_class, symbol, text_vector, unreferenced,
         },
         interp,
         unwind::{R, Unwind, error, error_in},
@@ -207,15 +207,6 @@ fn shape(context: &mut Cx<'_>, object: Local<'_>) -> u8 {
         }
     };
     if matrix { 2 } else { 1 }
-}
-
-/// A new character vector of `texts`.
-fn text_vector<'s>(context: &mut Cx<'s>, texts: &[&str]) -> R<Local<'s, Str>> {
-    let mut fill = StringFill::new(context, texts.len())?;
-    for text in texts {
-        fill.push_text(context, text)?;
-    }
-    Ok(fill.finish().finish())
 }
 
 /// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class

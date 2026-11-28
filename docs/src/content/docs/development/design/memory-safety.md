@@ -638,7 +638,10 @@ cells whose mode chooses promises, eager values or argument references, and tier
 `handles::call_with_plan`; and the environment builtins of `envir.rs` (environments, bindings,
 `sys.*`, `parent.frame`, the search path, options, namespaces, `do.call`, `mapply`, `rapply`,
 `eapply` and the dots builtins), but for `lapply` and `vapply`, whose element calls stay raw with
-tier 0's call path. A dispatched
+tier 0's call path; and the condition system (`conditions.rs`: signalling, the default error and
+warning handlers, and the builtins of the handler and restart stacks), whose stacks keep raw
+fields that the heap traces and that safe code reads through `handles::handler_entries` and
+`handles::restart_entries`. A dispatched
 call's method variables cross into handles as `handles::MethodVariables`, a view over the
 dispatcher's pairs that every layer down to the frame push takes, so they are never copied.
 Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark
@@ -695,7 +698,7 @@ The order:
    last, because a leaf rarely holds a value across a safepoint. The frame machinery writes a
    slot frame's registers through `LiveFrame` (`store_slot`, `move_slots_to_cells`), which borrows the
    context. The bytecode loop's call and return handlers stay raw (above), so the leaf builtins
-   come next, the condition system first.
+   come next, the S4 core first.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

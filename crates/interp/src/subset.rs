@@ -9,7 +9,7 @@ use {
             Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
             special,
         },
-        coerce,
+        coerce, conditions,
         distributions::SessionDeviates,
         element_access::direct_subset2,
         eval::{self, value_of},
@@ -1577,9 +1577,9 @@ fn not_subsettable_error(
         "object of type '{}' is not subsettable",
         object.r_type().name()
     );
-    handles::classed_error(
+    conditions::classed_error(
         context,
-        call,
+        call.unwrap_or_else(handles::unbound),
         &message,
         &["notSubsettableError", "error", "condition"],
         &[("object", object)],
@@ -1863,9 +1863,9 @@ fn bounds_error<'s>(
         Ok(subscript) => subscript,
         Err(failure) => return failure,
     };
-    handles::classed_error(
+    conditions::classed_error(
         context,
-        call,
+        call.unwrap_or_else(handles::unbound),
         message,
         &["subscriptOutOfBoundsError", "error", "condition"],
         &[
@@ -2597,13 +2597,13 @@ fn name_position<'s>(
             // GNU R names the call once: the warning about a second match has none.
             if rank > 0 {
                 let message = format!("further partial match of '{text}' to '{matched}'");
-                handles::warning_in(context, null(), message)?;
+                conditions::warn_in(context, null(), message)?;
                 continue;
             }
             let message = format!("partial match of '{text}' to '{matched}'");
             match call {
-                Some(call) => handles::warning_in(context, call, message)?,
-                None => handles::warning(context, message)?,
+                Some(call) => conditions::warn_in(context, call, message)?,
+                None => conditions::warn(context, message)?,
             }
         }
     }
@@ -2686,9 +2686,9 @@ fn subset2_value<'s>(
         // GNU R attaches the object only when it is NULL.
         let object_field = [("object", null())];
         let fields: &[(&str, Local<'_>)] = if is_nil { &object_field } else { &[] };
-        return Err(handles::classed_error(
+        return Err(conditions::classed_error(
             context,
-            call,
+            call.unwrap_or_else(handles::unbound),
             "missing subscript",
             &["MissingSubscriptError", "error", "condition"],
             fields,
@@ -3798,7 +3798,7 @@ pub(crate) fn assign_subset<'s>(
         let quoted = handles::quoted(context, value)?;
         value = handles::call_value(context, function, &[quoted])?;
     } else if value.r_type() == SexpType::Object {
-        handles::warning_in(
+        conditions::warn_in(
             context,
             call,
             "implicit list embedding of S4 objects is deprecated",
@@ -3853,7 +3853,7 @@ pub(crate) fn assign_subset<'s>(
         if crate::system::r_at_least_release(4, 6, 1) {
             return Err(error("'symbol' object cannot be coerced to type 'list'"));
         }
-        handles::warning_in(
+        conditions::warn_in(
             context,
             call,
             "'symbol' object cannot be coerced to type 'list'",
@@ -3997,7 +3997,7 @@ pub(crate) fn assign_subset<'s>(
             return Err(handles::error_in(call, "replacement has length zero"));
         }
         if rows > 0 && !rows.is_multiple_of(value_count) {
-            handles::warning(
+            conditions::warn(
                 context,
                 "number of items to replace is not a multiple of replacement length",
             )?;
@@ -4040,7 +4040,7 @@ pub(crate) fn assign_subset<'s>(
     // GNU R attributes this warning to the current call, not the `[<-` call: the assignment at
     // its own level, else the closure call, which for `NextMethod` is `NextMethod(.Generic)`.
     if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
-        handles::warning(
+        conditions::warn(
             context,
             "number of items to replace is not a multiple of replacement length",
         )?;
@@ -4986,9 +4986,9 @@ pub(crate) fn assign_subset2<'s>(
         } else {
             &object_field
         };
-        return Err(handles::classed_error(
+        return Err(conditions::classed_error(
             context,
-            Some(call),
+            call,
             "missing subscript",
             &["MissingSubscriptError", "error", "condition"],
             fields,
@@ -5519,7 +5519,7 @@ pub(crate) fn assign_dollar<'s>(
         | SexpType::Pairlist
         | SexpType::Language => object,
         _ if kind.is_atomic() => {
-            handles::warning_in(context, call, "Coercing LHS to a list")?;
+            conditions::warn_in(context, call, "Coercing LHS to a list")?;
             handles::coerce(context, object, SexpType::List)?
         }
         _ => return Err(not_subsettable_error(context, Some(call), object)),
@@ -6445,27 +6445,27 @@ fn do_matrix<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
     };
     if count > 1 && !total.is_multiple_of(count) {
         if unrelated(rows) {
-            handles::warning(
+            conditions::warn(
                 context,
                 format!(
                     "data length [{count}] is not a sub-multiple or multiple of the number of rows [{rows}]"
                 ),
             )?;
         } else if unrelated(cols) {
-            handles::warning(
+            conditions::warn(
                 context,
                 format!(
                     "data length [{count}] is not a sub-multiple or multiple of the number of columns [{cols}]"
                 ),
             )?;
         } else if total != count {
-            handles::warning(
+            conditions::warn(
                 context,
                 format!("data length differs from size of matrix: [{count} != {rows} x {cols}]"),
             )?;
         }
     } else if count > 1 && total == 0 {
-        handles::warning(context, "non-empty data for zero-extent matrix")?;
+        conditions::warn(context, "non-empty data for zero-extent matrix")?;
     }
     let mut result = recycled(context, data, total, rows, by_row)?;
     let mut dim = context.alloc::<Integer>(2)?;
@@ -6503,7 +6503,7 @@ fn matrix_extent<'s>(
     if extent.r_type() == SexpType::Real && handles::length(context, extent) > 0 {
         let (_, out_of_range) = coerce::real_to_int(real_element(context, extent, 0)?);
         if out_of_range {
-            handles::warning(context, "NAs introduced by coercion to integer range")?;
+            conditions::warn(context, "NAs introduced by coercion to integer range")?;
         }
     }
     match handles::integer_scalar(context, extent) {
@@ -7380,7 +7380,7 @@ fn bind<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, by_row: bool) -> R<L
                     warned = true;
                     // The warning names the `rbind` or `cbind` closure call, not the internal.
                     let call = arguments.closure_call(context);
-                    handles::warning_in(
+                    conditions::warn_in(
                         context,
                         call,
                         format!(
