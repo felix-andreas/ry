@@ -1,0 +1,51 @@
+# List functions build their result from the source arrays' packed items, so a result of one item
+# kind is a ry list of that storage (`TRUE double`), and an item of another kind is an error. An
+# R list stays an R list. A callback that changes the source list through `<<-` changes a copy, so
+# `List.map` maps the items it started with.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+
+file lists.R
+| show <- function(label, x) cat(label, .ry_is_list(x), typeof(x), deparse(x), "\n")
+| xs <- [1.5, 2.5, 3.5]
+| show("append", List.append(xs, 4.5))
+| show("concat", List.concat(xs, [9.5]))
+| cat(tryCatch(List.concat(xs, [7i64]), error = conditionMessage), "\n")
+| show("set", List.set(xs, 2i64, 0.5))
+| show("drop_at", List.drop_at(xs, 2i64))
+| show("swap", List.swap(xs, 1i64, 3i64))
+| show("chunks", List.chunks_of(xs, 2i64))
+| show("intersperse", List.intersperse(["a", "b", "c"], "-"))
+| show("keep_if", List.keep_if(xs, function(x) x > 2))
+| show("sort_desc", List.sort_desc(xs))
+| show("join", List.join([["x"], ["y", "z"]]))
+| show("to_r", List.to_r(xs))
+| show("r list", List.append(list(1, "x"), 2))
+| ys <- [1.0, 2.0, 3.0]
+| seen <- List.map(ys, function(y) { ys[[1]] <<- 100; y * 2 })
+| show("mutated", seen)
+| show("source", ys)
+| total <- List.walk(ys, 0.0, function(state, y) state + y)
+| print(total)
+
+run ry run --runtime ry lists.R
+expect exit 0
+expect stdout "append TRUE double [1.5, 2.5, 3.5, 4.5]"
+expect stdout "concat TRUE double [1.5, 2.5, 3.5, 9.5]"
+expect stdout "1.5 does not fit I64, the type of the list's other items"
+expect stdout "set TRUE double [1.5, 0.5, 3.5]"
+expect stdout "drop_at TRUE double [1.5, 3.5]"
+expect stdout "swap TRUE double [3.5, 2.5, 1.5]"
+expect stdout "chunks TRUE list [[1.5, 2.5], [3.5]]"
+expect stdout "intersperse TRUE character [\"a\", \"-\", \"b\", \"-\", \"c\"]"
+expect stdout "keep_if TRUE double [2.5, 3.5]"
+expect stdout "sort_desc TRUE double [3.5, 2.5, 1.5]"
+expect stdout "join TRUE character [\"x\", \"y\", \"z\"]"
+expect stdout "to_r FALSE double c(1.5, 2.5, 3.5)"
+expect stdout "r list FALSE list list(1, \"x\", 2i64)"
+expect stdout "mutated TRUE double [2, 4, 6]"
+expect stdout "source TRUE double [100, 2, 3]"
+expect stdout "[1] 105"

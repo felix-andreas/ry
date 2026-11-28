@@ -343,3 +343,12 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 **Status:** settled (`reference/standard-library.mdx`, "No function returns `NaN`").
 
 - A typed port found that `Num.sqrt` stops on `NaN` rather than returning it. That is the library's contract: no function takes or returns `NaN` except `Num.is_nan`, so a `NaN` never travels silently through typed code, and `Num.sqrt_checked` returns the failure as a tag. A port that may meet `NaN` tests with `Num.is_nan` first.
+
+## Interpreted List functions build results from packed runs
+
+**Status:** settled.
+
+- A List function that returns a new list (`append`, `concat`, `set`, `drop_at`, `swap`, `join`, `chunks_of`, `intersperse`, `split_on`, `keep_if`, ...) describes its result as runs of source lists and single items (`Piece`, `assembled` in `crates/interp/src/standard_library.rs`), or as positions into one list (`picked`). When every run is a packed ry list of one item kind and every item fits it, the result is copied storage to storage; otherwise it boxes each item and builds through `sequence`, which keeps the error wording and the R-list result for an R-list input. Boxing a million doubles cost about 60 MiB of scalars and 1.4 s per `List.append` in a debug build; the packed copy takes 0.011 s.
+- A callback reads one item at a time inside a handle scope, with the list's reference count raised for the walk (`holding`), so a callback that assigns into the list through `<<-` changes a copy and the walk sees the items it started with, as a boxed snapshot did (scenario `list-packed-results`).
+- `List.concat` into an owned list grows it in place (`grown_to`, shared with `append_owned`), and `List.sort_asc`/`sort_desc` sort a double or integer list in its storage.
+- Still boxed: `List.sort_with`, the results `List.map` collects, `Str.join_with`, the UTF builders, `Dict.from_list`, `Set.from_list` and `concat` onto an owned R list.
