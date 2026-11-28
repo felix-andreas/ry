@@ -15172,8 +15172,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .iter()
                 .enumerate()
                 .any(|(other, &ty)| other != index && mentioned(ty))
-                || callback.positional.iter().skip(1).any(|&ty| mentioned(ty) || mentions_var(db, ty, accumulator))
-                || callback.named.iter().any(|parameter| mentioned(parameter.ty));
+                || callback
+                    .positional
+                    .iter()
+                    .skip(1)
+                    .chain(callback.named.iter().map(|parameter| &parameter.ty))
+                    .chain(callback.variadic.iter().map(|rest| &rest.element))
+                    .any(|&ty| mentions_var(db, ty, accumulator));
             if !elsewhere && !targets.contains(&accumulator) {
                 targets.push(accumulator);
             }
@@ -27219,7 +27224,9 @@ fn mentions_var<'db>(db: &'db dyn Db, ty: Ty<'db>, var: InferenceVar) -> bool {
         return true;
     }
     let mut found = false;
-    for_each_child_type(db, ty, &mut |child| found = found || mentions_var(db, child, var));
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_var(db, child, var)
+    });
     found
 }
 

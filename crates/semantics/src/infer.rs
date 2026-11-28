@@ -1372,10 +1372,8 @@ impl<'db> InferenceTable<'db> {
                                 .unwrap_or(Constraint::Unconstrained);
                             declared.join(Constraint::ArithmeticOrNumber) == Some(declared)
                         }
-                        _ => {
-                            constraint_rejects(db, self, Constraint::ArithmeticOrNumber, expected)
-                                .is_none()
-                        }
+                        _ => constraint_rejects(db, self, Constraint::ArithmeticOrNumber, expected)
+                            .is_none(),
                     };
                     admits.then_some(Ok(()))
                 }
@@ -1450,7 +1448,10 @@ impl<'db> InferenceTable<'db> {
             return Some(var);
         }
         let mut matching = self.fold_targets.iter().copied().filter(|&target| {
-            match (*expected.kind(db), self.shallow_resolve(db, Ty::new(db, TyKind::Var(target)))) {
+            match (
+                *expected.kind(db),
+                self.shallow_resolve(db, Ty::new(db, TyKind::Var(target))),
+            ) {
                 (TyKind::Var(var), _) => self.find(var) == self.find(target),
                 (_, resolved) => resolved == expected,
             }
