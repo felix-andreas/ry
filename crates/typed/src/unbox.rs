@@ -48,50 +48,75 @@ pub fn unbox(function: &mut Function) {
     }
 }
 
-/// Removes every instruction whose result nothing reads and that neither fails nor does
-/// anything else, and then those whose results only removed instructions read. A record that
-/// became its fields leaves such instructions behind: the value of a field no read asks for
-/// is still computed, and for a string that is an allocation.
+/// Removes every instruction whose result nothing needs and that neither fails nor does
+/// anything else. A result is needed when a terminator, an instruction that fails or does
+/// something else, or the instruction of another needed result reads it, so a chain of unread
+/// values goes in one pass, and so does a variable read only by its own update: the count a
+/// fused list leaves where nothing asks for its length. A record that became its fields leaves
+/// such instructions behind too: the value of a field no read asks for is still computed, and
+/// for a string that is an allocation.
+///
+/// It must run before `ownership::insert`: a `Take`, a `Dup` or a consuming `Push` assigns a
+/// local and cannot fail, yet removing it leaks or skips a slot clear.
 pub fn remove_unread(function: &mut Function) {
-    let mut reads = vec![0u32; function.locals.len()];
-    for block in &function.blocks {
-        for inst in &block.insts {
-            for operand in inst.op.operands() {
-                reads[operand.0 as usize] += 1;
+    let locals = function.locals.len();
+    let kept = |inst: &Inst| inst.op.can_fail() || inst.assigned().is_empty();
+    // The instructions assigning each local, as runs of one flat array.
+    let mut starts = vec![0u32; locals + 1];
+    for inst in function.blocks.iter().flat_map(|block| &block.insts) {
+        for local in inst.assigned() {
+            starts[local.0 as usize + 1] += 1;
+        }
+    }
+    for index in 1..starts.len() {
+        starts[index] += starts[index - 1];
+    }
+    let mut filled = starts.clone();
+    let mut writers = vec![(0u32, 0u32); starts[locals] as usize];
+    let mut needed = Bits::new(locals);
+    let mut pending: Vec<Local> = Vec::new();
+    let need = |local: Local, needed: &mut Bits, pending: &mut Vec<Local>| {
+        if !needed.contains(local.0 as usize) {
+            needed.insert(local.0 as usize);
+            pending.push(local);
+        }
+    };
+    for (block, body) in function.blocks.iter().enumerate() {
+        for (index, inst) in body.insts.iter().enumerate() {
+            for local in inst.assigned() {
+                let slot = &mut filled[local.0 as usize];
+                writers[*slot as usize] = (block as u32, index as u32);
+                *slot += 1;
+            }
+            if kept(inst) {
+                for operand in inst.op.operands() {
+                    need(operand, &mut needed, &mut pending);
+                }
             }
         }
-        match block.terminator {
-            Terminator::Branch { condition, .. } => reads[condition.0 as usize] += 1,
-            Terminator::Return(value) => reads[value.0 as usize] += 1,
+        match body.terminator {
+            Terminator::Branch { condition, .. } => need(condition, &mut needed, &mut pending),
+            Terminator::Return(value) => need(value, &mut needed, &mut pending),
             Terminator::Jump(_) | Terminator::Fail => {}
         }
     }
-    // An instruction is read only by instructions after it or around a loop, so a few passes
-    // from the back remove a chain of them.
-    for _ in 0..MAX_ROUNDS {
-        let mut removed = false;
-        for block in function.blocks.iter_mut().rev() {
-            let mut index = block.insts.len();
-            while index > 0 {
-                index -= 1;
-                let inst = &block.insts[index];
-                let assigned = inst.assigned();
-                if assigned.is_empty()
-                    || inst.op.can_fail()
-                    || assigned.iter().any(|local| reads[local.0 as usize] != 0)
-                {
-                    continue;
-                }
-                for operand in inst.op.operands() {
-                    reads[operand.0 as usize] -= 1;
-                }
-                block.insts.remove(index);
-                removed = true;
+    while let Some(local) = pending.pop() {
+        let at = local.0 as usize;
+        for &(block, index) in &writers[starts[at] as usize..starts[at + 1] as usize] {
+            let inst = &function.blocks[block as usize].insts[index as usize];
+            for operand in inst.op.operands() {
+                need(operand, &mut needed, &mut pending);
             }
         }
-        if !removed {
-            break;
-        }
+    }
+    for block in &mut function.blocks {
+        block.insts.retain(|inst| {
+            kept(inst)
+                || inst
+                    .assigned()
+                    .iter()
+                    .any(|local| needed.contains(local.0 as usize))
+        });
     }
 }
 

@@ -9,7 +9,8 @@ use {
     smallvec::SmallVec,
     typed::{
         ir::{
-            Arith, BlockId, Builder, Compare, Constant, Function, Item, Local, Op, Terminator, Type,
+            Arith, BlockId, Builder, Compare, Constant, Function, Item, Local, Op, Reduce,
+            Terminator, Type,
         },
         loops::fuse_loops,
         unbox::remove_unread,
@@ -86,6 +87,8 @@ enum Stage {
         leaves_at: Option<i64>,
         starts_at_length: bool,
     },
+    /// `List.sum`: the sum of the items, added in order.
+    Sum { input: usize },
 }
 
 /// A function of `ROWS` and `LIMIT` that runs the stages in order and returns the sum of what
@@ -218,6 +221,11 @@ fn build(pipeline: &Pipeline) -> Function {
                 builder.push(Some(state), Op::Copy(next));
                 next_position(&mut builder, &positions);
                 add_to(&mut builder, tally, state);
+            }
+            Stage::Sum { input } => {
+                let total =
+                    builder.emit(Type::I64, Op::Reduce(Reduce::Sum, Item::I64, lists[input]));
+                add_to(&mut builder, tally, total);
             }
         }
     }
@@ -499,6 +507,13 @@ fn run(function: &Function, rows: &[i64], limit: i64) -> Option<Value> {
                         return None;
                     }
                     Value::List(Vec::new())
+                }
+                Op::Reduce(Reduce::Sum, Item::I64, from) => {
+                    let mut total: i64 = 0;
+                    for &item in list(&locals, from) {
+                        total = total.checked_add(item)?;
+                    }
+                    Value::Number(total)
                 }
                 Op::Poll => continue,
                 ref other => panic!("the evaluator does not know {other:?}"),
@@ -997,7 +1012,7 @@ fn random_pipeline(rng: &mut Rng) -> Pipeline {
     for _ in 0..2 + rng.below(3) {
         let input = random_input(rng, made);
         let body = random_body(rng);
-        stages.push(match rng.below(3) {
+        stages.push(match rng.below(4) {
             0 => {
                 made += 1;
                 Stage::Map {
@@ -1022,6 +1037,7 @@ fn random_pipeline(rng: &mut Rng) -> Pipeline {
                     made_early: rng.once_in(3),
                 }
             }
+            2 => Stage::Sum { input },
             _ => Stage::Walk {
                 input,
                 body,
@@ -1065,4 +1081,81 @@ fn fused_pipelines_compute_what_unfused_ones_do() {
         fused_some * 4 > pipelines,
         "only {fused_some} of {pipelines} pipelines had a list fused away"
     );
+}
+
+#[test]
+fn two_maps_and_a_walk_become_one_loop() {
+    for lengths in [false, true] {
+        assert_fuses_all(&Pipeline {
+            stages: vec![map_of(0), map_of(1), walk_of(2)],
+            lengths,
+            ..Pipeline::default()
+        });
+    }
+}
+
+#[test]
+fn a_sum_of_a_filled_list_becomes_part_of_the_loop_that_fills_it() {
+    for stages in [
+        vec![map_of(0), Stage::Sum { input: 1 }],
+        vec![map_of(0), map_of(1), Stage::Sum { input: 2 }],
+        vec![keep_of(0), Stage::Sum { input: 1 }],
+    ] {
+        for lengths in [false, true] {
+            assert_fuses_all(&Pipeline {
+                stages: stages.clone(),
+                lengths,
+                ..Pipeline::default()
+            });
+        }
+    }
+}
+
+#[test]
+fn a_sum_with_no_loop_to_join_stays_a_sum() {
+    for pipeline in [
+        Pipeline {
+            stages: vec![map_of(0), Stage::Sum { input: 0 }],
+            ..Pipeline::default()
+        },
+        Pipeline {
+            stages: vec![map_of(0), Stage::Sum { input: 1 }],
+            returns: Some(1),
+            ..Pipeline::default()
+        },
+    ] {
+        let (_, fused) = fused(&pipeline);
+        assert_eq!(
+            count(&fused, |op| matches!(op, Op::Reduce(..))),
+            1,
+            "{fused}"
+        );
+    }
+}
+
+#[test]
+fn the_count_of_a_fused_list_goes_when_nothing_asks_for_its_length() {
+    for (lengths, steps) in [(false, 1), (true, 2)] {
+        let fused = assert_fuses_all(&Pipeline {
+            stages: vec![
+                Stage::Keep {
+                    input: 0,
+                    body: Body::default(),
+                    modulus: 3,
+                    leaves_at: None,
+                    refuses_empty: false,
+                    capacity: Capacity::None,
+                    made_early: false,
+                },
+                walk_of(1),
+            ],
+            lengths,
+            ..Pipeline::default()
+        });
+        assert_eq!(
+            count(&fused, |op| matches!(op, Op::Step(..))),
+            steps,
+            "{fused}"
+        );
+    }
 }

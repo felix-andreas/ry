@@ -4808,6 +4808,33 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- [1.5, 0, 4]; FUNCTION(x) }",
             ],
         ),
+        // Two maps of doubles and a walk become one loop through the `NaN` test the first
+        // fusion leaves, and a mapped `NaN` in the second map still gives up the call.
+        (
+            "function(xs: List<F64>) -> F64 { a <- List.map(xs, \\(x) x / 2)\n \
+             b <- List.map(a, \\(x) x / x)\n List.walk(b, 0.25, \\(acc, v) acc + v) }",
+            &[
+                "{ x <- [1.5, 2, 4]; FUNCTION(x) }",
+                "{ x <- [1.5, 0, 4]; FUNCTION(x) }",
+            ],
+        ),
+        // A sum of a mapped list adds the items where the map makes them, in order, and gives
+        // up on an overflow of the running total as the sum on its own does.
+        (
+            "function(xs: List<I64>) -> I64 List.sum(List.map(List.map(xs, \\(x) x + 1i64), \\(x) x * 3i64))",
+            &[
+                "{ x <- [1i64, 2i64, 39i64]; FUNCTION(x) }",
+                "{ x <- .ry_items(List.with_capacity(0i64), \"I64\"); FUNCTION(x) }",
+                "{ x <- [3074457345618258600i64, 3074457345618258600i64]; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(xs: List<F64>) -> F64 List.sum(List.map(xs, \\(x) x * x / 3))",
+            &[
+                "{ x <- [1.5, 2, 4]; FUNCTION(x) }",
+                "{ x <- [1e300, 1e300]; FUNCTION(x) }",
+            ],
+        ),
         // A walk that assigns what the loop before it reads is not moved into it.
         (
             "function(xs: List<I64>) -> I64 { seen <- 0i64\n a <- List.map(xs, \\(x) x + seen)\n \

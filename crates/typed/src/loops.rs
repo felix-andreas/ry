@@ -11,9 +11,9 @@
 //! function, and [`crate::unbox`] replaces them with their fields. A list is fused away when:
 //!
 //! - One counted loop, the producer, fills it once per iteration: a `Push` onto a list that starts
-//!   empty, or a `Set` at its own counter into a list as long as the one it counts over. Making the
-//!   list cannot fail (a capacity is known not to be negative); a `NaN` stored in a list of doubles
-//!   gives up the call, and that test stays where the store was.
+//!   empty, or a `Set` at its own counter (or a copy of it) into a list as long as the one it
+//!   counts over. Making the list cannot fail (a capacity is known not to be negative); a `NaN`
+//!   stored in a list of doubles gives up the call, and that test stays where the store was.
 //! - Another counted loop, the consumer, reads it from first to last without leaving early.
 //!   Nothing else reads the list but its length.
 //! - The consumer follows the producer on one straight path whose only branches give up the call.
@@ -21,13 +21,19 @@
 //!   call a function, so running the consumer's body earlier can only change which of two
 //!   failures gives up the call, and every failure gives it up the same way.
 //!
+//! A `List.sum` of an `I64` or `F64` list is a consumer too: the pass tries it as a loop that adds
+//! the items in order, as the sum's helper does, and keeps that loop only where it fuses.
+//!
 //! The consumer's setup (its empty result, a starting state) moves to the end of the block entering
 //! the producer, and the list's length becomes a counter for a later `List.len`. The pass runs
 //! before reference counts exist, while `Push` and `Set` return a new list.
 
 use {
     crate::{
-        ir::{Block, BlockId, Constant, Function, Inst, Item, Local, Op, Terminator, Type},
+        ir::{
+            Arith, Block, BlockId, Compare, Constant, Function, Inst, Item, Local, Op, Reduce,
+            Terminator, Type,
+        },
         ownership::Bits,
     },
     smallvec::SmallVec,
@@ -44,19 +50,156 @@ const MAX_BETWEEN: usize = 8;
 /// How many variables a list may pass through between the producer and the consumer.
 const MAX_COPIES: usize = 8;
 
-/// Fuses every producer of `function` with its consumer.
+/// Fuses every producer of `function` with its consumer, a loop or a sum of the list.
 pub fn fuse_loops(function: &mut Function) {
-    for _ in 0..MAX_FUSIONS {
-        let steps = function
-            .blocks
-            .iter()
-            .flat_map(|block| &block.insts)
-            .filter(|inst| matches!(inst.op, Op::Step(..)))
-            .count();
-        if steps < 2 || !fuse_one(function) {
+    let mut fusions = 0;
+    while fusions < MAX_FUSIONS && steps(function) >= 2 && fuse_one(function) {
+        fusions += 1;
+    }
+    // A sum of a list becomes a loop that adds its items in order, which computes what the
+    // helper does, and stays one only where that loop then fuses with the loop filling the list.
+    let mut tried: SmallVec<[Local; 4]> = SmallVec::new();
+    while fusions < MAX_FUSIONS && steps(function) >= 1 {
+        let Some((site, total, list)) = next_sum(function, &tried) else {
             break;
+        };
+        tried.push(total);
+        let mut trial = function.clone();
+        let counter = expand_sum(&mut trial, site, total, list);
+        if fuse_one(&mut trial)
+            && !trial
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| matches!(inst.op, Op::ItemAt(_, at) if at == counter))
+        {
+            *function = trial;
+            fusions += 1;
         }
     }
+}
+
+fn steps(function: &Function) -> usize {
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter(|inst| matches!(inst.op, Op::Step(..)))
+        .count()
+}
+
+/// The first `List.sum` of an `I64` or `F64` list not yet tried: where it is, the total it
+/// assigns and the list it reads.
+fn next_sum(function: &Function, tried: &[Local]) -> Option<(Site, Local, Local)> {
+    function
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(block, body)| {
+            body.insts.iter().enumerate().find_map(|(index, inst)| {
+                let summed = matches!(
+                    inst.op,
+                    Op::Reduce(Reduce::Sum, Item::I64, _)
+                        | Op::Reduce(Reduce::ListSum, Item::Dbl, _)
+                );
+                match (summed, inst.dest, &inst.op) {
+                    (true, Some(total), &Op::Reduce(_, _, list)) if !tried.contains(&total) => {
+                        Some(((block as u32, index as u32), total, list))
+                    }
+                    _ => None,
+                }
+            })
+        })
+}
+
+/// Replaces the sum at `site` with a counted loop of the shape [`Loop`] that adds the items of
+/// `list` to `total` from first to last, as `ry_sum_i64` and `ry_list_sum_dbl` do (an `I64`
+/// addition gives up on overflow there too). Returns the loop's counter.
+fn expand_sum(function: &mut Function, site: Site, total: Local, list: Local) -> Local {
+    let item = match function.ty(total) {
+        Type::I64 => Item::I64,
+        _ => Item::Dbl,
+    };
+    let zero = match item {
+        Item::I64 => Constant::I64(0),
+        _ => Constant::Dbl(0.0),
+    };
+    let summed = function.ty(total);
+    let mut local = |ty: Type| {
+        function.locals.push(ty);
+        Local(function.locals.len() as u32 - 1)
+    };
+    let length = local(Type::I64);
+    let start = local(Type::I64);
+    let end = local(Type::I64);
+    let counter = local(Type::I64);
+    let empty = local(Type::Bool);
+    let initial = local(summed);
+    let running = local(summed);
+    let value = local(summed);
+    let added = local(summed);
+    let done = local(Type::Bool);
+    let one = local(Type::I64);
+    let next = local(Type::I64);
+
+    let guard = site.0 as usize;
+    let first_new = function.blocks.len() as u32;
+    let (before, header, step, exit) = (first_new, first_new + 1, first_new + 2, first_new + 3);
+    let insts = &mut function.blocks[guard].insts;
+    let after = insts.split_off(site.1 as usize + 1);
+    insts.pop();
+    insts.extend([
+        Inst::new(Some(length), Op::Length(list)),
+        Inst::new(Some(start), Op::Const(Constant::I64(1))),
+        Inst::new(Some(counter), Op::Copy(start)),
+        Inst::new(Some(end), Op::Copy(length)),
+        Inst::new(Some(initial), Op::Const(zero)),
+        Inst::new(Some(running), Op::Copy(initial)),
+        Inst::new(Some(empty), Op::Compare(Compare::Lt, Item::I64, end, start)),
+    ]);
+    let leaves = std::mem::replace(
+        &mut function.blocks[guard].terminator,
+        Terminator::Branch {
+            condition: empty,
+            then: BlockId(exit),
+            otherwise: BlockId(before),
+        },
+    );
+    function.blocks.extend([
+        Block {
+            insts: Vec::new(),
+            terminator: Terminator::Jump(BlockId(header)),
+        },
+        Block {
+            insts: vec![
+                Inst::new(None, Op::Poll),
+                Inst::new(Some(value), Op::ItemAt(list, counter)),
+                Inst::new(Some(added), Op::Arith(Arith::Add, item, running, value)),
+                Inst::new(Some(running), Op::Copy(added)),
+                Inst::new(Some(done), Op::Same(counter, end)),
+            ],
+            terminator: Terminator::Branch {
+                condition: done,
+                then: BlockId(exit),
+                otherwise: BlockId(step),
+            },
+        },
+        Block {
+            insts: vec![
+                Inst::new(Some(one), Op::Const(Constant::I64(1))),
+                Inst::new(Some(next), Op::Step(counter, one)),
+                Inst::new(Some(counter), Op::Copy(next)),
+            ],
+            terminator: Terminator::Jump(BlockId(header)),
+        },
+        Block {
+            insts: std::iter::once(Inst::new(Some(total), Op::Copy(running)))
+                .chain(after)
+                .collect(),
+            terminator: leaves,
+        },
+    ]);
+    counter
 }
 
 /// A loop as the lowerer emits it for a counter that runs from a start up to an end.
@@ -474,7 +617,7 @@ fn match_fusion(
                 return None;
             }
             let source = set_source(shape, &producer, producer_blocks, fill, creation, length)?;
-            if position != producer.counter {
+            if !holds_counter(shape, &producer, producer_blocks, fill, position) {
                 return None;
             }
             (item, Some(source))
@@ -664,15 +807,31 @@ fn set_source(
         let [from] = shape.predecessors[at as usize][..] else {
             return None;
         };
-        if !matches!(shape.terminator(from), Terminator::Jump(_))
-            || !producer_blocks.contains(from as usize)
-        {
+        // A list of doubles fused in an earlier round leaves a test that gives up on `NaN`.
+        let straight = match *shape.terminator(from) {
+            Terminator::Jump(_) => true,
+            Terminator::Branch {
+                then: BlockId(then),
+                otherwise: BlockId(otherwise),
+                ..
+            } => otherwise == at && gives_up(shape.function, then),
+            Terminator::Return(_) | Terminator::Fail => false,
+        };
+        if !straight || !producer_blocks.contains(from as usize) {
             return None;
         }
         at = from;
     }
     // The new list and the loop's end are both the length of one list, read while that list
-    // cannot have been assigned in between: on the straight path into the guard.
+    // cannot have been assigned in between: on the straight path into the guard. An earlier
+    // fusion leaves the length behind copies.
+    let mut length = length;
+    for _ in 0..MAX_COPIES {
+        match shape.definition(length)? {
+            (_, &Op::Copy(copied)) => length = copied,
+            _ => break,
+        }
+    }
     let (counted_at, &Op::Length(source)) = shape.definition(length)? else {
         return None;
     };
@@ -701,6 +860,64 @@ fn set_source(
             .only(source)
             .is_some_and(|site| assigned_before(site, counted_at) && assigned_before(site, end_at));
     stable.then_some(source)
+}
+
+/// Whether `position` holds the producer's counter where the `Set` at `fill` reads it: it is
+/// the counter, or its one assignment in the loop copies the counter on the straight path
+/// into the `Set`, as an earlier fusion leaves a consumer's position.
+fn holds_counter(
+    shape: &Shape,
+    producer: &Loop,
+    producer_blocks: &Bits,
+    fill: Site,
+    position: Local,
+) -> bool {
+    if position == producer.counter {
+        return true;
+    }
+    let mut assigned = producer_blocks.iter().flat_map(|block| {
+        shape.function.blocks[block]
+            .insts
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, inst)| {
+                inst.assigned()
+                    .contains(&position)
+                    .then_some(((block as u32, index as u32), &inst.op))
+            })
+    });
+    let (Some((site, &Op::Copy(copied))), None) = (assigned.next(), assigned.next()) else {
+        return false;
+    };
+    if copied != producer.counter {
+        return false;
+    }
+    // The counter changes only in the step block, which no straight path into the `Set`
+    // from inside the iteration crosses.
+    let mut at = fill.0;
+    for _ in 0..MAX_BETWEEN {
+        if at == site.0 {
+            return at != fill.0 || site.1 < fill.1;
+        }
+        let [from] = shape.predecessors[at as usize][..] else {
+            return false;
+        };
+        // A list of doubles fused in an earlier round leaves a test that gives up on `NaN`.
+        let straight = match *shape.terminator(from) {
+            Terminator::Jump(_) => true,
+            Terminator::Branch {
+                then: BlockId(then),
+                otherwise: BlockId(otherwise),
+                ..
+            } => otherwise == at && gives_up(shape.function, then),
+            Terminator::Return(_) | Terminator::Fail => false,
+        };
+        if !straight || !producer_blocks.contains(from as usize) || from == producer.step {
+            return false;
+        }
+        at = from;
+    }
+    false
 }
 
 /// The function with the list of `fusion` gone and its two loops one, or `None` when the
