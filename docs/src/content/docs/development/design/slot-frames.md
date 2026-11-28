@@ -114,7 +114,7 @@ it.
   holds is discarded with it (`finish_frame`, `outliving_cause`).
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
   `bytecode.rs`): which argument fills each formal's slot. The site marks itself seen on its first
-  call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
+  call, builds the plan on the second, and from then on `handles::call_with_plan` writes the arguments
   into the slots without matching. A site stops planning after eight misses (a closure with other
   formals or body than its plan's, or one it cannot plan for). Plans live outside the heap, in
   `CallPlans`, columns indexed by plan id; the site keeps the id in the unused feedback word of its
@@ -150,7 +150,7 @@ it.
   reads its row after collecting the arguments, which runs no R code; a generation counter that
   every store and free moves confirms the row is unchanged with one compare.
 - **Forwarding `...`.** A call that passes `...` appends the items the frame's `...` slot holds,
-  to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
+  to a closure (`collect_slot_dots`) or, forced, to a builtin (`slot_builtin_call`, when every other
   argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
   frame without an environment. The element call `FUN(X[[i]], ...)` of `lapply` and `vapply`
   appends the same items when it calls a closure from the slots (see "Element calls from slots"
@@ -212,7 +212,7 @@ compile-time probe (`Heap::probe`), the walk it emits (`codegen.rs`) and `jit_en
 
 | What | State it needs | Where |
 |---|---|---|
-| A promise the argument-reference path does not cover (see "Promises over a slot frame"), `delayedAssign` | empty | `slot_promise`, `slot_promises_into` |
+| A promise the argument-reference path does not cover (see "Promises over a slot frame"), `delayedAssign` | empty | `slot_promise`, `frame_promise`, `collect_slot_arguments` |
 | A closure created in the frame | empty | `slot_closure`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
 | `parent.frame()`, `sys.function`, `sys.frame(s)`, `environment()`, `as.environment(-1)`, `eval`'s numeric `envir` | empty, then whatever the code that receives it reads | `frame_env`, `frame_sys_parent` |
 | Code that the compiler did not translate and that runs in the frame | partial, for the variables it reads | `Op::Ast` (`<<-` targets other than one element of a variable, `...` forms), `BoundEval`, the debugger and `browser()` |
@@ -290,8 +290,8 @@ heap frame.
 ## Promises over a slot frame
 
 Most arguments are argument references (see below) and need no promise. A call from a slot frame
-makes real promises when the callee has no direct-call plan or takes a heap frame (`slot_promise`
-in `eval.rs`, `slot_promises_into` in `bytecode.rs`).
+makes real promises when the callee has no direct-call plan or takes a heap frame (`frame_promise`
+in `eval.rs`, `collect_slot_arguments` in `bytecode.rs`).
 
 - **Which calls.** Every argument is a constant, the missing marker, a symbol, or code the compiler
   compiled against the caller's slot table, and `...` passes on what the frame collected. A `..N`
@@ -451,12 +451,12 @@ The element call is evaluated in the frame's environment instead in these cases:
 A variable passed to a callee that takes its arguments straight into slots needs neither a promise
 allocation nor the caller's environment, because the callee's frame is above the caller's for as
 long as the callee runs. A slot frame passes such a variable as an argument reference to its slot
-(`eval::argument_reference`, from `slot_promises_into`), and a caller that has an environment
-passes a reference to the name in that environment (`eval::env_reference`, from
-`referenced_args_into`), so calls from test code and from frames with an environment allocate no
+(`eval::slot_reference`, from `collect_slot_arguments`), and a caller that has an environment
+passes a reference to the name in that environment (`eval::environment_reference`, from
+`collect_arguments`), so calls from test code and from frames with an environment allocate no
 promise either. Compiled argument code is passed the same way, as a code reference
 (`eval::code_reference` from a slot frame, `eval::env_code_reference` from a caller with an
-environment). The AST evaluator plans its calls too: `apply_call` asks `direct_sources` for the
+environment). The AST evaluator plans its calls too: `apply_call` asks `call_plan` for the
 callee's plan at each call and binds the references it builds with `call_with_plan`, as the
 bytecode call instruction does. It passes constants as references as well, because lazyeval-style
 native code reads a promise's environment and the AST evaluator is what runs uncompiled package

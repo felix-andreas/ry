@@ -1151,7 +1151,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
 | Frames as slot arrays, with an environment that binds a variable only when a lookup asks for it | Ř, V8 | built | binding cells, promises and environments per call (`slot-frames.md`, "Measured") | `bind_slots`, `pending_env`, `box_variable`, `lift_frame` in `eval.rs`; `slot-frames.md` |
-| Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
+| Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | the closure argument collector 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
 | Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
 | Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
@@ -1310,7 +1310,7 @@ tier is running it, and switching tiers moves no values.
 call of a body there marks the site, and the second builds the plan: for each formal of the
 callee, the position of the argument that fills its slot, or -1 when the site supplies none.
 Later calls of the same formals and body skip argument matching and write the arguments straight
-into the callee's slots (`eval::call_with_plan`); a site that has seen eight different bodies stops
+into the callee's slots (`handles::call_with_plan`); a site that has seen eight different bodies stops
 planning. A plan exists only when matching cannot depend on the values: the callee has no `...`
 formal, the site passes no `...` or `..N`, and every formal the site leaves out has a literal
 default. Everything else binds through the matcher (`bind_slots`, with its per-body match cache),
