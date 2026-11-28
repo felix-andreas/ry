@@ -237,8 +237,16 @@ pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
 }
 
 /// `..N`'s position, for the names that name one.
+#[inline]
 pub fn dot_dot_position(name: &[u8]) -> Option<usize> {
+    // Every argument name is tested, and almost none starts with `..`.
     let digits = name.strip_prefix(b"..")?;
+    dot_dot_digits(digits)
+}
+
+/// The position the digits after a name's `..` give, if they are all it has.
+#[inline(never)]
+fn dot_dot_digits(digits: &[u8]) -> Option<usize> {
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }

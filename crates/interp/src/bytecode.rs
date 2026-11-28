@@ -10836,153 +10836,21 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             );
         }
         let references = (*state.interp).references_used;
-        // The frame holds the closure, the call and its compiled arguments for the instruction,
-        // and the instruction releases the handle stack after it.
-        return handles::in_caller_scope(|context| {
-            let (call_local, cells) = (
-                handles::held(context, call),
-                handles::held(context, arguments),
-            );
-            let Some(closure) = handles::held(context, function).downcast::<Closure>() else {
-                return Err(error(
-                    "internal error: a closure call's function is not a closure",
-                ));
-            };
-            let mut args = eval::CallArgs::new();
-            // From a slot frame, a call whose arguments need no promise over the frame leaves
-            // it without an environment, and the callee finds its caller as the frame below its
-            // own.
-            let from_slots = if state.in_slots() {
-                collect_slot_arguments(
-                    context,
-                    RunningFrame { state: &*state },
-                    cells,
-                    eager,
-                    plan.is_some(),
-                    &mut args,
-                )
-            } else {
-                Ok(false)
-            };
-            let collected = match from_slots {
-                Ok(true) => Ok(handles::null()),
-                Ok(false) => match state.env(Reify::Site(Site::GenericCallArguments)) {
-                    // The frame's header register holds the environment from here on.
-                    Ok(env) => environment_call_arguments(
-                        context,
-                        cells,
-                        Local::adopt(env),
-                        eager,
-                        plan.is_some(),
-                        &mut args,
-                    ),
-                    Err(unwind) => Err(unwind),
-                },
-                Err(unwind) => Err(unwind),
-            };
-            // A failed collection gives back the references its arguments took.
-            let sys_parent = match collected {
-                Ok(sys_parent) => sys_parent,
-                Err(unwind) => {
-                    eval::return_references(context, references);
-                    return Err(unwind);
-                }
-            };
-            let raw_args = handles::raw_arguments(&args);
-            // The sources are read from the table only once the arguments are collected, and
-            // binding them grows no table.
-            let planned = match plan {
-                Some(id) if per_call => {
-                    match spread_plan(state, instruction, id, function, call, arguments, raw_args) {
-                        Ok(planned) => planned,
-                        Err(unwind) => {
-                            eval::return_references(context, references);
-                            return Err(unwind);
-                        }
-                    }
-                }
-                Some(id) => (*state.interp).bytecode.call_plans.current(
-                    id,
-                    generation,
-                    state.constants,
-                    instruction.at,
-                    function,
-                ),
-                None => None,
-            };
-            let entered = match (plan, planned) {
-                (Some(_), Some((shape, sources))) if in_place(state, function) => Some((
-                    eval::bind_plan(call, function, shape, sources, raw_args, sys_parent.raw()),
-                    Some(shape.slots as usize),
-                )),
-                (None, _)
-                    if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) =>
-                {
-                    Some((
-                        eval::apply_closure_entering(
-                            call,
-                            function,
-                            raw_args,
-                            sys_parent.raw(),
-                            None,
-                        ),
-                        None,
-                    ))
-                }
-                _ => None,
-            };
-            if let Some((entered, slots)) = entered {
-                return Ok(Flow::Goto(match entered {
-                    Ok(entered) if entered.header == crate::NO_SLOTS => {
-                        after_call(state, instruction, references, entered.value)
-                    }
-                    // Only a body compiled with a slot table has a slot count, and only an entry
-                    // that bound slots tells that it was.
-                    Ok(entered) => enter_in_place(
-                        state,
-                        instruction.at,
-                        function,
-                        entered,
-                        slots.unwrap_or_else(|| slot_count(function.cdr())),
-                        references,
-                    ),
-                    Err(unwind) => {
-                        if (*state.interp).references_used != references {
-                            eval::return_references(context, references);
-                        }
-                        return Err(unwind);
-                    }
-                }));
-            }
-            let closure_call = eval::ClosureCall {
-                call: call_local,
-                function: closure,
-                args: &args,
-                sys_parent,
-                supplied: None,
-            };
-            let result = match (plan, planned) {
-                (Some(_), Some((shape, sources))) => {
-                    handles::call_with_plan(context, &closure_call, shape, sources)
-                }
-                (Some(_), None) if per_call => eval::call_matching(context, &closure_call),
-                (Some(_), None) => match eval::call_plan(context, closure.value(), call_local) {
-                    Ok(Some((shape, sources))) if sources[..] != [eval::MATCH_PER_CALL] => {
-                        handles::call_with_plan(context, &closure_call, shape, &sources)
-                    }
-                    Ok(_) => eval::call_matching(context, &closure_call),
-                    Err(unwind) => Err(unwind),
-                },
-                (None, _) => eval::apply_closure_in(context, &closure_call),
-            };
-            if (*state.interp).references_used != references {
-                eval::return_references(context, references);
-            }
-            let value = result?.raw();
-            state.record(instruction.at, value);
-            instruction.output(0, value);
-            Ok(Flow::Next)
-        });
+        return handles::in_caller_scope_with(
+            GenericClosureCall {
+                state,
+                instruction,
+                function,
+                call,
+                arguments,
+                eager,
+                plan,
+                per_call,
+                generation,
+                references,
+            },
+            generic_closure_call,
+        );
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
     {
@@ -11019,6 +10887,183 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// What tier 0's generic call of a closure has settled before it collects the arguments.
+struct GenericClosureCall<'f, 'm, 'a> {
+    state: &'f mut Activation<'m, 'a>,
+    instruction: Instruction,
+    function: Sexp,
+    call: Sexp,
+    arguments: Sexp,
+    eager: bool,
+    plan: Option<u32>,
+    per_call: bool,
+    generation: u32,
+    references: u32,
+}
+
+/// The closure arm of [`op_call_generic`] on the handle types: it collects the arguments and
+/// calls. A function rather than a closure, so that it inlines into the handler
+/// ([`handles::in_caller_scope_with`]).
+#[inline(always)]
+fn generic_closure_call<'s>(
+    context: &mut Cx<'s>,
+    operands: GenericClosureCall<'_, '_, '_>,
+) -> R<Flow> {
+    let GenericClosureCall {
+        state,
+        instruction,
+        function,
+        call,
+        arguments,
+        eager,
+        plan,
+        per_call,
+        generation,
+        references,
+    } = operands;
+    // SAFETY: the frame holds the closure, the call and its compiled arguments for the
+    // instruction, and the instruction releases the handle stack after it.
+    unsafe {
+        let (call_local, cells) = (
+            handles::held(context, call),
+            handles::held(context, arguments),
+        );
+        let Some(closure) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let mut args = eval::CallArgs::new();
+        // From a slot frame, a call whose arguments need no promise over the frame leaves
+        // it without an environment, and the callee finds its caller as the frame below its
+        // own.
+        let from_slots = if state.in_slots() {
+            collect_slot_arguments(
+                context,
+                RunningFrame { state: &*state },
+                cells,
+                eager,
+                plan.is_some(),
+                &mut args,
+            )
+        } else {
+            Ok(false)
+        };
+        let collected = match from_slots {
+            Ok(true) => Ok(handles::null()),
+            Ok(false) => match state.env(Reify::Site(Site::GenericCallArguments)) {
+                // The frame's header register holds the environment from here on.
+                Ok(env) => environment_call_arguments(
+                    context,
+                    cells,
+                    Local::adopt(env),
+                    eager,
+                    plan.is_some(),
+                    &mut args,
+                ),
+                Err(unwind) => Err(unwind),
+            },
+            Err(unwind) => Err(unwind),
+        };
+        // A failed collection gives back the references its arguments took.
+        let sys_parent = match collected {
+            Ok(sys_parent) => sys_parent,
+            Err(unwind) => {
+                eval::return_references(context, references);
+                return Err(unwind);
+            }
+        };
+        let raw_args = handles::raw_arguments(&args);
+        // The sources are read from the table only once the arguments are collected, and
+        // binding them grows no table.
+        let planned = match plan {
+            Some(id) if per_call => {
+                match spread_plan(state, instruction, id, function, call, arguments, raw_args) {
+                    Ok(planned) => planned,
+                    Err(unwind) => {
+                        eval::return_references(context, references);
+                        return Err(unwind);
+                    }
+                }
+            }
+            Some(id) => (*state.interp).bytecode.call_plans.current(
+                id,
+                generation,
+                state.constants,
+                instruction.at,
+                function,
+            ),
+            None => None,
+        };
+        let entered = match (plan, planned) {
+            (Some(_), Some((shape, sources))) if in_place(state, function) => Some((
+                eval::bind_plan(call, function, shape, sources, raw_args, sys_parent.raw()),
+                Some(shape.slots as usize),
+            )),
+            (None, _)
+                if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) =>
+            {
+                Some((
+                    eval::apply_closure_entering(call, function, raw_args, sys_parent.raw(), None),
+                    None,
+                ))
+            }
+            _ => None,
+        };
+        if let Some((entered, slots)) = entered {
+            return Ok(Flow::Goto(match entered {
+                Ok(entered) if entered.header == crate::NO_SLOTS => {
+                    after_call(state, instruction, references, entered.value)
+                }
+                // Only a body compiled with a slot table has a slot count, and only an entry
+                // that bound slots tells that it was.
+                Ok(entered) => enter_in_place(
+                    state,
+                    instruction.at,
+                    function,
+                    entered,
+                    slots.unwrap_or_else(|| slot_count(function.cdr())),
+                    references,
+                ),
+                Err(unwind) => {
+                    if (*state.interp).references_used != references {
+                        eval::return_references(context, references);
+                    }
+                    return Err(unwind);
+                }
+            }));
+        }
+        let closure_call = eval::ClosureCall {
+            call: call_local,
+            function: closure,
+            args: &args,
+            sys_parent,
+            supplied: None,
+        };
+        let result = match (plan, planned) {
+            (Some(_), Some((shape, sources))) => {
+                handles::call_with_plan(context, &closure_call, shape, sources)
+            }
+            (Some(_), None) if per_call => eval::call_matching(context, &closure_call),
+            (Some(_), None) => match eval::call_plan(context, closure.value(), call_local) {
+                Ok(Some((shape, sources))) if sources[..] != [eval::MATCH_PER_CALL] => {
+                    handles::call_with_plan(context, &closure_call, shape, &sources)
+                }
+                Ok(_) => eval::call_matching(context, &closure_call),
+                Err(unwind) => Err(unwind),
+            },
+            (None, _) => eval::apply_closure_in(context, &closure_call),
+        };
+        if (*state.interp).references_used != references {
+            eval::return_references(context, references);
+        }
+        let value = result?.raw();
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        Ok(Flow::Next)
+    }
 }
 
 /// The spread plan ([`PLAN_SPREAD`]) of the site with plan `id`, which passes `...`, for the
@@ -12904,7 +12949,11 @@ fn slot_eager_value<'c>(
         }
     }
     debug_assert!(!frame.has_environment());
-    effects::eager_value(context, symbol, frame.function_environment(context).read(context))
+    effects::eager_value(
+        context,
+        symbol,
+        frame.function_environment(context).read(context),
+    )
 }
 
 #[inline(always)]
