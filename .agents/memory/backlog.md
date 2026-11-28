@@ -287,7 +287,6 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Every port runs natively and prints GNU R's checksum, because it writes around each gap as noted.
 
-- **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too.
 - **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes. It runs at about GNU R's time, the slowest typed port against GNU R. A callgrind profile shows about 450 instructions per byte position, most of them in the `CallTyped` to `matches_at` and in list copies around it, so the cost is the typed core's per-call overhead, not the matching.
 - **A ry list holds no `NaN`**, so the mandelbrot ports freeze a point once `|z| > 2` (`List.map3`) instead of letting it overflow to `NaN` as the R vector code does; the count of points inside the set is the same.
 - **A typed call within 1 MiB of an interpreter segment's floor maps a fresh 8 MiB segment** (`stacker::maybe_grow` in `typed::call`), so `vapply(xs, typed_f, 0)` run from that band pays an `mmap` and `munmap` per element. Let the interpreter's segment switch leave more room, or have the native entry move to the next segment the way `on_large_stack_slow` does and record its bounds.

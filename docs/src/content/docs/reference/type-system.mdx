@@ -479,8 +479,8 @@ for `twice(y)`, compiled or not. Native code computes an R call argument, such a
 at entry when the body reads the parameter before it runs any other code, because R would compute
 it at that point too. A read reaches into the arguments of a call of a builtin or a typed function,
 which take their arguments left to right, but the call itself ends the reads: `x + sqrt(y)` reads
-`x` and then `y`, and `sqrt(x) + y` reads only `x`. An `if`, `&&`, `||`, `<-` or `=` ends the reads
-after its condition or value, and a call of an R closure, a name that is not a parameter, a named
+`x` and then `y`, and `sqrt(x) + y` reads only `x`. An `if`, `&&`, `||`, `<-`, `=` or `match` ends
+the reads after its condition, value or scrutinee, and a call of an R closure, a name that is not a parameter, a named
 or empty argument and `...` end them at once. Every parameter up to the last of these arguments
 must be passed, since a default runs code. A body that is nothing but reads, such as
 `function(x: F64) -> F64 x` or `return(x)`, reads nothing this way, so that

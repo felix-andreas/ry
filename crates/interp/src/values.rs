@@ -91,6 +91,7 @@ symbol_table! {
     next = "next",
     function = "function",
     return_ = "return",
+    ry_match = ".ry_match",
     assign = "<-",
     assign2 = "<<-",
     assign_eq = "=",

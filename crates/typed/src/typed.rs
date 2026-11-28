@@ -878,12 +878,14 @@ fn cell(key: &Key, result: Type) -> &'static Cell<usize> {
 
 /// Whether every function lookup `compiled` assumes still finds the same function. A lookup
 /// that found a definition its script had not run yet assumed no binding, only the function
-/// ([`ahead::defined_later`]).
+/// ([`ahead::defined_later`]). Once a walk has proved them, an unchanged [`Proof`] proves them
+/// again without walking.
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
     let heap = interp::heap();
     let epoch = heap.binding_epoch();
     let proof = &compiled.proof;
-    if let Some(proven) = proof.epoch.get() {
+    let ahead = ahead::compiling_ahead();
+    if !ahead && let Some(proven) = proof.epoch.get() {
         // The epoch moves on any binding outside a function frame, which a package load or a
         // test suite makes all the time, so most moves concern names no speculation uses.
         if proven == epoch
@@ -897,40 +899,41 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
             return true;
         }
     }
-    let ahead = ahead::compiling_ahead();
     let functions = if ahead {
         lower::find_function
     } else {
         lower::resolve_function
     };
-    let resolved = compiled.speculations.iter().all(|assumed| {
+    let mut found = SmallVec::<[Sexp; 8]>::new();
+    for assumed in &compiled.speculations {
         let resolve = if interp::values::is_function(assumed.function) {
             functions
         } else {
             lower::resolve_value
         };
-        resolve(assumed.symbol, assumed.env).is_some_and(|now| {
-            (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
-                && now.function == assumed.function
-        })
-    });
-    // A function defined later in the file has no cell yet, so nothing would move its stamp.
-    if resolved
-        && !ahead
-        && compiled
-            .speculations
-            .iter()
-            .all(|assumed| assumed.cell != rvalues::nil())
-    {
-        for (assumed, stamp) in compiled.speculations.iter().zip(&proof.stamps) {
+        match resolve(assumed.symbol, assumed.env) {
+            Some(now)
+                if (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
+                    && now.function == assumed.function =>
+            {
+                found.push(now.cell)
+            }
+            _ => return false,
+        }
+    }
+    // The cells this walk found are what the stamps then vouch for, also for a speculation made
+    // ahead of time before its function was defined, which has no cell of its own.
+    if !ahead && found.iter().all(|&cell| cell != rvalues::nil()) {
+        for ((assumed, stamp), &cell) in compiled.speculations.iter().zip(&proof.stamps).zip(&found)
+        {
             assumed.symbol.set_gp_bits(gp::WATCHED, true);
-            assumed.cell.set_gp_bits(gp::WATCHED, true);
+            cell.set_gp_bits(gp::WATCHED, true);
             heap.observe_environment(assumed.env);
             stamp.set(heap.lookup_stamp(assumed.symbol));
         }
         proof.epoch.set(Some(heap.binding_epoch()));
     }
-    resolved
+    true
 }
 
 /// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
