@@ -701,6 +701,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A typed call shows its value as R would, from the body's paths (settled)
 - A typed self tail call runs without a new frame in every tier (settled)
 - The native entry forces an R call argument that the body reads first (settled)
+- A typed entry proves its lookups by the heap's stamps, not by walking them (settled)
 
 ## DataFrame and the table engine
 

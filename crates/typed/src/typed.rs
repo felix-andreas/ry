@@ -192,6 +192,25 @@ pub struct Compiled {
     pub cells: SmallVec<[(Key, Type); 1]>,
     /// Whether R returns the value invisibly ([`lower::returns_invisibly`]).
     pub invisible: bool,
+    /// When [`still_resolves`] last proved `speculations`.
+    pub proof: Proof,
+}
+
+/// The binding epoch and the lookup stamps of the speculated symbols at which [`still_resolves`]
+/// last walked every speculation. Every change that could alter a lookup it walked moves the
+/// epoch and the symbol's stamp, once the symbol and the cell it found are watched.
+pub struct Proof {
+    epoch: Cell<Option<u64>>,
+    stamps: Box<[Cell<u64>]>,
+}
+
+impl Proof {
+    pub fn new(speculations: usize) -> Self {
+        Proof {
+            epoch: Cell::new(None),
+            stamps: (0..speculations).map(|_| Cell::new(0)).collect(),
+        }
+    }
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -861,12 +880,30 @@ fn cell(key: &Key, result: Type) -> &'static Cell<usize> {
 /// that found a definition its script had not run yet assumed no binding, only the function
 /// ([`ahead::defined_later`]).
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
-    let functions = if ahead::compiling_ahead() {
+    let heap = interp::heap();
+    let epoch = heap.binding_epoch();
+    let proof = &compiled.proof;
+    if let Some(proven) = proof.epoch.get() {
+        // The epoch moves on any binding outside a function frame, which a package load or a
+        // test suite makes all the time, so most moves concern names no speculation uses.
+        if proven == epoch
+            || compiled
+                .speculations
+                .iter()
+                .zip(&proof.stamps)
+                .all(|(assumed, stamp)| heap.lookup_stamp(assumed.symbol) == stamp.get())
+        {
+            proof.epoch.set(Some(epoch));
+            return true;
+        }
+    }
+    let ahead = ahead::compiling_ahead();
+    let functions = if ahead {
         lower::find_function
     } else {
         lower::resolve_function
     };
-    compiled.speculations.iter().all(|assumed| {
+    let resolved = compiled.speculations.iter().all(|assumed| {
         let resolve = if interp::values::is_function(assumed.function) {
             functions
         } else {
@@ -876,7 +913,24 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
             (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
                 && now.function == assumed.function
         })
-    })
+    });
+    // A function defined later in the file has no cell yet, so nothing would move its stamp.
+    if resolved
+        && !ahead
+        && compiled
+            .speculations
+            .iter()
+            .all(|assumed| assumed.cell != rvalues::nil())
+    {
+        for (assumed, stamp) in compiled.speculations.iter().zip(&proof.stamps) {
+            assumed.symbol.set_gp_bits(gp::WATCHED, true);
+            assumed.cell.set_gp_bits(gp::WATCHED, true);
+            heap.observe_environment(assumed.env);
+            stamp.set(heap.lookup_stamp(assumed.symbol));
+        }
+        proof.epoch.set(Some(heap.binding_epoch()));
+    }
+    resolved
 }
 
 /// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
@@ -1067,6 +1121,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         code,
         params: SmallVec::from_slice(params),
         result: ir.result,
+        proof: Proof::new(speculations.len()),
         speculations,
         epoch,
         calls_r,
