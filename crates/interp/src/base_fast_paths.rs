@@ -4407,7 +4407,7 @@ unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     }
     let calling = values::scalar_logical(1)?;
     kernel(
-        crate::conditions::do_add_cond_hands,
+        crate::conditions::ADD_HANDLERS,
         &[classes, handlers, parent_env, nil(), calling],
         frame,
     )?;
@@ -4554,7 +4554,7 @@ unsafe fn do_do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
     crate::heap().set_element(copy, exit, frame);
     eval::define(names.restart, copy, frame)?;
     kernel(
-        crate::conditions::do_add_restart,
+        crate::conditions::ADD_RESTART,
         &[copy],
         ClosureFrame::Env(frame),
     )?;
@@ -4678,7 +4678,7 @@ unsafe fn invoke_restart_by_name(call: &Call<'_>, quiet_when_missing: bool) -> R
         if restart_name.element(0).bytes() == wanted {
             let arguments = values::alloc(SexpType::List, 0)?;
             return kernel(
-                crate::conditions::do_invoke_restart,
+                crate::conditions::INVOKE_RESTART,
                 &[restart, arguments],
                 frame,
             );

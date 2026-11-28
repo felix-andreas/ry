@@ -665,3 +665,14 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Raw.** `lapply`, `vapply` and their element calls (`ElementCalls`), whose per-element loop is on the `apply:` rows; they move with tier 0's call path.
 - **Roots that cost.** `environment()` and `assign()` run once per call of a small closure, so a root each measured on their rows: `environment()` returns its caller's environment unrooted (`handles::frame_sys_parent`, which the interpreter frames hold), and `assign` stores through the frame's binding without rooting it (`handles::assign_in_frame`), which the AST evaluator's `<-` shares. A symbol from `install` needs no root (`handles::interned_symbol`).
 - **Dots.** `...length`, `...elt` and `...names` read a slot frame's `...` from its slot only while the frame has no environment, and from the binding cell after.
+
+## The condition system takes handles; its stacks keep traced raw fields
+
+**Status:** built. Design: `development/design/memory-safety.md`, "Migration".
+
+- **Rule.** Signalling (`conditions::signal_failure`, `classed_error`, `warn_in`, `signal`), the default error and warning handlers and the builtins of `conditions.rs` are safe code on `Cx`. The raw entries other crates and unmigrated builtins call (`signal_error`, `warning`, `warning_call`, `make_condition`, `print_warnings`, `signal_condition`, `traceback_calls`, `format_error`, `condition_message`, `signal_interrupt`) are thin `handles::with` wrappers.
+- **Stacks.** A handler or restart entry keeps raw `Sexp` fields in an `Rc` list, because the stacks are persistent and every closure frame restores the one it started with. The heap traces them (`trace_handlers`, `trace_restarts`), so a field needs no handle; safe code reads them as `Gc` through `handles::handler_entries` and `restart_entries`, and roots a found handler before it runs R code.
+- **Unwinds leave a scope as errors.** A scope that hands back an `Unwind` it built (a `Return` jump to an exiting handler) returns it as `Err` (`signal_error`, `signal_interrupt` over `Infallible`), because `handles::with` roots an error's values and would not root an `Ok` answer.
+- **`handles::scoped`** is `with` for a body that cannot fail and returns no heap reference (`c_error`'s `warning.length`, `format_error`).
+- **Fixed.** The default error handler left `in_error` raised when printing the deferred warnings failed, so every later error took the nested-error path, which skips `options(error)`, the deferred warnings and `.Traceback`.
+

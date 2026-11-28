@@ -5,12 +5,12 @@ use {
     crate::{
         apply_results::VapplyResults,
         builtins::{BuiltinDef, BuiltinFn, Call, Generic, builtin, internal},
-        bytecode,
+        bytecode, conditions,
         eval::{self, Reify, Site, define},
         handles::{
             self, Args, Binding, Bytecode, Cells, Chars, Closure, Cx, Elements, Environment,
             Expression, Gc, Integer, Language, List, Local, Logical, Owned, Pairlist, Promise,
-            Real, Str, StringFill, Symbol, Tagged, Value, safe,
+            Real, Str, StringFill, Symbol, Tagged, Value, safe, text_vector,
         },
         interp,
         sort::collation_order,
@@ -509,7 +509,7 @@ fn do_set_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<L
     }
     if matches!(object.r_type(), SexpType::Builtin | SexpType::Special) {
         if environment.r_type() != SexpType::Nil {
-            handles::warning(
+            conditions::warn(
                 context,
                 "setting environment(<primitive function>) is not possible and trying it is deprecated",
             )?;
@@ -717,7 +717,7 @@ pub fn namespace_spec_name<'s>(context: &mut Cx<'s>, environment: Local<'s>) -> 
 
 fn do_environment_name<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let Some(environment) = arguments.value(0).downcast::<Environment>() else {
-        return strings(context, &[""]);
+        return Ok(text_vector(context, &[""])?.value());
     };
     let name = if environment.is(handles::global_environment()) {
         "R_GlobalEnv".to_owned()
@@ -740,16 +740,7 @@ fn do_environment_name<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<
             .map(Cow::into_owned)
             .unwrap_or_default()
     };
-    strings(context, &[name])
-}
-
-/// A character vector of `items`.
-fn strings<'s, Text: AsRef<str>>(context: &mut Cx<'s>, items: &[Text]) -> R<Local<'s>> {
-    let mut fill = StringFill::new(context, items.len())?;
-    for item in items {
-        fill.push_text(context, item.as_ref())?;
-    }
-    Ok(fill.finish().finish().value())
+    Ok(text_vector(context, &[name])?.value())
 }
 
 /// The text of a one-element character argument, as GNU R's `asChar` reads `mode` and `pos`.
@@ -948,7 +939,7 @@ fn do_mget<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
             None => {
                 let fallback = context.root(if_not_found.get(context, index % fallbacks));
                 if values::is_function_type(fallback.r_type()) {
-                    let argument = strings(context, &[name])?;
+                    let argument = text_vector(context, &[name])?.value();
                     let caller = arguments.environment(context)?;
                     handles::apply(
                         context,
@@ -1035,7 +1026,7 @@ fn do_remove<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
             frame = context.root(enclosure);
         }
         if !done {
-            handles::warning(context, format!("object '{name}' not found"))?;
+            conditions::warn(context, format!("object '{name}' not found"))?;
         }
     }
     Ok(handles::null())
@@ -1387,7 +1378,7 @@ fn do_search<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>
         .into_iter()
         .map(|environment| search_label(context, environment.value()))
         .collect();
-    strings(context, &names)
+    Ok(text_vector(context, &names)?.value())
 }
 
 /// `as.environment`: a number is a search-path position, a string a search-path name, a list
@@ -1856,7 +1847,7 @@ fn validate_option<'s>(context: &mut Cx<'s>, name: &str, value: Local<'s>) -> R<
                 && handles::length(context, value) > 0
                 && handles::real_scalar(context, value).abs() > f64::from(i32::MAX)
             {
-                handles::warning(context, "NAs introduced by coercion to integer range")?;
+                conditions::warn(context, "NAs introduced by coercion to integer range")?;
             }
             let count = handles::integer_scalar(context, value);
             if count < 1 {
@@ -1898,7 +1889,7 @@ fn validate_option<'s>(context: &mut Cx<'s>, name: &str, value: Local<'s>) -> R<
                 return Err(error("invalid value for 'OutDec'"));
             };
             if mark.chars().count() != 1 {
-                handles::warning(context, "'OutDec' must be a string of one character")?;
+                conditions::warn(context, "'OutDec' must be a string of one character")?;
             }
             crate::format::set_output_decimal(&mark);
             Ok(value)
@@ -1936,7 +1927,7 @@ fn validate_option<'s>(context: &mut Cx<'s>, name: &str, value: Local<'s>) -> R<
                     NA_INTEGER => 0,
                     _ => digits.clamp(LOWEST, HIGHEST),
                 };
-                handles::warning(context, format!("invalid 'scipen' {digits}, used {used}"))?;
+                conditions::warn(context, format!("invalid 'scipen' {digits}, used {used}"))?;
                 return handles::integer(context, used);
             }
             handles::integer(context, digits)
@@ -2024,7 +2015,7 @@ fn default_options(context: &mut Cx<'_>) -> R<()> {
     ];
     for (name, default) in defaults {
         let value = match default {
-            Default::Text(text) => strings(context, &[text])?,
+            Default::Text(text) => text_vector(context, &[text])?.value(),
             Default::Integer(number) => handles::integer(context, number)?,
             Default::Logical(flag) => handles::logical_constant(context, flag as i32)?,
             // A fresh vector, where GNU R's C code allocates one.
@@ -2312,7 +2303,7 @@ fn do_register_s3_methods<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) ->
             overwritten.push(home);
         }
     }
-    strings(context, &overwritten)
+    Ok(text_vector(context, &overwritten)?.value())
 }
 
 /// Registers the method of row `row`, answering the name and the home of the method it
@@ -2348,7 +2339,7 @@ fn register_method<'s>(
                 Some(loaded) if loaded.r_type() == SexpType::Environment => loaded,
                 _ => {
                     let text = handles::text(package.read(context)).into_owned();
-                    let name = strings(context, &[text])?;
+                    let name = text_vector(context, &[text])?.value();
                     call_with(context, registration.namespace, &[name], caller)?
                 }
             }
@@ -2366,7 +2357,7 @@ fn register_method<'s>(
                 None => handles::null(),
             };
             if function.r_type() == SexpType::Nil {
-                let name = strings(context, &[generic_text.as_str()])?;
+                let name = text_vector(context, &[generic_text.as_str()])?.value();
                 call_with(context, registration.missing, &[name], caller)?;
             }
             if interp().globals.methods_dispatch
@@ -2406,7 +2397,7 @@ fn register_method<'s>(
     let current = match existing {
         None => handles::null(),
         Some((true, _)) => {
-            let label = strings(context, &[name_text.as_str()])?;
+            let label = text_vector(context, &[name_text.as_str()])?.value();
             call_with(context, registration.existing, &[table, label], caller)?
         }
         Some((false, content)) => eval::forced_value(context, content)?,
@@ -2428,8 +2419,11 @@ fn register_method<'s>(
     }
     let promise_environment = handles::new_environment(context, registration.frame)?;
     let bindings = [
-        ("x", strings(context, &[name_text.as_str()])?),
-        ("method", strings(context, &[method_text.as_str()])?),
+        ("x", text_vector(context, &[name_text.as_str()])?.value()),
+        (
+            "method",
+            text_vector(context, &[method_text.as_str()])?.value(),
+        ),
         ("home", environment.value()),
         ("envir", table),
     ];
@@ -3162,7 +3156,7 @@ fn do_dots_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
         return Ok(handles::null());
     }
     let names: Vec<String> = names.into_iter().map(Option::unwrap_or_default).collect();
-    strings(context, &names)
+    Ok(text_vector(context, &names)?.value())
 }
 
 fn do_env_profile<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -3184,7 +3178,7 @@ fn do_env_profile<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local
     let bucket_counts = bucket_counts.finish();
     profile.set(context, 2, bucket_counts.value());
     let mut profile = profile.owned();
-    let names = strings(context, &["size", "nchains", "counts"])?;
+    let names = text_vector(context, &["size", "nchains", "counts"])?.value();
     handles::set_attribute(
         context,
         &mut profile,
