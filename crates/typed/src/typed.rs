@@ -1140,6 +1140,7 @@ fn loop_tail_calls(function: &mut ir::Function) {
                     .iter()
                     .zip(&function.locals[..function.params])
                     .all(|(&argument, &ty)| function.ty(argument) == ty)
+                && function.tail_calls.contains(&dest)
                 && returned(function, block, position + 1, dest)
             {
                 sites.push((block, position));
@@ -1171,7 +1172,12 @@ fn loop_tail_calls(function: &mut ir::Function) {
     }
     function.owned_params = true;
     for (block, position) in sites {
-        let block = if block == 0 { header.0 as usize } else { block };
+        // The entry block moved to the header, behind the `Poll` put in front of it.
+        let (block, position) = if block == 0 {
+            (header.0 as usize, position + 1)
+        } else {
+            (block, position)
+        };
         let insts = &mut function.blocks[block].insts;
         let ir::Op::CallTyped(_, arguments) = insts[position].op.clone() else {
             continue;

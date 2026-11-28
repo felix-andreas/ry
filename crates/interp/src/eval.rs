@@ -3646,17 +3646,25 @@ fn self_tail_call<'s>(
     handles::tail_call_jump(context, environment, call, args).map(Some)
 }
 
-/// Whether `call` is the body `body` or sits in its tail position: the last expression of a
-/// `{`, either branch of an `if`, or the argument of `(` or `return`.
-fn in_tail_position(body: Gc<'_>, call: Gc<'_>) -> bool {
+/// Whether `call` sits in a tail position of the closure body `body`, where its value is what
+/// the closure returns: the body itself, the last expression of a `{` in tail position, a
+/// branch of an `if` in tail position, or the argument of a `return` that the body runs as a
+/// statement, also inside a loop. `(` is not one, since it makes an invisible value visible.
+/// Native code loops only at the self calls this accepts (`typed::lower`), so the tiers agree on
+/// which recursions run in one frame.
+pub fn in_tail_position(body: Gc<'_>, call: Gc<'_>) -> bool {
     let brace = handles::symbol(|symbols| symbols.brace).raw();
-    let paren = handles::symbol(|symbols| symbols.paren).raw();
     let if_ = handles::symbol(|symbols| symbols.if_).raw();
     let return_ = handles::symbol(|symbols| symbols.return_).raw();
-    let mut pending: SmallVec<[Gc<'_>; 4]> = SmallVec::new();
-    pending.push(body);
-    while let Some(expression) = pending.pop() {
-        if expression.raw() == call.raw() {
+    let for_ = handles::symbol(|symbols| symbols.for_).raw();
+    let while_ = handles::symbol(|symbols| symbols.while_).raw();
+    let repeat = handles::symbol(|symbols| symbols.repeat).raw();
+    // Each pending expression says whether its value is the closure's value (a tail) or is
+    // dropped (a statement), where only a `return` can reach a tail.
+    let mut pending: SmallVec<[(Gc<'_>, bool); 4]> = SmallVec::new();
+    pending.push((body, true));
+    while let Some((expression, tail)) = pending.pop() {
+        if tail && expression.raw() == call.raw() {
             return true;
         }
         let Some(language) = expression.downcast::<Language>() else {
@@ -3670,11 +3678,20 @@ fn in_tail_position(body: Gc<'_>, call: Gc<'_>) -> bool {
             rest = cell.rest();
         }
         if head == brace {
-            pending.extend(arguments.last().copied());
-        } else if (head == paren || head == return_) && arguments.len() == 1 {
-            pending.push(arguments[0]);
+            let last = arguments.len().saturating_sub(1);
+            for (index, &statement) in arguments.iter().enumerate() {
+                pending.push((statement, tail && index == last));
+            }
+        } else if head == return_ && arguments.len() == 1 {
+            pending.push((arguments[0], true));
         } else if head == if_ && arguments.len() >= 2 {
-            pending.extend(arguments[1..].iter().copied());
+            pending.extend(arguments[1..].iter().map(|&branch| (branch, tail)));
+        } else if head == while_ && arguments.len() == 2 {
+            pending.push((arguments[1], false));
+        } else if head == for_ && arguments.len() == 3 {
+            pending.push((arguments[2], false));
+        } else if head == repeat && arguments.len() == 1 {
+            pending.push((arguments[0], false));
         }
     }
     false

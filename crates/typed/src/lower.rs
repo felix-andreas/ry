@@ -20,10 +20,11 @@ use {
         shapes, values,
     },
     heap::{
+        handle::Gc,
         object::{NA_INTEGER, Sexp, SexpType},
         records::{Fields, Layout},
     },
-    interp::{numbers::Observed, records::rest_name, values as rvalues},
+    interp::{eval::in_tail_position, numbers::Observed, records::rest_name, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{
@@ -524,6 +525,7 @@ unsafe fn lower_calling(
         inlined: Vec::new(),
         inlining: SmallVec::new(),
         self_inlines: 0,
+        tail_chain: true,
         called,
         refused,
         widened,
@@ -900,6 +902,10 @@ struct Lowering<'c> {
     inlining: SmallVec<[Sexp; 4]>,
     /// How many times the function has been lowered into itself.
     self_inlines: usize,
+    /// Whether every copy of the function lowered into itself here stands for a call in tail
+    /// position, so a self call in tail position of this copy is one the interpreter would run
+    /// in the frame of the outermost call ([`Function::tail_calls`]).
+    tail_chain: bool,
     /// The typed functions that are called, never inlined.
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
@@ -2226,7 +2232,15 @@ impl Lowering<'_> {
                 Frame::Typed(function),
                 &mut SmallVec::new(),
             )?;
-            return self.typed_function(head, function, &values);
+            // The interpreter runs a self call in tail position without a new frame, so native
+            // code may loop there and nowhere else.
+            let tail = function == self.closure
+                && self.tail_chain
+                && in_tail_position(
+                    Gc::adopt(interp::bytecode::closure_body(self.closure)),
+                    Gc::adopt(call),
+                );
+            return self.typed_function(head, function, &values, tail);
         }
         if let Some(r_use) = r_use {
             self.speculations.push(speculation);
@@ -2598,6 +2612,7 @@ impl Lowering<'_> {
         name: Sexp,
         function: Sexp,
         arguments: &[Argument],
+        tail: bool,
     ) -> Result<Option<Local>, Refusal> {
         let body = interp::bytecode::closure_body(function);
         let Some(values) = plain_values(arguments) else {
@@ -2700,14 +2715,20 @@ impl Lowering<'_> {
         {
             self.self_inlines += own as usize;
             self.inlining.push(function);
+            let chain = std::mem::replace(&mut self.tail_chain, tail);
             let value = self.inline(function.car(), body, 0, arguments, crate::storage);
+            self.tail_chain = chain;
             self.inlining.pop();
             if value.is_err() {
                 self.refused.get_or_insert(function);
             }
             return value;
         }
-        self.typed_call(function, values).map(Some)
+        let value = self.typed_call(function, values)?;
+        if tail {
+            self.builder.function.tail_calls.push(value);
+        }
+        Ok(Some(value))
     }
 
     /// A direct call of the compiled typed closure `function`.
@@ -8020,7 +8041,9 @@ impl Lowering<'_> {
                 self.scopes = held;
                 value
             }
-            Callable::Typed(name, function) => self.typed_function(name, function, arguments),
+            Callable::Typed(name, function) => {
+                self.typed_function(name, function, arguments, false)
+            }
             Callable::Library(name) => {
                 let (formals, body) = eta(name, arguments.len())?;
                 self.inline(formals, body, 0, arguments, inline_storage)

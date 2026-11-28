@@ -287,7 +287,7 @@ pub enum Jump {
     },
     /// Replace the frame of the typed closure whose environment is `env` with the self call in
     /// its tail position: `call` is a pairlist cell whose value is the call as written and whose
-    /// rest is the forced arguments (`eval::self_tail_call`).
+    /// rest is its matched arguments (`eval::self_tail_call`).
     TailCall {
         env: Sexp,
         call: Sexp,
