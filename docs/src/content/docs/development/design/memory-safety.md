@@ -641,6 +641,11 @@ dispatcher's pairs that every layer down to the frame push takes, so they are ne
 Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark
 `enter` recorded, so no borrow of the context can span it. Both are built from safe pieces, and the
 lexical paths that wrap them take a `Cx`.
+Tier 0's call and return handlers stay `unsafe fn` over raw registers too, with the raw entries
+they and the JIT call (`apply_closure_entering`, `bind_plan`, `force_promise` and the `values.rs`
+constructors and readers): the call body on handles ran 20 instructions more per call, which is
+2.5% on a call with no arguments, and the extra instructions are codegen (bounds tests behind a
+window's slot count, reloads that `&mut Cx` beside the activation forces), not work.
 A promise is rooted for as long as its code runs, because that code can remove the last binding
 that holds it. A reader reaches a live frame through `handles::LiveFrame`, which borrows the
 context, so a slot read through it cannot outlive an allocation; `handles::pending_frame` panics
@@ -686,7 +691,8 @@ The order:
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The frame machinery writes a
    slot frame's registers through `LiveFrame` (`store_slot`, `move_slots_to_cells`), which borrows the
-   context; the bytecode loop's own register accessor comes next.
+   context. The bytecode loop's call and return handlers stay raw (above), so the leaf builtins
+   come next, the environment builtins and the condition system first.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
