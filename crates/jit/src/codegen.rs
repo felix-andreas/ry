@@ -4277,7 +4277,7 @@ impl<'p> Translator<'p> {
             }
         }
         self.finish_load(
-            marks(self.frame.plan.insts[position].op).then_some(pc),
+            position,
             slot,
             ty,
             dst,
@@ -4292,14 +4292,14 @@ impl<'p> Translator<'p> {
         Ok(())
     }
 
-    /// Ends the load at `pc` that left `value` in `slot`'s cell with run-time status `status`:
-    /// checks the value has type `ty`, leaving through `mismatch` otherwise, and unboxes it into
-    /// the slot's variables. `record` says nothing recorded the value's type at `pc` yet, so a
-    /// value of another type is recorded for the recompile after the deoptimization to see.
-    /// `pc` is `None` when it is not a variable load's, as for a `Peek` of inlined code.
+    /// Ends the load at `position` that left `value` in `slot`'s cell with run-time status
+    /// `status`: checks the value has type `ty`, leaving through `mismatch` otherwise, and
+    /// unboxes it into the slot's variables. `record` says nothing recorded the value's type at
+    /// the load's pc yet, so a value of another type is recorded for the recompile after the
+    /// deoptimization to see.
     unsafe fn finish_load(
         &mut self,
-        pc: Option<usize>,
+        position: usize,
         slot: usize,
         ty: Ty,
         dst: Option<usize>,
@@ -4309,15 +4309,17 @@ impl<'p> Translator<'p> {
         record: bool,
         volatile: bool,
     ) -> Result<(), Refusal> {
+        let pc = self.frame.plan.insts[position].pc;
         let (value, copied) = if matches!(ty, Ty::IntVec | Ty::DblVec) {
-            let (value, copied) = self.sequence_contents(pc, value, ty, slot, dst, mismatch)?;
+            let marked = self.marked_pc(position, slot);
+            let (value, copied) = self.sequence_contents(marked, value, ty, slot, dst, mismatch)?;
             (value, Some(copied))
         } else {
             (value, None)
         };
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
-            if let (true, Some(pc)) = (record, pc) {
+            if record {
                 let fitting = self.builder.create_block();
                 let record = self.builder.create_block();
                 self.builder.set_cold_block(record);
@@ -4387,6 +4389,18 @@ impl<'p> Translator<'p> {
     /// A load that is not `forcing` reads the variable for a call the body makes, before the
     /// body itself reads it, so it takes a variable passed by name only once its promise is
     /// forced.
+    /// The pc whose feedback records an ALTREP vector the load at `position` of the variable in
+    /// `slot` does not copy: the load's own, or for a `Peek`, which is a call instruction no
+    /// slot owns, the pc of a load of the variable in the same body.
+    fn marked_pc(&self, position: usize, slot: usize) -> Option<usize> {
+        let inst = &self.frame.plan.insts[position];
+        if marks(inst.op) {
+            Some(inst.pc)
+        } else {
+            self.frame.plan.loads.get(slot).copied().flatten()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     unsafe fn load_in_call(
         &mut self,
@@ -4523,8 +4537,9 @@ impl<'p> Translator<'p> {
         };
         match loaded {
             Some((value, status)) => {
-                let marked = marks(self.frame.plan.insts[position].op).then_some(pc);
-                self.finish_load(marked, slot, ty, dst, value, status, mismatch, false, false)?;
+                self.finish_load(
+                    position, slot, ty, dst, value, status, mismatch, false, false,
+                )?;
             }
             None => self.set_status(slot, local),
         }
@@ -5686,8 +5701,9 @@ impl<'p> Translator<'p> {
     /// `value`, or when it is a compact sequence where `ty` expects a plain vector, a plain copy
     /// of it that the slot and `dst` hold from then on: a formal declared `integer[]` called with
     /// `1:n` would otherwise fail the guard on every first call. Anything else that does not fit
-    /// jumps to `mismatch`, and so does a sequence too long to copy, which the load at `pc`
-    /// records for the recompile. The second value says whether the slot now holds a copy.
+    /// jumps to `mismatch`, and so does an ALTREP vector it does not copy, which is recorded at
+    /// `pc` for the recompile ([`Self::marked_pc`]). The second value says whether the slot now
+    /// holds a copy.
     fn sequence_contents(
         &mut self,
         pc: Option<usize>,

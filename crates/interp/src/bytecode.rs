@@ -2500,10 +2500,11 @@ pub mod feedback {
     /// it as tier 0's step. Compiled code records it, and the bit says nothing about the
     /// value's type.
     pub const HANDED_OFF: u32 = 1 << 17;
-    /// Compiled code that speculated on a plain vector found a compact (ALTREP) vector too long
-    /// to copy, so the recompile keeps the variable boxed. Compiled code records it, and the
-    /// bit says nothing else about the value's type.
-    pub const LONG_SEQUENCE: u32 = 1 << 18;
+    /// Compiled code that speculated on a plain vector found an ALTREP vector it does not copy
+    /// (a compact sequence too long to copy, or another class), so the recompile keeps the
+    /// variable boxed. Compiled code records it, and the bit says nothing else about the
+    /// value's type.
+    pub const UNCOPIED_ALTREP: u32 = 1 << 18;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the

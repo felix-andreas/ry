@@ -2809,10 +2809,10 @@ pub unsafe extern "C" fn jit_loop_element(
 /// such as the one `a:a` gives, comes back as it is, and anything else gives null, which fails
 /// the caller's guard. The sequence itself stays compact, as GNU R's element reads leave it.
 ///
-/// An ALTREP vector longer than [`SEQUENCE_COPY_LIMIT`] gives null too: R keeps it compact
-/// unless an assignment into it runs, and `seq_len(.Machine$integer.max)` would take 8 GB. The
-/// caller's `pc`, unless negative, is then marked [`feedback::LONG_SEQUENCE`], so the recompile
-/// keeps the variable boxed.
+/// A compact sequence longer than [`SEQUENCE_COPY_LIMIT`] gives null too: R keeps it compact
+/// unless an assignment into it runs, and `seq_len(.Machine$integer.max)` would take 8 GB. For
+/// either refusal of an ALTREP vector, the caller's `pc`, unless negative, is marked
+/// [`feedback::UNCOPIED_ALTREP`], so the recompile keeps the variable boxed.
 pub unsafe extern "C" fn jit_sequence_contents(
     activation: *mut Activation,
     value: *mut Header,
@@ -2830,18 +2830,20 @@ pub unsafe extern "C" fn jit_sequence_contents(
             if !value.is_altrep() {
                 return value.as_ptr();
             }
-            if values::length(value) > SEQUENCE_COPY_LIMIT {
+            if values::compact_sequence(value).is_none()
+                || values::length(value) > SEQUENCE_COPY_LIMIT
+            {
                 let code = machine(&*activation).code;
                 if let Ok(pc) = usize::try_from(pc)
                     && let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc)
                 {
                     if crate::logging() {
                         eprintln!(
-                            "jit: pc {pc} of {} keeps a long sequence boxed",
+                            "jit: pc {pc} of {} keeps an ALTREP vector boxed",
                             crate::describe(code)
                         );
                     }
-                    *bits |= feedback::LONG_SEQUENCE as i32;
+                    *bits |= feedback::UNCOPIED_ALTREP as i32;
                 }
                 return std::ptr::null_mut();
             }
