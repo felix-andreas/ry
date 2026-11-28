@@ -3179,11 +3179,6 @@ unsafe fn gather_values(
 /// the call's frame. `None` declines the call, which the interpreter then runs.
 unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<()>> {
     let function = typed.function;
-    // Forcing for code the typed core refuses would only add a frame to the interpreter's.
-    if let Some(refusal) = typed::settled_refusal(function) {
-        annotations::decline(|| refusal);
-        return None;
-    }
     let walk = leading_reads(function);
     let reads = &walk.positions;
     // The reads up to the last of the promises, or none when the body may not read one first.
@@ -3203,11 +3198,18 @@ unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<(
         let first = unread.positions[0] as usize;
         let item = unread.matched.get(first).copied().flatten()?;
         let source = bytecode::source_of_body(typed.args.get(item)?.value.cdr());
+        let why = if walk.returns_read {
+            "the function may return it as it is, and only the interpreter keeps the visibility \
+             its code leaves"
+        } else if !prefix.is_empty() {
+            "the function first reads a parameter left to its default, which runs code"
+        } else {
+            "the function may run other code before it reads it, or never read it"
+        };
         annotations::decline(|| {
             format!(
                 "argument {} is `{}`, which R code wrote, so it stays lazy until the function \
-                 uses it, as in R, and the function may run other code before it reads it, or \
-                 never read it",
+                 uses it, as in R, and {why}",
                 item + 1,
                 interp::deparse::deparse_first_line(source)
             )
@@ -3242,6 +3244,20 @@ unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<(
             let Some(formal) = formals.get(position as usize) else {
                 continue;
             };
+            // A typed callee takes a missing argument on as missing, which the interpreter models.
+            if let Some(&Some(item)) = unread.matched.get(position as usize)
+                && let promise = typed.args[item].value
+                && promise.kind() == SexpType::Promise
+                && interp::eval::argument_is_missing(
+                    bytecode::source_of_body(promise.cdr()),
+                    promise.tag(),
+                )?
+            {
+                annotations::decline(|| {
+                    format!("argument {} passes on a missing argument", item + 1)
+                });
+                break;
+            }
             // An entry check that converts binds a promise of its own over the argument's.
             if let Some(cell) = interp::heap().frame_cell(env, formal.0)
                 && cell.cdr().kind() == SexpType::Promise
@@ -3273,9 +3289,13 @@ unsafe fn leading_reads(function: Sexp) -> LeadingReads {
         resolvable,
         positions: SmallVec::new(),
         heads: SmallVec::new(),
+        returns_read: false,
     };
     let body = bytecode::source_of_body(bytecode::closure_body(function));
     if read_expression(&mut walk, body, 0) {
+        walk.returns_read = true;
+    }
+    if walk.returns_read {
         walk.positions.clear();
     }
     walk
@@ -3292,6 +3312,8 @@ struct LeadingReads {
     /// Each call head the walk resolved, with the number of reads before R would look it up and
     /// the function it found. Forcing an earlier argument can rebind it.
     heads: SmallVec<[(usize, Sexp, Sexp); 4]>,
+    /// Whether the body may return a parameter's value as forcing it left it, visibility and all.
+    returns_read: bool,
 }
 
 /// Adds the formals `expression` reads before it runs anything to `walk`, and whether the walk
@@ -3352,10 +3374,12 @@ unsafe fn read_call(walk: &mut LeadingReads, call: Sexp, depth: usize) -> bool {
         } else {
             args
         };
-        if first.kind() == SexpType::Pairlist
-            && !(head == symbols.return_ && first.car().kind() == SexpType::Symbol)
-        {
-            read_expression(walk, first.car(), depth + 1);
+        if first.kind() == SexpType::Pairlist {
+            if head == symbols.return_ && first.car().kind() == SexpType::Symbol {
+                walk.returns_read = formal_position(walk.formals, first.car()).is_some();
+            } else {
+                read_expression(walk, first.car(), depth + 1);
+            }
         }
         return false;
     }
