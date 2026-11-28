@@ -2272,11 +2272,16 @@ fn is_function(value: Local<'_>) -> bool {
 /// The methods package's class table, which [`cached_class_definition`] reads: `None` before
 /// the package is loaded.
 pub(crate) fn class_table<'s>(context: &mut Cx<'s>) -> R<Option<Local<'s, Environment>>> {
-    let Some(namespace) = handles::methods_namespace(context) else {
-        return Ok(None);
+    let namespace = interp().globals.methods_namespace;
+    // SAFETY: the interpreter's globals keep the namespace alive, and it holds the table until
+    // the scope ends, whatever R code runs, as nothing rebinds it. The lookup runs R code only
+    // to force a lazy-loaded table, which its binding then holds. A raw lookup, as the rooted
+    // one costs `is()` about 4% more instructions.
+    let table = unsafe {
+        let table = eval::value_of(eval::find_var_in_frame(symbols().class_table, namespace)?)?;
+        handles::held(context, table)
     };
-    let symbol = handles::symbol(|symbols| symbols.class_table);
-    Ok(frame_forced(context, namespace, symbol)?.and_then(|table| table.downcast::<Environment>()))
+    Ok(table.downcast::<Environment>())
 }
 
 fn methods_namespace<'s>(context: &Cx<'s>) -> R<Local<'s, Environment>> {

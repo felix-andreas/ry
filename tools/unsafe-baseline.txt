@@ -49,7 +49,7 @@
 5 crates/interp/src/latex.rs
 112 crates/interp/src/linalg.rs
 40 crates/interp/src/lower.rs
-8 crates/interp/src/methods.rs
+9 crates/interp/src/methods.rs
 137 crates/interp/src/methods_core.rs
 30 crates/interp/src/moves.rs
 27 crates/interp/src/native.rs
