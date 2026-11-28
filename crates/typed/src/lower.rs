@@ -5291,12 +5291,12 @@ impl Lowering<'_> {
                 {
                     return match self.builder.ty(index) {
                         Type::I64
-                        | Type::Int
                         | Type::Vector {
                             item: Item::I64 | Item::Int,
                             ..
                         } => Ok(self.builder.emit(ty, Op::Pick(vector, index))),
-                        Type::Dbl => {
+                        // `to_i64` fails on an `NA` integer, which the interpreter rejects.
+                        Type::Int | Type::Dbl => {
                             let index = self.to_i64(index)?;
                             Ok(self.builder.emit(ty, Op::Pick(vector, index)))
                         }

@@ -2632,15 +2632,17 @@ pub unsafe extern "C" fn ry_list_select(a: *mut List, mask: *mut List) -> *mut L
 /// `a[positions]` of a ry list and a list of whole-number positions ([`pick`]). Null for
 /// positions that are not whole numbers, or hold an `NA`.
 pub unsafe extern "C" fn ry_list_pick(a: *mut List, positions: *mut List) -> *mut List {
-    let numbers: SmallVec<[i64; 8]> = match (*positions).kind {
-        I64 => items::<i64>(positions).iter().copied().collect(),
-        INT if !items::<i32>(positions).contains(&NA_INTEGER) => items::<i32>(positions)
-            .iter()
-            .map(|&number| i64::from(number))
-            .collect(),
-        _ => return null_mut(),
-    };
-    pick(a, &numbers)
+    match (*positions).kind {
+        I64 => pick(a, items::<i64>(positions)),
+        INT if !items::<i32>(positions).contains(&NA_INTEGER) => {
+            let numbers: SmallVec<[i64; 8]> = items::<i32>(positions)
+                .iter()
+                .map(|&number| i64::from(number))
+                .collect();
+            pick(a, &numbers)
+        }
+        _ => null_mut(),
+    }
 }
 
 /// `a[position]` of a ry list and one position ([`pick`]).

@@ -1738,15 +1738,19 @@ second <- function(xs: List<I64>) -> I64 {
 }
 picked <- function(xs: List<I64>, at: List<I64>, i: I64) -> I64 List.len(xs[at]) + List.len(xs[i])
 whole <- function(xs: List<I64>) -> I64 List.len(xs[])
+fraction <- function(xs: List<I64>) -> I64 List.len(xs[1.5])
 #++++
 == script.R
 second: fn(xs: List<I64>) -> I64
 picked: fn(xs: List<I64>, at: List<I64>, i: I64) -> I64
 whole: fn(xs: List<I64>) -> I64
+fraction: fn(xs: List<I64>) -> I64
 0..6 warning[unused] `second` is assigned but never used
 78..84 warning[unused] `picked` is assigned but never used
 177..182 warning[unused] `whole` is assigned but never used
-226..230 warning[interpreted] this function runs in the interpreter, because a list indexed with single brackets by something other than positions or a mask is not compiled natively yet. Index the list with an `I64` position, a `List<I64>` of positions or a `List<Bool>` mask
+232..240 warning[unused] `fraction` is assigned but never used
+226..230 warning[interpreted] this function runs in the interpreter, because a list indexed with empty single brackets is not compiled natively yet. Use the list itself
+284..291 warning[interpreted] this function runs in the interpreter, because a list indexed with single brackets by something other than positions or a mask is not compiled natively yet. Index the list with an `I64` position, a `List<I64>` of positions or a `List<Bool>` mask
 
 #---- match_on_a_tuple
 #~~~~ script.R

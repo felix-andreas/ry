@@ -1704,11 +1704,22 @@ impl<'a, 'db> Judge<'a, 'db> {
                     && !whole_literal
                     && target_type.is_some_and(|ty| array_element(db, ty).is_some())
                 {
+                    let empty = arguments
+                        .first()
+                        .is_none_or(|argument| argument.value.is_none());
                     self.uncompiled(
                         id,
                         Uncompiled::Advised(
-                            "a list indexed with single brackets by something other than positions or a mask",
-                            "Index the list with an `I64` position, a `List<I64>` of positions or a `List<Bool>` mask",
+                            if empty {
+                                "a list indexed with empty single brackets"
+                            } else {
+                                "a list indexed with single brackets by something other than positions or a mask"
+                            },
+                            if empty {
+                                "Use the list itself"
+                            } else {
+                                "Index the list with an `I64` position, a `List<I64>` of positions or a `List<Bool>` mask"
+                            },
                         ),
                     );
                     return;
