@@ -22,64 +22,48 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("environment", 1, do_environment),
-    builtin("environment<-", 2, do_set_environment),
-    internal("new.env", 3, do_new_env),
-    internal("parent.env", 1, do_parent_env),
-    internal("parent.env<-", 2, do_set_parent_env),
+    internal("environment", 1, safe!(do_environment)),
+    builtin("environment<-", 2, safe!(do_set_environment)),
+    internal("new.env", 3, safe!(do_new_env)),
+    internal("parent.env", 1, safe!(do_parent_env)),
+    internal("parent.env<-", 2, safe!(do_set_parent_env)),
     builtin("globalenv", 0, |_| Ok(global_env())),
     builtin("emptyenv", 0, |_| Ok(empty_env())),
     builtin("baseenv", 0, |_| Ok(base_env())),
-    internal("topenv", 2, do_topenv),
-    internal("environmentName", 1, do_environment_name),
-    internal("assign", 4, do_assign).invisible(),
-    internal("get", 4, do_get),
-    internal("get0", 5, do_get0),
-    internal("mget", 5, do_mget),
-    internal("exists", 4, do_exists),
-    internal("remove", 3, do_remove).invisible(),
-    internal("ls", 3, do_ls),
-    internal("env2list", 3, do_env2list),
-    internal("list2env", 2, do_list2env),
-    internal("lockEnvironment", 2, do_lock_environment).invisible(),
-    internal("environmentIsLocked", 1, do_environment_is_locked),
-    internal("lockBinding", 2, do_lock_binding).invisible(),
-    internal("unlockBinding", 2, do_unlock_binding).invisible(),
-    internal("bindingIsLocked", 2, do_binding_is_locked),
-    internal("makeActiveBinding", 3, do_make_active_binding).invisible(),
-    internal("bindingIsActive", 2, do_binding_is_active),
-    internal("activeBindingFunction", 2, do_active_binding_function),
-    internal("sys.call", 1, |call| unsafe { do_sys(call, SysKind::Call) }),
-    internal("sys.function", 1, |call| unsafe {
-        do_sys(call, SysKind::Function)
-    }),
-    internal("sys.frame", 1, |call| unsafe {
-        do_sys(call, SysKind::Frame)
-    }),
-    internal("sys.nframe", 0, |call| unsafe {
-        do_sys(call, SysKind::NFrame)
-    }),
-    internal("sys.calls", 0, |call| unsafe {
-        do_sys(call, SysKind::Calls)
-    }),
-    internal("sys.frames", 0, |call| unsafe {
-        do_sys(call, SysKind::Frames)
-    }),
-    internal("sys.parent", 1, |call| unsafe {
-        do_sys(call, SysKind::Parent)
-    }),
-    internal("sys.parents", 0, |call| unsafe {
-        do_sys(call, SysKind::Parents)
-    }),
-    internal("sys.on.exit", 0, |call| unsafe {
-        do_sys(call, SysKind::OnExit)
-    }),
-    internal("parent.frame", 1, do_parent_frame),
-    builtin("as.environment", 1, do_as_environment).generic(Generic::Internal),
-    builtin("pos.to.env", 1, do_pos_to_env),
-    internal("search", 0, do_search),
-    internal("attach", 3, do_attach),
-    internal("detach", 1, do_detach),
+    internal("topenv", 2, safe!(do_topenv)),
+    internal("environmentName", 1, safe!(do_environment_name)),
+    internal("assign", 4, safe!(do_assign)).invisible(),
+    internal("get", 4, safe!(do_get)),
+    internal("get0", 5, safe!(do_get0)),
+    internal("mget", 5, safe!(do_mget)),
+    internal("exists", 4, safe!(do_exists)),
+    internal("remove", 3, safe!(do_remove)).invisible(),
+    internal("ls", 3, safe!(do_ls)),
+    internal("env2list", 3, safe!(do_env2list)),
+    internal("list2env", 2, safe!(do_list2env)),
+    internal("lockEnvironment", 2, safe!(do_lock_environment)).invisible(),
+    internal("environmentIsLocked", 1, safe!(do_environment_is_locked)),
+    internal("lockBinding", 2, safe!(do_lock_binding)).invisible(),
+    internal("unlockBinding", 2, safe!(do_unlock_binding)).invisible(),
+    internal("bindingIsLocked", 2, safe!(do_binding_is_locked)),
+    internal("makeActiveBinding", 3, safe!(do_make_active_binding)).invisible(),
+    internal("bindingIsActive", 2, safe!(do_binding_is_active)),
+    internal("activeBindingFunction", 2, safe!(do_active_binding_function)),
+    internal("sys.call", 1, safe!(do_sys_call)),
+    internal("sys.function", 1, safe!(do_sys_function)),
+    internal("sys.frame", 1, safe!(do_sys_frame)),
+    internal("sys.nframe", 0, safe!(do_sys_nframe)),
+    internal("sys.calls", 0, safe!(do_sys_calls)),
+    internal("sys.frames", 0, safe!(do_sys_frames)),
+    internal("sys.parent", 1, safe!(do_sys_parent)),
+    internal("sys.parents", 0, safe!(do_sys_parents)),
+    internal("sys.on.exit", 0, safe!(do_sys_on_exit)),
+    internal("parent.frame", 1, safe!(do_parent_frame)),
+    builtin("as.environment", 1, safe!(do_as_environment)).generic(Generic::Internal),
+    builtin("pos.to.env", 1, safe!(do_pos_to_env)),
+    internal("search", 0, safe!(do_search)),
+    internal("attach", 3, safe!(do_attach)),
+    internal("detach", 1, safe!(do_detach)),
     internal("options", -1, do_options).keep_visibility(),
     internal("getOption", 1, do_get_option),
     builtin("interactive", 0, |_| unsafe {
@@ -126,36 +110,38 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("sys.source", -1, |_| Ok(nil())),
 ];
 
-unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
-    match value.kind() {
-        SexpType::Environment => Ok(value),
-        SexpType::Nil => Err(error("use of NULL environment is defunct")),
-        _ => {
-            let converted = as_environment(value);
-            match converted {
-                Ok(env) => Ok(env),
-                Err(_) => Err(error(format!("invalid '{what}' argument"))),
-            }
-        }
+/// An environment argument: an environment, or what `as.environment` makes of anything but
+/// `NULL`. `what` names the argument in the error for a value that stands for none.
+fn environment_arg<'s>(
+    context: &mut Cx<'s>,
+    value: Local<'s>,
+    what: &str,
+) -> R<Local<'s, Environment>> {
+    if let Some(environment) = value.downcast::<Environment>() {
+        return Ok(environment);
     }
+    if value.r_type() == SexpType::Nil {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    environment_from(context, value).map_err(|_| error(format!("invalid '{what}' argument")))
 }
 
 /// The frame of the closure whose environment is `env`, as a stack index.
-pub(crate) unsafe fn frame_of(env: Sexp) -> Option<usize> {
+pub(crate) fn frame_of(env: Sexp) -> Option<usize> {
     interp().frames.iter().rposition(|frame| frame.owns(env))
 }
 
 /// GNU R's `cptr` for the `sys.*` functions: the frame the `sys.*` closure was called from.
 /// `None` stands for the top level.
-unsafe fn sys_context(call: &Call<'_>) -> Option<usize> {
-    caller_index(call.frame_index()?)
+fn sys_origin(arguments: &Args<'_, '_>) -> Option<usize> {
+    caller_index(arguments.frame_index()?)
 }
 
 /// The frame the call of frame `own` was made from, `None` for the top level. A `NULL`
 /// `sys_parent` stands for a slot frame that had no environment when it made the call, whose
 /// position the frame records: promise code running on a slot frame's slots calls from below
 /// deeper frames.
-pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
+pub(crate) fn caller_index(own: usize) -> Option<usize> {
     let frames = &interp().frames;
     let target = frames[own].sys_parent.raw();
     if target == nil() {
@@ -165,82 +151,97 @@ pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
     (0..=own).rev().find(|&index| frames[index].owns(target))
 }
 
-/// `framedepth`: how many frames from `context` down to the top level.
-fn frame_depth(context: Option<usize>) -> usize {
-    context.map_or(0, |index| index + 1)
+/// `framedepth`: how many frames from `origin` down to the top level.
+fn frame_depth(origin: Option<usize>) -> usize {
+    origin.map_or(0, |index| index + 1)
 }
 
-unsafe fn sys_frame_at(n: i32, context: Option<usize>) -> R<Sexp> {
+fn sys_frame_at<'s>(context: &mut Cx<'s>, n: i32, origin: Option<usize>) -> R<Local<'s>> {
     if n == 0 {
-        return Ok(global_env());
+        return Ok(handles::global_environment().value());
     }
     if n == NA_INTEGER {
         return Err(error("NA argument is invalid"));
     }
-    let depth = frame_depth(context) as i64;
+    let depth = frame_depth(origin) as i64;
     let back = if n > 0 { depth - n as i64 } else { -(n as i64) };
     if back < 0 {
         return Err(error("not that many frames on the stack"));
     }
-    match context {
-        Some(index) if back <= index as i64 => crate::eval::frame_env(
-            index - back as usize,
-            crate::eval::Reify::Site(crate::eval::Site::SysFrame),
-        ),
-        _ if back == depth => Ok(global_env()),
+    match origin {
+        Some(index) if back <= index as i64 => context.root_answer(|context| {
+            eval::frame_environment_of(context, index - back as usize, Reify::Site(Site::SysFrame))
+        }),
+        _ if back == depth => Ok(handles::global_environment().value()),
         _ => Err(error("not that many frames on the stack")),
     }
 }
 
-/// `sys.frame(which)` relative to the frame that `env` belongs to.
-pub unsafe fn sys_frame(which: i32, env: Sexp) -> R<Sexp> {
-    let context = frame_of(env);
-    sys_frame_at(which, context)
+/// `sys.frame(which)` as seen from the frame of `environment`.
+pub fn sys_frame<'s>(
+    context: &mut Cx<'s>,
+    which: i32,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s, Environment>> {
+    let frame = sys_frame_at(context, which, frame_of(environment.raw()))?;
+    frame
+        .downcast::<Environment>()
+        .ok_or_else(|| error("internal error: a frame without an environment"))
 }
 
-unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp> {
-    let depth = frame_depth(context) as i64;
+fn sys_call_at<'s>(
+    context: &mut Cx<'s>,
+    n: i32,
+    origin: Option<usize>,
+    function: bool,
+) -> R<Local<'s>> {
+    let depth = frame_depth(origin) as i64;
     let back = if n > 0 { depth - n as i64 } else { -(n as i64) };
     if back < 0 {
         return Err(error("not that many frames on the stack"));
     }
-    match context {
+    match origin {
         Some(index) if back <= index as i64 => {
-            let frame = &interp().frames[index - back as usize];
+            let index = index - back as usize;
             if function {
-                Ok(frame.function.raw())
+                Ok(context.root(interp().frames[index].function.get(context)))
             } else {
-                call_with_srcref(frame)
+                call_with_srcref(context, index)
             }
         }
-        _ if back == depth => Ok(nil()),
+        _ if back == depth => Ok(handles::null()),
         _ => Err(error("not that many frames on the stack")),
     }
 }
 
-/// A copy of a frame's call, with the srcref current when the call was made as its `srcref`
-/// attribute, as GNU R's `sys.call` returns it.
+/// A copy of the call of frame `index`, with the srcref current when the call was made as its
+/// `srcref` attribute, as GNU R's `sys.call` returns it.
 ///
 /// Only the call's cells are copied, as GNU R's `shallow_duplicate` does: `do.call` puts the
 /// argument values themselves into the call, so a deep copy would cost as much as the arguments
 /// (data.table's `cedta()` runs `sys.calls()` on every `[`). The copy's cells add a reference
 /// to each argument, so writing into one through the returned call copies it first.
-pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
-    let call = values::shallow_duplicate(frame.call.raw())?;
-    if frame.srcref.raw() != nil() {
-        values::set_attr(
-            call,
-            symbols().srcref,
-            values::duplicate(frame.srcref.raw())?,
+pub fn call_with_srcref<'s>(context: &mut Cx<'s>, index: usize) -> R<Local<'s>> {
+    let call = context.root(interp().frames[index].call.get(context));
+    let mut copy = handles::shallow_copy(context, call)?;
+    let srcref = interp().frames[index].srcref.get(context);
+    if srcref.r_type() != SexpType::Nil {
+        let srcref = context.root(srcref);
+        let srcref = handles::deep_copy(context, srcref)?.finish();
+        handles::set_attribute(
+            context,
+            &mut copy,
+            handles::symbol(|symbols| symbols.srcref),
+            srcref,
         )?;
     }
-    Ok(call)
+    Ok(copy.finish())
 }
 
-/// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
-pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
+/// `R_sysparent`: the frame number of the parent of frame `n` counted back from `origin`.
+pub(crate) fn sys_parent_number(mut n: i64, origin: Option<usize>) -> i64 {
     let frames = &interp().frames;
-    let Some(mut index) = context else {
+    let Some(mut index) = origin else {
         return 0;
     };
     while index > 0 && n > 1 {
@@ -272,396 +273,519 @@ pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i6
     (count - found + 1).max(0)
 }
 
-enum SysKind {
-    Call,
-    Function,
-    Frame,
-    NFrame,
-    Calls,
-    Frames,
-    Parent,
-    Parents,
-    OnExit,
-}
-
-unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
-    let context = sys_context(call);
-    let n = if call.is_empty() {
+/// The `which` or `n` argument of a `sys.*` function, 0 for one that takes none.
+fn which_argument(context: &mut Cx<'_>, arguments: &Args<'_, '_>) -> i32 {
+    if arguments.is_empty() {
         0
     } else {
-        values::as_integer_scalar(call.arg(0))
-    };
-    match kind {
-        SysKind::Call => {
-            if n == NA_INTEGER {
-                return Err(error("invalid 'which' argument"));
-            }
-            sys_call_at(n, context, false)
-        }
-        SysKind::Function => {
-            if n == NA_INTEGER {
-                return Err(error("invalid 'which' value"));
-            }
-            sys_call_at(n, context, true)
-        }
-        SysKind::Frame => sys_frame_at(n, context),
-        SysKind::NFrame => scalar_integer(frame_depth(context) as i32),
-        SysKind::Calls => {
-            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
-            for index in 1..=frame_depth(context) {
-                items.push(nil(), sys_call_at(index as i32, context, false)?)?;
-            }
-            Ok(items.finish())
-        }
-        SysKind::Frames => {
-            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
-            for index in 1..=frame_depth(context) {
-                items.push(nil(), sys_frame_at(index as i32, context)?)?;
-            }
-            Ok(items.finish())
-        }
-        SysKind::Parent => {
-            if n == NA_INTEGER {
-                return Err(error("invalid 'n' argument"));
-            }
-            let depth = frame_depth(context) as i64;
-            let mut position = depth;
-            let mut remaining = n;
-            while remaining > 0 {
-                position = sys_parent_number(depth - position + 1, context);
-                remaining -= 1;
-            }
-            scalar_integer(position as i32)
-        }
-        SysKind::Parents => {
-            let depth = frame_depth(context) as i64;
-            let result = alloc(SexpType::Integer, depth as usize)?;
-            for index in 0..depth {
-                values::ints_mut(result)[index as usize] =
-                    sys_parent_number(depth - index, context) as i32;
-            }
-            Ok(result)
-        }
-        SysKind::OnExit => {
-            let Some(index) = context else {
-                return Ok(nil());
-            };
-            let count = interp().frames[index].on_exit.len();
-            if count < 2 {
-                // A slot frame's list may hold the expression compiled for its slots.
-                return Ok(match interp().frames[index].on_exit.first() {
-                    Some(single) => crate::bytecode::source_of_body(single.raw()),
-                    None => nil(),
-                });
-            }
-            let mut items = values::PairlistBuilder::new(SexpType::Language);
-            items.push(nil(), symbols().brace)?;
-            for position in 0..count {
-                let expression = interp().frames[index].on_exit[position].raw();
-                items.push(nil(), crate::bytecode::source_of_body(expression))?;
-            }
-            Ok(items.finish())
-        }
+        handles::integer_scalar(context, arguments.value(0))
     }
 }
 
-unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
-    let mut n = values::as_integer_scalar(call.arg(0));
+fn do_sys_call<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let n = which_argument(context, arguments);
+    if n == NA_INTEGER {
+        return Err(error("invalid 'which' argument"));
+    }
+    sys_call_at(context, n, sys_origin(arguments), false)
+}
+
+fn do_sys_function<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let n = which_argument(context, arguments);
+    if n == NA_INTEGER {
+        return Err(error("invalid 'which' value"));
+    }
+    sys_call_at(context, n, sys_origin(arguments), true)
+}
+
+fn do_sys_frame<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let n = which_argument(context, arguments);
+    sys_frame_at(context, n, sys_origin(arguments))
+}
+
+fn do_sys_nframe<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    handles::integer(context, frame_depth(sys_origin(arguments)) as i32)
+}
+
+fn do_sys_calls<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let origin = sys_origin(arguments);
+    let mut items = Cells::new(SexpType::Pairlist);
+    for index in 1..=frame_depth(origin) {
+        let call = sys_call_at(context, index as i32, origin, false)?;
+        items.push(context, handles::null(), call)?;
+    }
+    Ok(items.finish().map_or_else(handles::null, Owned::finish))
+}
+
+fn do_sys_frames<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let origin = sys_origin(arguments);
+    let mut items = Cells::new(SexpType::Pairlist);
+    for index in 1..=frame_depth(origin) {
+        let frame = sys_frame_at(context, index as i32, origin)?;
+        items.push(context, handles::null(), frame)?;
+    }
+    Ok(items.finish().map_or_else(handles::null, Owned::finish))
+}
+
+fn do_sys_parent<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let n = which_argument(context, arguments);
+    if n == NA_INTEGER {
+        return Err(error("invalid 'n' argument"));
+    }
+    let origin = sys_origin(arguments);
+    let depth = frame_depth(origin) as i64;
+    let mut position = depth;
+    for _ in 0..n.max(0) {
+        position = sys_parent_number(depth - position + 1, origin);
+    }
+    handles::integer(context, position as i32)
+}
+
+fn do_sys_parents<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let origin = sys_origin(arguments);
+    let depth = frame_depth(origin);
+    let mut parents = context.alloc::<Integer>(depth)?;
+    for (index, parent) in parents.as_mut_slice().iter_mut().enumerate() {
+        *parent = sys_parent_number((depth - index) as i64, origin) as i32;
+    }
+    Ok(parents.finish().value())
+}
+
+fn do_sys_on_exit<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(index) = sys_origin(arguments) else {
+        return Ok(handles::null());
+    };
+    let count = interp().frames[index].on_exit.len();
+    if count < 2 {
+        // A slot frame's list may hold the expression compiled for its slots.
+        return Ok(match interp().frames[index].on_exit.first() {
+            Some(single) => context.root(body_source(single.get(context))),
+            None => handles::null(),
+        });
+    }
+    let mut items = Cells::new(SexpType::Language);
+    items.push(
+        context,
+        handles::null(),
+        handles::permanent_symbol(|symbols| symbols.brace).value(),
+    )?;
+    for position in 0..count {
+        let expression = context.root(body_source(
+            interp().frames[index].on_exit[position].get(context),
+        ));
+        items.push(context, handles::null(), expression)?;
+    }
+    Ok(items.finish().map_or_else(handles::null, Owned::finish))
+}
+
+/// The source of a closure body, compiled or not.
+fn body_source(body: Gc<'_>) -> Gc<'_> {
+    match body.downcast::<Bytecode>() {
+        Some(code) => handles::constants(code)
+            .and_then(|constants| constants.get(bytecode::SOURCE).copied())
+            .unwrap_or(body),
+        None => body,
+    }
+}
+
+fn do_parent_frame<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut n = handles::integer_scalar(context, arguments.value(0));
     if n == NA_INTEGER || n < 1 {
         return Err(error("invalid 'n' value"));
     }
-    let Some(mut index) = call.frame_index() else {
-        return Ok(global_env());
+    let Some(mut index) = arguments.frame_index() else {
+        return Ok(handles::global_environment().value());
     };
     // Each step moves to the frame the current one was called from, as GNU R's `parent.frame`
     // does through `sys_parent`. A slot frame without an environment hands out its pending one,
     // so code that only passes the frame on or compares it leaves the frame in its slots.
     loop {
         let Some(caller) = caller_index(index) else {
-            return Ok(global_env());
+            return Ok(handles::global_environment().value());
         };
         if n == 1 {
-            return crate::eval::frame_sys_parent(
-                caller,
-                crate::eval::Reify::Site(crate::eval::Site::ParentFrame),
-            );
+            return context.root_answer(|context| {
+                eval::caller_environment(context, caller, Reify::Site(Site::ParentFrame))
+            });
         }
         n -= 1;
         index = caller;
     }
 }
 
-unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
-    let function = call.arg(0);
-    match function.kind() {
-        SexpType::Nil => match call.frame_index() {
-            Some(index) => crate::eval::frame_sys_parent(
-                index,
-                crate::eval::Reify::Site(crate::eval::Site::EnvironmentCall),
-            ),
-            None => Ok(global_env()),
+fn do_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let function = arguments.value(0);
+    if let Some(closure) = function.downcast::<Closure>() {
+        return Ok(context.root(closure.read(context).environment()).value());
+    }
+    match function.r_type() {
+        SexpType::Nil => match arguments.frame_index() {
+            Some(index) => context.root_answer(|context| {
+                eval::caller_environment(context, index, Reify::Site(Site::EnvironmentCall))
+            }),
+            None => Ok(handles::global_environment().value()),
         },
-        SexpType::Closure => Ok(function.tag()),
-        SexpType::Builtin | SexpType::Special => Ok(nil()),
+        SexpType::Builtin | SexpType::Special => Ok(handles::null()),
         _ => {
-            let environment = symbols().dot_environment;
-            Ok(get_attr(function, environment))
+            let environment = handles::get_attribute(
+                context,
+                function,
+                handles::symbol(|symbols| symbols.dot_environment),
+            );
+            Ok(context.root(environment))
         }
     }
 }
 
-unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let mut env = call.arg(1);
+fn do_set_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let mut environment = arguments.value(1);
     // GNU R's `simple_as_environment`: an S4 object extending `environment`, such as a
     // reference class object, stands for the environment in its data part.
     // Any other S4 object counts as `NULL` for a closure and is refused for anything else.
-    if env.kind() == SexpType::Object {
-        let data_part = crate::subset::s4_data_part(env);
-        if data_part.kind() == SexpType::Environment {
-            env = data_part;
-        } else if object.kind() == SexpType::Closure {
-            env = nil();
+    if environment.r_type() == SexpType::Object {
+        let data_part = crate::subset::s4_data_part(context, environment);
+        if data_part.r_type() == SexpType::Environment {
+            environment = context.root(data_part);
+        } else if object.r_type() == SexpType::Closure {
+            environment = handles::null();
         }
     }
-    if object.kind() == SexpType::Closure {
-        if env == nil() {
-            return Err(call.error("use of NULL environment is defunct"));
+    if let Some(function) = object.downcast::<Closure>() {
+        if environment.r_type() == SexpType::Nil {
+            return Err(arguments.error("use of NULL environment is defunct"));
         }
-        if env.kind() != SexpType::Environment {
-            return Err(call.error("replacement object is not an environment"));
-        }
-        let body = crate::bytecode::body_to_copy(object)?;
-        let copy = values::triple(SexpType::Closure, object.car(), body, env)?;
-        values::copy_attributes(object, copy)?;
-        return Ok(copy);
+        let Some(environment) = environment.downcast::<Environment>() else {
+            return Err(arguments.error("replacement object is not an environment"));
+        };
+        let mut copy = handles::rebound_closure(context, function, environment)?;
+        handles::copy_most_attributes(context, object, &mut copy, true)?;
+        return Ok(copy.finish().value());
     }
-    if env != nil() && env.kind() != SexpType::Environment {
-        return Err(call.error("replacement object is not an environment"));
+    if environment.r_type() != SexpType::Nil && environment.r_type() != SexpType::Environment {
+        return Err(arguments.error("replacement object is not an environment"));
     }
-    if matches!(object.kind(), SexpType::Builtin | SexpType::Special) {
-        if env == nil() {
-            return Ok(object);
+    if matches!(object.r_type(), SexpType::Builtin | SexpType::Special) {
+        if environment.r_type() != SexpType::Nil {
+            handles::warning(
+                context,
+                "setting environment(<primitive function>) is not possible and trying it is deprecated",
+            )?;
         }
-        crate::conditions::warning(
-            "setting environment(<primitive function>) is not possible and trying it is deprecated",
-        )?;
         return Ok(object);
     }
-    let copy = if values::maybe_shared(object) {
-        values::shallow_duplicate(object)?
+    let mut copy = if object.is_shared() {
+        handles::shallow_copy(context, object)?
     } else {
-        object
+        handles::unshared(context, object)?
     };
-    let environment = symbols().dot_environment;
-    values::set_attr(copy, environment, env)?;
-    Ok(copy)
+    handles::set_attribute(
+        context,
+        &mut copy,
+        handles::symbol(|symbols| symbols.dot_environment),
+        environment,
+    )?;
+    Ok(copy.finish())
 }
 
-unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
-    let hash = values::as_integer_scalar_warning(call.arg(0))?;
-    let parent = call.arg(1);
-    if parent == nil() {
+fn do_new_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let hash = handles::integer_scalar_warning(context, arguments.value(0))?;
+    let parent = arguments.value(1);
+    if parent.r_type() == SexpType::Nil {
         return Err(error("use of NULL environment is defunct"));
     }
-    let parent =
-        simple_as_environment(parent).ok_or_else(|| error("'enclos' must be an environment"))?;
-    let env = new_env(parent)?;
+    let parent = simple_as_environment(context, parent)
+        .ok_or_else(|| error("'enclos' must be an environment"))?;
+    let environment = handles::new_environment(context, parent)?;
     if hash != 0 {
-        let size = values::as_integer_scalar_warning(call.arg(2))?;
-        crate::heap().set_frame_hashed(env, if size == NA_INTEGER { 0 } else { size });
+        let size = handles::integer_scalar_warning(context, arguments.value(2))?;
+        handles::set_frame_hashed(
+            context,
+            environment,
+            if size == NA_INTEGER { 0 } else { size },
+        );
     }
-    Ok(env)
+    Ok(environment.value())
 }
 
-unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
+fn do_parent_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     // GNU R takes an environment or an S4 object extending one, never a search position as
     // `as.environment` does.
-    let value = call.arg(0);
-    let env = match value.kind() {
-        SexpType::Environment => value,
-        SexpType::Object if value.has_gp(gp::S4_OBJECT) => get_attr(value, symbols().dot_xdata),
-        _ => nil(),
+    let environment = simple_as_environment(context, arguments.value(0))
+        .ok_or_else(|| error("argument is not an environment"))?;
+    match environment.read(context).enclosure() {
+        Some(enclosure) => Ok(context.root(enclosure).value()),
+        None => Err(arguments.error("the empty environment has no parent")),
+    }
+}
+
+fn do_set_parent_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = environment_arg(context, arguments.value(0), "env")?;
+    let Some(parent) = arguments.value(1).downcast::<Environment>() else {
+        return Err(arguments.error("'parent' is not an environment"));
     };
-    if env.kind() != SexpType::Environment {
-        return Err(error("argument is not an environment"));
+    if environment.is(handles::empty_environment()) {
+        return Err(arguments.error("can not set the parent of the empty environment"));
     }
-    if env == empty_env() {
-        return Err(call.error("the empty environment has no parent"));
-    }
-    Ok(env.enclosure())
+    handles::set_enclosure(context, environment, parent);
+    Ok(environment.value())
 }
 
-unsafe fn do_set_parent_env(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
-    let parent = call.arg(1);
-    if parent.kind() != SexpType::Environment {
-        return Err(call.error("'parent' is not an environment"));
-    }
-    if env == empty_env() {
-        return Err(call.error("can not set the parent of the empty environment"));
-    }
-    crate::heap().set_enclosure(env, parent);
-    Ok(env)
-}
-
-unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
-    let env = call.arg(0);
-    let target = call.arg(1);
+fn do_topenv<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     // A non-environment falls back to the frame `.Internal(topenv())` runs in, whose top level
     // is base's namespace, as in GNU R (`topenv(sum)`).
-    let env = if env.kind() == SexpType::Environment {
-        env
-    } else {
-        call.env()?
+    let environment = match arguments.value(0).downcast::<Environment>() {
+        Some(environment) => environment,
+        None => arguments.environment(context)?,
     };
-    Ok(top_env(env, target))
+    Ok(top_environment(context, environment, arguments.value(1)).value())
+}
+
+/// `topenv(env, target)` for raw callers.
+pub unsafe fn top_env(env: Sexp, target: Sexp) -> R<Sexp> {
+    handles::with(|context| {
+        let env = handles::held(context, env);
+        let target = handles::held(context, target);
+        let Some(env) = env.downcast::<Environment>() else {
+            return Ok(global_env());
+        };
+        Ok(top_environment(context, env, target).raw())
+    })
 }
 
 /// `topenv(env, target)`: the first environment from `env` outward that is `target`, the global
 /// or base environment, a namespace, a package environment, or one that binds `.packageName`.
-pub unsafe fn top_env(env: Sexp, target: Sexp) -> Sexp {
-    let mut current = env;
-    while current != empty_env() {
-        if current == target
-            || current == global_env()
-            || current == base_env()
-            || current == base_namespace()
-            || is_namespace(current)
-            || is_package_env(current)
-            || crate::heap()
-                .frame_cell(current, symbols().dot_package_name)
-                .is_some()
+pub fn top_environment<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    target: Local<'_>,
+) -> Local<'s, Environment> {
+    let mut current = environment;
+    while !current.is(handles::empty_environment()) {
+        if current.is(target)
+            || current.is(handles::global_environment())
+            || current.is(handles::base_environment())
+            || current.is(handles::base_namespace())
+            || is_namespace_environment(context, current.read(context).value())
+            || is_package_environment(context, current.value())
+            || handles::frame_binding(
+                context,
+                current,
+                handles::symbol(|symbols| symbols.dot_package_name),
+            )
+            .is_some()
         {
             return current;
         }
-        current = current.enclosure();
+        let Some(enclosure) = current.read(context).enclosure() else {
+            break;
+        };
+        current = context.root(enclosure);
     }
-    global_env()
+    handles::global_environment()
 }
 
-/// Whether `env` is a namespace: the base namespace, or an environment holding
-/// `.__NAMESPACE__.`.
+/// Whether `env` is a namespace, for raw callers.
 pub unsafe fn is_namespace(env: Sexp) -> bool {
-    if env == base_namespace() {
+    handles::reading(|context| is_namespace_environment(context, handles::held(context, env).read(context)))
+}
+
+/// Whether `environment` is a namespace: the base namespace, or an environment holding
+/// `.__NAMESPACE__.`.
+pub fn is_namespace_environment(context: &Cx<'_>, environment: Gc<'_>) -> bool {
+    if environment.is(handles::base_namespace()) {
         return true;
     }
-    if env.kind() != SexpType::Environment {
+    let Some(environment) = environment.downcast::<Environment>() else {
         return false;
-    }
-    match crate::heap().frame_cell(env, symbols().dot_namespace) {
-        Some(cell) => cell.cdr().kind() == SexpType::Environment,
-        None => false,
-    }
+    };
+    handles::frame_binding(
+        context,
+        environment,
+        handles::symbol(|symbols| symbols.dot_namespace),
+    )
+    .is_some_and(|binding| binding.content().r_type() == SexpType::Environment)
 }
 
-/// Whether `env` is a package environment on the search path (its `name` starts `package:`).
+/// Whether `env` is a package environment, for raw callers.
 pub unsafe fn is_package_env(env: Sexp) -> bool {
-    let name = get_attr(env, symbols().name);
-    matches!(values::first_string(name), Some(text) if text.starts_with("package:"))
+    handles::with(|context| {
+        let env = handles::held(context, env);
+        Ok(is_package_environment(context, env))
+    })
+    .is_ok_and(|package| package)
+}
+
+/// Whether `environment` is a package environment on the search path (its `name` starts
+/// `package:`).
+pub fn is_package_environment(context: &mut Cx<'_>, environment: Local<'_>) -> bool {
+    let name = handles::get_attribute(
+        context,
+        environment,
+        handles::symbol(|symbols| symbols.name),
+    );
+    let name = context.root(name);
+    handles::first_string(context, name).is_some_and(|text| text.starts_with("package:"))
+}
+
+/// The name of a namespace, from its `spec`, for raw callers. Reading the name forces the
+/// namespace information, and a failure to reads as no name.
+pub unsafe fn namespace_name(env: Sexp) -> Option<String> {
+    handles::with(|context| {
+        let env = handles::held(context, env);
+        namespace_spec_name(context, env)
+    })
+    .ok()
+    .flatten()
 }
 
 /// The name of a namespace, from its `spec`.
-pub unsafe fn namespace_name(env: Sexp) -> Option<String> {
-    if env == base_namespace() {
-        return Some("base".into());
+pub fn namespace_spec_name<'s>(context: &mut Cx<'s>, environment: Local<'s>) -> R<Option<String>> {
+    if environment.is(handles::base_namespace()) {
+        return Ok(Some("base".into()));
     }
-    let info = crate::heap()
-        .frame_cell(env, symbols().dot_namespace)?
-        .cdr();
-    let info = value_of(info).ok()?;
-    if info.kind() != SexpType::Environment {
-        return None;
-    }
-    let spec_symbol = symbols().spec;
-    let spec = value_of(find_var_in_frame(spec_symbol, info).ok()?).ok()?;
-    values::first_string(spec).map(|text| text.into_owned())
+    let Some(environment) = environment.downcast::<Environment>() else {
+        return Ok(None);
+    };
+    let Some(binding) = handles::frame_binding(
+        context,
+        environment,
+        handles::symbol(|symbols| symbols.dot_namespace),
+    ) else {
+        return Ok(None);
+    };
+    let information = context.root(binding.content());
+    let information = eval::forced_value(context, information)?;
+    let Some(information) = information.downcast::<Environment>() else {
+        return Ok(None);
+    };
+    let Some(spec) = eval::frame_content(context, information, handles::symbol(|symbols| symbols.spec))? else {
+        return Ok(None);
+    };
+    let spec = eval::forced_value(context, spec)?;
+    Ok(handles::first_string(context, spec).map(Cow::into_owned))
 }
 
-unsafe fn do_environment_name(call: &Call<'_>) -> R<Sexp> {
-    let env = call.arg(0);
-    if env.kind() != SexpType::Environment {
-        return scalar_string("");
-    }
-    let name = if env == global_env() {
+fn do_environment_name<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(environment) = arguments.value(0).downcast::<Environment>() else {
+        return strings(context, &[""]);
+    };
+    let name = if environment.is(handles::global_environment()) {
         "R_GlobalEnv".to_owned()
-    } else if env == base_env() {
+    } else if environment.is(handles::base_environment()) {
         "base".to_owned()
-    } else if env == empty_env() {
+    } else if environment.is(handles::empty_environment()) {
         "R_EmptyEnv".to_owned()
-    } else if is_package_env(env) {
-        let name_attr = get_attr(env, symbols().name);
-        values::first_string(name_attr)
-            .map(|text| text.into_owned())
-            .unwrap_or_default()
-    } else if is_namespace(env) {
-        namespace_name(env).unwrap_or_default()
+    } else if !is_package_environment(context, environment.value())
+        && is_namespace_environment(context, environment.read(context).value())
+    {
+        namespace_spec_name(context, environment.value())?.unwrap_or_default()
     } else {
-        let name_attr = get_attr(env, symbols().name);
-        values::first_string(name_attr)
-            .map(|text| text.into_owned())
+        let name = handles::get_attribute(
+            context,
+            environment,
+            handles::symbol(|symbols| symbols.name),
+        );
+        let name = context.root(name);
+        handles::first_string(context, name)
+            .map(Cow::into_owned)
             .unwrap_or_default()
     };
-    scalar_string(&name)
+    strings(context, &[name])
 }
 
-/// A symbol from a name argument.
+/// A character vector of `items`.
+fn strings<'s, Text: AsRef<str>>(context: &mut Cx<'s>, items: &[Text]) -> R<Local<'s>> {
+    let mut fill = StringFill::new(context, items.len())?;
+    for item in items {
+        fill.push_text(context, item.as_ref())?;
+    }
+    Ok(fill.finish().finish().value())
+}
+
+/// The text of a one-element character argument, as GNU R's `asChar` reads `mode` and `pos`.
+fn required_text(context: &mut Cx<'_>, value: Local<'_>, what: &str) -> R<String> {
+    if handles::length(context, value) == 1
+        && let Some(text) = handles::first_string(context, value)
+    {
+        return Ok(text.into_owned());
+    }
+    Err(error(format!("invalid '{what}' argument")))
+}
+
 /// The symbol a variable-name argument names. `invalid` is the error for anything else, and for
 /// an empty name `get`, `get0` and `exists` give it where `assign` refuses the empty symbol.
-unsafe fn name_symbol(value: Sexp, invalid: &str, empty_is_invalid: bool) -> R<Sexp> {
-    match value.kind() {
-        SexpType::Symbol => Ok(value),
-        SexpType::String if length(value) >= 1 => {
-            let name = value.element(0);
-            if name.bytes().is_empty() {
-                if empty_is_invalid {
-                    return Err(error(invalid));
-                }
-                return Err(error("attempt to use zero-length variable name"));
-            }
-            values::install_charsxp(name)
-        }
-        _ => Err(error(invalid)),
+fn name_symbol<'s>(
+    context: &mut Cx<'s>,
+    value: Local<'s>,
+    invalid: &str,
+    empty_is_invalid: bool,
+) -> R<Local<'s, Symbol>> {
+    if let Some(symbol) = value.downcast::<Symbol>() {
+        return Ok(symbol);
     }
+    let names = match handles::dense::<Str>(context, value)? {
+        Some(names) if !names.is_empty() => names,
+        _ => return Err(error(invalid)),
+    };
+    if names.get(context, 0).bytes().is_empty() {
+        if empty_is_invalid {
+            return Err(error(invalid));
+        }
+        return Err(error("attempt to use zero-length variable name"));
+    }
+    let symbol = handles::install_name_at(context, names, 0)?;
+    Ok(context.root(symbol))
 }
 
-unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "invalid first argument", false)?;
-    let value = call.arg(1);
-    let env = environment_arg(call.arg(2), "envir")?;
-    let inherits = values::as_logical_scalar(call.arg(3)) == 1;
-    if inherits {
-        eval::set_var(symbol, value, env)?;
+fn symbol_text(context: &Cx<'_>, symbol: Local<'_, Symbol>) -> String {
+    handles::text(symbol.read(context).name()).into_owned()
+}
+
+fn do_assign<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = name_symbol(context, arguments.value(0), "invalid first argument", false)?;
+    let value = arguments.value(1);
+    let environment = environment_arg(context, arguments.value(2), "envir")?;
+    if handles::logical_scalar(context, arguments.value(3)) == 1 {
+        eval::assign_outward(context, symbol, value, environment)?;
     } else {
-        eval::assign_local(symbol, value, env, crate::heap().frame_cell(env, symbol))?;
+        let binding = handles::frame_binding(context, environment, symbol)
+            .map(|binding| context.root(binding));
+        handles::assign_local(context, symbol, value, environment, binding)?;
     }
     Ok(value)
 }
 
 /// Whether `value` matches the `mode` argument of `get` and `exists`.
-unsafe fn mode_matches(value: Sexp, mode: &str) -> bool {
+fn mode_matches(value: Local<'_>, mode: &str) -> bool {
     match mode {
         "any" => true,
-        "function" => values::is_function(value),
-        "numeric" => matches!(value.kind(), SexpType::Integer | SexpType::Real),
-        "name" => value.kind() == SexpType::Symbol,
-        "call" => value.kind() == SexpType::Language,
-        "list" => value.kind() == SexpType::List,
-        mode => value.kind().name() == mode,
+        "function" => values::is_function_type(value.r_type()),
+        "numeric" => matches!(value.r_type(), SexpType::Integer | SexpType::Real),
+        "name" => value.r_type() == SexpType::Symbol,
+        "call" => value.r_type() == SexpType::Language,
+        "list" => value.r_type() == SexpType::List,
+        mode => value.r_type().name() == mode,
     }
 }
 
-/// Looks `symbol` up for `get`, `exists` and `mget`: in `env`'s frame, and with `inherits` in
-/// every enclosure, skipping values of the wrong mode.
-unsafe fn lookup(symbol: Sexp, env: Sexp, mode: &str, inherits: bool) -> R<Option<Sexp>> {
-    let mut frame = env;
-    while frame != empty_env() {
-        let value = find_var_in_frame(symbol, frame)?;
-        if value != unbound() {
+/// Looks `symbol` up for `get`, `exists` and `mget`: in `environment`'s frame, and with
+/// `inherits` in every enclosure, skipping values of the wrong mode. With mode `"any"` a
+/// promise comes back unforced.
+fn lookup<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'s, Symbol>,
+    environment: Local<'s, Environment>,
+    mode: &str,
+    inherits: bool,
+) -> R<Option<Local<'s>>> {
+    let mut frame = environment;
+    while !frame.is(handles::empty_environment()) {
+        if let Some(value) = eval::frame_content(context, frame, symbol)? {
             if mode == "any" {
                 return Ok(Some(value));
             }
-            let forced = value_of(value)?;
+            let forced = eval::forced_value(context, value)?;
             if mode_matches(forced, mode) {
                 return Ok(Some(forced));
             }
@@ -669,173 +793,236 @@ unsafe fn lookup(symbol: Sexp, env: Sexp, mode: &str, inherits: bool) -> R<Optio
         if !inherits {
             break;
         }
-        frame = frame.enclosure();
+        let Some(enclosure) = frame.read(context).enclosure() else {
+            break;
+        };
+        frame = context.root(enclosure);
     }
     Ok(None)
 }
 
-unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
-    let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_str(call.arg(2), "mode")?;
-    let inherits = values::as_logical_scalar(call.arg(3)) == 1;
-    match lookup(symbol, env, &mode, inherits)? {
-        Some(value) => {
-            if value == missing_arg() {
-                return Err(missing_argument(
-                    call.call,
-                    &symbol_name(symbol),
-                    ArgumentReader::Get,
-                ));
-            }
-            value_of(value)
-        }
-        None => {
-            if mode == "any" {
-                Err(error(format!("object '{}' not found", symbol_name(symbol))))
-            } else {
-                Err(error(format!(
-                    "object '{}' of mode '{mode}' was not found",
-                    symbol_name(symbol)
-                )))
-            }
-        }
-    }
+/// The arguments `get`, `get0` and `exists` share: the symbol, the environment, the mode and
+/// `inherits`.
+fn lookup_arguments<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+) -> R<(Local<'s, Symbol>, Local<'s, Environment>, String, bool)> {
+    let symbol = name_symbol(context, arguments.value(0), "invalid first argument", true)?;
+    let environment = environment_arg(context, arguments.value(1), "envir")?;
+    let mode = required_text(context, arguments.value(2), "mode")?;
+    let inherits = handles::logical_scalar(context, arguments.value(3)) == 1;
+    Ok((symbol, environment, mode, inherits))
 }
 
-unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
-    let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_str(call.arg(2), "mode")?;
-    let inherits = values::as_logical_scalar(call.arg(3)) == 1;
-    match lookup(symbol, env, &mode, inherits)? {
-        Some(value) if value == missing_arg() => Err(missing_argument(
-            call.call,
-            &symbol_name(symbol),
+/// The value `get` and `get0` give for what [`lookup`] found.
+fn found_value<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    symbol: Local<'s, Symbol>,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    if handles::is_missing_argument(value) {
+        return Err(missing_argument(
+            arguments.expression().raw(),
+            &symbol_text(context, symbol),
             ArgumentReader::Get,
-        )),
-        Some(value) => value_of(value),
-        None => Ok(call.arg(4)),
+        ));
+    }
+    eval::forced_value(context, value)
+}
+
+fn do_get<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let (symbol, environment, mode, inherits) = lookup_arguments(context, arguments)?;
+    match lookup(context, symbol, environment, &mode, inherits)? {
+        Some(value) => found_value(context, arguments, symbol, value),
+        None if mode == "any" => Err(error(format!(
+            "object '{}' not found",
+            symbol_text(context, symbol)
+        ))),
+        None => Err(error(format!(
+            "object '{}' of mode '{mode}' was not found",
+            symbol_text(context, symbol)
+        ))),
     }
 }
 
-unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    if names.kind() != SexpType::String {
+fn do_get0<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let (symbol, environment, mode, inherits) = lookup_arguments(context, arguments)?;
+    match lookup(context, symbol, environment, &mode, inherits)? {
+        Some(value) => found_value(context, arguments, symbol, value),
+        None => Ok(arguments.value(4)),
+    }
+}
+
+fn do_mget<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(names) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("invalid first argument"));
-    }
-    let env = environment_arg(call.arg(1), "envir")?;
-    let modes = call.arg(2);
-    let count = length(names);
-    if modes.kind() != SexpType::String || (length(modes) != 1 && length(modes) != count) {
-        return Err(error("wrong length for 'mode' argument"));
-    }
+    };
+    let environment = environment_arg(context, arguments.value(1), "envir")?;
+    let count = names.len();
+    let modes = match handles::dense::<Str>(context, arguments.value(2))? {
+        Some(modes) if modes.len() == 1 || modes.len() == count => modes,
+        _ => return Err(error("wrong length for 'mode' argument")),
+    };
     // GNU R takes any vector here and treats its elements as a list's, so `ifnotfound = NA`
     // gives `NA` for every missing name.
-    let if_not_found = call.arg(3);
-    if !if_not_found.kind().is_vector() {
+    let if_not_found = arguments.value(3);
+    if !if_not_found.r_type().is_vector() {
         return Err(error("invalid 'ifnotfound' argument"));
     }
-    let fallbacks = length(if_not_found);
+    let fallbacks = handles::length(context, if_not_found);
     if fallbacks != 1 && fallbacks != count {
         return Err(error("wrong length for 'ifnotfound' argument"));
     }
-    let if_not_found = crate::coerce::coerce_vector(if_not_found, SexpType::List)?;
-    let inherits = values::as_logical_scalar(call.arg(4)) == 1;
-    let result = alloc(SexpType::List, count)?;
+    let if_not_found = handles::coerce(context, if_not_found, SexpType::List)?;
+    let Some(if_not_found) = if_not_found.standard::<List>() else {
+        return Err(error("invalid 'ifnotfound' argument"));
+    };
+    let inherits = handles::logical_scalar(context, arguments.value(4)) == 1;
+    let mut result = context.alloc::<List>(count)?;
     for index in 0..count {
-        let name = string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let symbol = values::install(&name)?;
-        let mode = string_at(modes, index % length(modes))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(|| "any".into());
-        let value = match lookup(symbol, env, &mode, inherits)? {
-            Some(value) => value_of(value)?,
+        let name = names.get(context, index);
+        let name = if handles::is_na(name) {
+            String::new()
+        } else {
+            handles::text(name).into_owned()
+        };
+        let symbol = handles::install_bytes(context, name.as_bytes())?;
+        let symbol = context.root(symbol);
+        let mode = modes.get(context, index % modes.len());
+        let mode = if handles::is_na(mode) {
+            "any".to_owned()
+        } else {
+            handles::text(mode).into_owned()
+        };
+        let value = match lookup(context, symbol, environment, &mode, inherits)? {
+            Some(value) => eval::forced_value(context, value)?,
             None => {
-                let fallback = if_not_found.element(index % fallbacks);
-                if values::is_function(fallback) {
-                    let argument = scalar_string(&name)?;
-                    eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env()?)?
+                let fallback = context.root(if_not_found.get(context, index % fallbacks));
+                if values::is_function_type(fallback.r_type()) {
+                    let argument = strings(context, &[name])?;
+                    let caller = arguments.environment(context)?;
+                    handles::apply(
+                        context,
+                        handles::null(),
+                        fallback,
+                        &[Tagged {
+                            tag: handles::null(),
+                            value: argument,
+                        }],
+                        caller,
+                    )?
                 } else {
                     fallback
                 }
             }
         };
-        values::set_elt(result, index, value);
+        result.set(context, index, value);
     }
-    values::set_attr(result, symbols().names, names)?;
-    Ok(result)
+    let mut result = result.owned();
+    handles::set_attribute(
+        context,
+        &mut result,
+        handles::symbol(|symbols| symbols.names),
+        names.value(),
+    )?;
+    Ok(result.finish().value())
 }
 
-unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
-    let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_str(call.arg(2), "mode")?;
-    let inherits = values::as_logical_scalar(call.arg(3)) == 1;
-    if mode == "any" {
-        // As in GNU R, an active binding exists without its function being called.
-        let heap = crate::heap();
-        let mut frame = env;
-        while frame != empty_env() {
-            if let Some(cell) = heap.frame_cell(frame, symbol)
-                && (cell.has_gp(gp::ACTIVE_BINDING) || cell.cdr() != unbound())
-            {
-                return scalar_bool(true);
-            }
-            if !inherits {
-                break;
-            }
-            frame = frame.enclosure();
+fn do_exists<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let (symbol, environment, mode, inherits) = lookup_arguments(context, arguments)?;
+    if mode != "any" {
+        let found = lookup(context, symbol, environment, &mode, inherits)?.is_some();
+        return handles::logical_constant(context, found as i32);
+    }
+    // As in GNU R, an active binding exists without its function being called.
+    let mut frame = environment.read(context);
+    let found = loop {
+        if frame.is(handles::empty_environment()) {
+            break false;
         }
-        return scalar_bool(false);
-    }
-    scalar_bool(lookup(symbol, env, &mode, inherits)?.is_some())
+        if let Some(binding) = handles::frame_binding(context, frame, symbol)
+            && (binding.is_active() || !handles::is_unbound(binding.content()))
+        {
+            break true;
+        }
+        match frame.enclosure() {
+            Some(enclosure) if inherits => frame = enclosure,
+            _ => break false,
+        }
+    };
+    handles::logical_constant(context, found as i32)
 }
 
-unsafe fn do_remove(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    let env = environment_arg(call.arg(1), "envir")?;
-    let inherits = values::as_logical_scalar(call.arg(2)) == 1;
-    for index in 0..length(names) {
-        let name = string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let symbol = values::install(&name)?;
-        let mut frame = env;
+fn do_remove<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let names = handles::dense::<Str>(context, arguments.value(0))?;
+    let environment = environment_arg(context, arguments.value(1), "envir")?;
+    let inherits = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let Some(names) = names else {
+        return Ok(handles::null());
+    };
+    for index in 0..names.len() {
+        let name = names.get(context, index);
+        let name = if handles::is_na(name) {
+            String::new()
+        } else {
+            handles::text(name).into_owned()
+        };
+        let symbol = handles::install_bytes(context, name.as_bytes())?;
+        let mut frame = environment;
         let mut done = false;
-        while frame != empty_env() {
-            if crate::heap().remove_binding(frame, symbol)? {
+        while !frame.is(handles::empty_environment()) {
+            if handles::remove_binding(context, frame, symbol)? {
                 done = true;
                 break;
             }
             if !inherits {
                 break;
             }
-            frame = frame.enclosure();
+            let Some(enclosure) = frame.read(context).enclosure() else {
+                break;
+            };
+            frame = context.root(enclosure);
         }
         if !done {
-            crate::conditions::warning(format!("object '{name}' not found"))?;
+            handles::warning(context, format!("object '{name}' not found"))?;
         }
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-/// The symbols bound in `env`, in the order `ls()` lists their names.
+/// The symbols bound in `env`, in the order `ls()` lists their names, for raw callers.
 pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
-    let heap = crate::heap();
-    let mut symbols = if sorted {
-        heap.bound_symbols(env)
-    } else {
-        heap.frame_symbols(env)
+    handles::reading(|context| {
+        environment_symbols(context, handles::held(context, env).read(context), all, sorted)
+            .into_iter()
+            .map(Gc::raw)
+            .collect()
+    })
+}
+
+/// The symbols bound in `environment`, in the order `ls()` lists their names: sorted by the
+/// collation order, or in the frame's listing order.
+pub fn environment_symbols(
+    context: &Cx<'_>,
+    environment: Gc<'_>,
+    all: bool,
+    sorted: bool,
+) -> Vec<Gc<'static, Symbol>> {
+    let Some(environment) = environment.downcast::<Environment>() else {
+        return Vec::new();
     };
+    let mut symbols = handles::bound_symbols(context, environment, !sorted);
     if !all {
-        symbols.retain(|symbol| symbol.car().bytes().first() != Some(&b'.'));
+        symbols.retain(|symbol| symbol.name().bytes().first() != Some(&b'.'));
     }
     if sorted {
-        let names: Vec<_> = symbols.iter().map(|symbol| symbol_name(*symbol)).collect();
-        symbols = collation_order(&names)
+        let names: Vec<_> = symbols
+            .iter()
+            .map(|symbol| handles::text(symbol.name()))
+            .collect();
+        let order = collation_order(&names);
+        symbols = order
             .into_iter()
             .map(|index| symbols[index as usize])
             .collect();
@@ -843,77 +1030,104 @@ pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
     symbols
 }
 
-/// The names bound in `env` as a character vector, as `ls()` lists them. A symbol's print name
-/// is already an interned `CHARSXP`, so no name is copied.
-pub unsafe fn env_names(env: Sexp, all: bool, sorted: bool) -> R<Sexp> {
-    symbol_names(&env_symbols(env, all, sorted))
+/// The names bound in `environment` as a character vector, as `ls()` lists them. A symbol's
+/// print name is already an interned `CHARSXP`, so no name is copied.
+pub fn environment_names<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    all: bool,
+    sorted: bool,
+) -> R<Local<'s>> {
+    let symbols = environment_symbols(context, environment.read(context).value(), all, sorted);
+    symbol_names(context, &symbols)
 }
 
-unsafe fn symbol_names(symbols: &[Sexp]) -> R<Sexp> {
-    let names = alloc(SexpType::String, symbols.len())?;
+fn symbol_names<'s>(context: &mut Cx<'s>, symbols: &[Gc<'static, Symbol>]) -> R<Local<'s>> {
+    let mut names = context.alloc::<Str>(symbols.len())?;
     for (index, symbol) in symbols.iter().enumerate() {
-        values::set_elt(names, index, symbol.car());
+        names.set(context, index, symbol.name());
     }
-    Ok(names)
+    Ok(names.finish().value())
 }
 
-unsafe fn do_ls(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "envir")?;
-    let all = values::as_logical_scalar(call.arg(1)) == 1;
-    let sorted = values::as_logical_scalar(call.arg(2)) != 0;
-    env_names(env, all, sorted)
+fn do_ls<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = environment_arg(context, arguments.value(0), "envir")?;
+    let all = handles::logical_scalar(context, arguments.value(1)) == 1;
+    let sorted = handles::logical_scalar(context, arguments.value(2)) != 0;
+    environment_names(context, environment, all, sorted)
 }
 
-unsafe fn do_env2list(call: &Call<'_>) -> R<Sexp> {
-    let env = call.arg(0);
-    if env == nil() {
+fn do_env2list<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.value(0);
+    if environment.r_type() == SexpType::Nil {
         return Err(error("use of NULL environment is defunct"));
     }
-    let env = simple_as_environment(env).ok_or_else(|| error("argument must be an environment"))?;
-    let all = values::as_logical_scalar(call.arg(1)) == 1;
-    let sorted = values::as_logical_scalar(call.arg(2)) == 1;
-    let bound = env_symbols(env, all, sorted);
-    let result = alloc(SexpType::List, bound.len())?;
+    let environment = simple_as_environment(context, environment)
+        .ok_or_else(|| error("argument must be an environment"))?;
+    let all = handles::logical_scalar(context, arguments.value(1)) == 1;
+    let sorted = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let bound = environment_symbols(context, environment.read(context).value(), all, sorted);
+    let mut result = context.alloc::<List>(bound.len())?;
     for (index, &symbol) in bound.iter().enumerate() {
-        let value = find_var_in_frame(symbol, env)?;
-        let value = value_of(value)?;
-        values::set_elt(result, index, value);
+        let value = match eval::frame_content(context, environment, symbol)? {
+            Some(value) => eval::forced_value(context, value)?,
+            None => handles::unbound(),
+        };
+        result.set(context, index, value);
     }
+    let mut result = result.owned();
     if !bound.is_empty() {
-        values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+        let names = symbol_names(context, &bound)?;
+        handles::set_attribute(
+            context,
+            &mut result,
+            handles::symbol(|symbols| symbols.names),
+            names,
+        )?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-/// A new environment holding a named list's elements.
-pub unsafe fn list_to_env(list: Sexp, enclosure: Sexp) -> R<Sexp> {
-    let enclosure = if enclosure.kind() == SexpType::Environment {
-        enclosure
-    } else {
-        base_env()
-    };
-    let env = new_env(enclosure)?;
-    fill_env(env, list, EmptyName::Skip)?;
-    Ok(env)
+/// A new environment holding a named list's elements, enclosed by `enclosure`, or by the base
+/// environment when there is none. An empty name is skipped, as `eval` and `substitute` over a
+/// list skip one.
+pub fn list_to_environment<'s>(
+    context: &mut Cx<'s>,
+    list: Local<'s>,
+    enclosure: Option<Local<'_, Environment>>,
+) -> R<Local<'s, Environment>> {
+    let enclosure = enclosure.unwrap_or_else(handles::base_environment);
+    let environment = handles::new_environment(context, enclosure)?;
+    fill_environment(context, environment, list, EmptyName::Skip)?;
+    Ok(environment)
 }
 
 /// GNU R's `list2env` rejects an empty name, while `eval` and `substitute` over a list skip
 /// one, so the caller says which.
-unsafe fn fill_env(env: Sexp, list: Sexp, empty_name: EmptyName) -> R<()> {
-    let names = values::names(list);
-    if names == nil() {
+fn fill_environment<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    list: Local<'s>,
+    empty_name: EmptyName,
+) -> R<()> {
+    let names = handles::names_of(context, list)?;
+    let Some(names) = handles::dense::<Str>(context, names)? else {
         return Ok(());
-    }
-    for index in 0..length(list) {
-        let name = names.element(index);
-        if name.length() == 0 && name != values::na_string() {
+    };
+    let Some(list) = handles::dense::<List>(context, list)? else {
+        return Ok(());
+    };
+    for index in 0..list.len() {
+        let name = names.get(context, index);
+        if name.bytes().is_empty() && !handles::is_na(name) {
             match empty_name {
                 EmptyName::Skip => continue,
                 EmptyName::Reject => return Err(error("attempt to use zero-length variable name")),
             }
         }
-        let symbol = values::install_charsxp_text(name)?;
-        define(symbol, list.element(index), env)?;
+        let symbol = handles::install_element(context, names, index)?;
+        let value = context.root(list.get(context, index));
+        handles::define_binding(context, environment, symbol, value)?;
     }
     Ok(())
 }
@@ -924,566 +1138,693 @@ enum EmptyName {
     Reject,
 }
 
-unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
-    let list = call.arg(0);
-    if list.kind() != SexpType::List && list != nil() {
+fn do_list2env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let list = arguments.value(0);
+    if list.r_type() != SexpType::List && list.r_type() != SexpType::Nil {
         return Err(error("first argument must be a named list"));
     }
-    if length(list) > 0 && values::names(list) == nil() {
+    if handles::length(context, list) > 0
+        && handles::names_attribute(context, list).r_type() == SexpType::Nil
+    {
         return Err(error(
             "names(x) must be a character vector of the same length as x",
         ));
     }
-    let env = call.arg(1);
-    if env.kind() != SexpType::Environment {
+    let Some(environment) = arguments.value(1).downcast::<Environment>() else {
         return Err(error("'envir' argument must be an environment"));
-    }
-    fill_env(env, list, EmptyName::Reject)?;
-    Ok(env)
+    };
+    fill_environment(context, environment, list, EmptyName::Reject)?;
+    Ok(environment.value())
 }
 
-unsafe fn do_lock_environment(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
-    let bindings = values::as_logical_scalar(call.arg(1)) == 1;
-    if bindings {
-        for symbol in crate::heap().bound_symbols(env) {
-            if let Some(cell) = crate::heap().frame_cell(env, symbol) {
-                cell.set_gp_bits(gp::BINDING_LOCKED, true);
+fn do_lock_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = environment_arg(context, arguments.value(0), "env")?;
+    if handles::logical_scalar(context, arguments.value(1)) == 1 {
+        for symbol in handles::bound_symbols(context, environment, false) {
+            if let Some(binding) = handles::frame_binding(context, environment, symbol) {
+                handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, true);
             }
         }
     }
-    if env != base_env() && env != base_namespace() {
-        env.set_gp_bits(gp::FRAME_LOCKED, true);
+    if !environment.is(handles::base_environment()) && !environment.is(handles::base_namespace())
+    {
+        handles::lock_frame(context, environment);
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-unsafe fn do_environment_is_locked(call: &Call<'_>) -> R<Sexp> {
-    let env = binding_environment(call.arg(0))?;
-    scalar_bool(env.has_gp(gp::FRAME_LOCKED))
+fn do_environment_is_locked<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = binding_environment(context, arguments.value(0))?;
+    let locked = environment.read(context).has_flag(gp::FRAME_LOCKED);
+    handles::logical_constant(context, locked as i32)
 }
 
-unsafe fn binding_cell(call: &Call<'_>) -> R<Sexp> {
-    let symbol = call.arg(0);
-    if symbol.kind() != SexpType::Symbol {
+/// The binding the `symbol` and `env` arguments of the binding functions name.
+fn binding_cell<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s, Binding>> {
+    let Some(symbol) = arguments.value(0).downcast::<Symbol>() else {
         return Err(error("not a symbol"));
+    };
+    let environment = binding_environment(context, arguments.value(1))?;
+    match handles::frame_binding(context, environment, symbol) {
+        Some(binding) => Ok(context.root(binding)),
+        None => Err(error(format!(
+            "no binding for \"{}\"",
+            symbol_text(context, symbol)
+        ))),
     }
-    let env = binding_environment(call.arg(1))?;
-    crate::heap()
-        .frame_cell(env, symbol)
-        .ok_or_else(|| error(format!("no binding for \"{}\"", symbol_name(symbol))))
 }
 
 /// The environment argument of the binding and locking functions, which unlike most take no
 /// number for a frame: only an environment, or an S4 object that holds one, as GNU R's
 /// `simple_as_environment` allows.
-unsafe fn binding_environment(value: Sexp) -> R<Sexp> {
-    if value == nil() {
+fn binding_environment<'s>(context: &Cx<'s>, value: Local<'s>) -> R<Local<'s, Environment>> {
+    if value.r_type() == SexpType::Nil {
         return Err(error("use of NULL environment is defunct"));
     }
-    simple_as_environment(value).ok_or_else(|| error("not an environment"))
+    simple_as_environment(context, value).ok_or_else(|| error("not an environment"))
 }
 
 /// GNU R's `simple_as_environment`: an environment, or the one an S4 object extends.
-unsafe fn simple_as_environment(value: Sexp) -> Option<Sexp> {
-    let env = match value.kind() {
-        SexpType::Environment => value,
-        SexpType::Object if value.has_gp(gp::S4_OBJECT) => get_attr(value, symbols().dot_xdata),
-        _ => return None,
-    };
-    (env.kind() == SexpType::Environment).then_some(env)
-}
-
-unsafe fn do_lock_binding(call: &Call<'_>) -> R<Sexp> {
-    binding_cell(call)?.set_gp_bits(gp::BINDING_LOCKED, true);
-    Ok(nil())
-}
-
-unsafe fn do_unlock_binding(call: &Call<'_>) -> R<Sexp> {
-    binding_cell(call)?.set_gp_bits(gp::BINDING_LOCKED, false);
-    Ok(nil())
-}
-
-unsafe fn do_binding_is_locked(call: &Call<'_>) -> R<Sexp> {
-    scalar_bool(binding_cell(call)?.has_gp(gp::BINDING_LOCKED))
-}
-
-unsafe fn do_make_active_binding(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "not a symbol", false)?;
-    let function = call.arg(1);
-    let env = environment_arg(call.arg(2), "env")?;
-    if !values::is_function(function) {
-        return Err(call.error("'fun' must be a function"));
+fn simple_as_environment<'s>(context: &Cx<'s>, value: Local<'s>) -> Option<Local<'s, Environment>> {
+    if let Some(environment) = value.downcast::<Environment>() {
+        return Some(environment);
     }
-    let heap = crate::heap();
-    if let Some(cell) = heap.frame_cell(env, symbol) {
-        if !cell.has_gp(gp::ACTIVE_BINDING) {
-            return Err(call.error("symbol already has a regular binding"));
+    if value.r_type() != SexpType::Object || !handles::is_s4(value) {
+        return None;
+    }
+    let data = handles::get_attribute(context, value, handles::symbol(|symbols| symbols.dot_xdata));
+    context.root(data).downcast::<Environment>()
+}
+
+fn do_lock_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let binding = binding_cell(context, arguments)?;
+    handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, true);
+    Ok(handles::null())
+}
+
+fn do_unlock_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let binding = binding_cell(context, arguments)?;
+    handles::set_binding_flags(context, binding, gp::BINDING_LOCKED, false);
+    Ok(handles::null())
+}
+
+fn do_binding_is_locked<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let binding = binding_cell(context, arguments)?;
+    let locked = binding.read(context).is_locked();
+    handles::logical_constant(context, locked as i32)
+}
+
+fn do_make_active_binding<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let symbol = name_symbol(context, arguments.value(0), "not a symbol", false)?;
+    let function = arguments.value(1);
+    let environment = environment_arg(context, arguments.value(2), "env")?;
+    if !values::is_function_type(function.r_type()) {
+        return Err(arguments.error("'fun' must be a function"));
+    }
+    if let Some(binding) = handles::frame_binding(context, environment, symbol) {
+        if !binding.is_active() {
+            return Err(arguments.error("symbol already has a regular binding"));
         }
-        heap.set_binding_value(cell, function)?;
+        let binding = context.root(binding);
+        handles::assign_binding(context, binding, function)?;
     } else {
-        heap.define(env, symbol, function)?;
-        if let Some(cell) = heap.frame_cell(env, symbol) {
-            cell.set_gp_bits(gp::ACTIVE_BINDING, true);
+        handles::define_binding(context, environment, symbol, function)?;
+        if let Some(binding) = handles::frame_binding(context, environment, symbol) {
+            handles::set_binding_flags(context, binding, gp::ACTIVE_BINDING, true);
         }
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-unsafe fn do_binding_is_active(call: &Call<'_>) -> R<Sexp> {
-    scalar_bool(binding_cell(call)?.has_gp(gp::ACTIVE_BINDING))
+fn do_binding_is_active<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let binding = binding_cell(context, arguments)?;
+    let active = binding.read(context).is_active();
+    handles::logical_constant(context, active as i32)
 }
 
-unsafe fn do_active_binding_function(call: &Call<'_>) -> R<Sexp> {
-    let cell = binding_cell(call)?;
-    if !cell.has_gp(gp::ACTIVE_BINDING) {
-        return Err(call.error("no active binding"));
+fn do_active_binding_function<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+) -> R<Local<'s>> {
+    let binding = binding_cell(context, arguments)?;
+    if !binding.read(context).is_active() {
+        return Err(arguments.error("no active binding"));
     }
-    Ok(cell.cdr())
+    Ok(context.root(binding.read(context).content()))
+}
+
+/// The search path for raw callers, from the global environment to base.
+pub unsafe fn search_path() -> impl Iterator<Item = Sexp> {
+    handles::reading(|context| {
+        search_environments(context)
+            .map(Gc::raw)
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
 }
 
 /// The search path, from the global environment to base.
-pub unsafe fn search_path() -> impl Iterator<Item = Sexp> {
-    let mut next = Some(global_env());
+pub fn search_environments<'a>(context: &'a Cx<'_>) -> impl Iterator<Item = Gc<'a, Environment>> {
+    let base = handles::base_environment();
+    let mut next = Some(handles::global_environment().read(context));
     std::iter::from_fn(move || {
-        let env = next?;
-        // SAFETY: the search path is a chain of live environments ending at base.
-        next = unsafe {
-            let enclosure = env.enclosure();
-            (env != base_env() && enclosure != empty_env()).then_some(enclosure)
-        };
-        Some(env)
+        let environment = next?;
+        next = environment
+            .enclosure()
+            .filter(|enclosure| !environment.is(base) && !enclosure.is(handles::empty_environment()));
+        Some(environment)
     })
 }
 
-/// The name `search()` shows for `env`, an environment on the search path.
-pub(crate) unsafe fn search_name<'a>(env: Sexp) -> Cow<'a, str> {
-    if env == global_env() {
-        return Cow::Borrowed(".GlobalEnv");
-    }
-    if env == base_env() {
-        return Cow::Borrowed("package:base");
-    }
-    values::first_string(get_attr(env, symbols().name)).unwrap_or_default()
+/// The name `search()` shows for `env`, an environment on the search path, for raw callers.
+pub(crate) unsafe fn search_name(env: Sexp) -> String {
+    handles::with(|context| {
+        let env = handles::held(context, env);
+        Ok(search_label(context, env))
+    })
+    .unwrap_or_default()
 }
 
-unsafe fn do_search(_call: &Call<'_>) -> R<Sexp> {
-    let names: Vec<Cow<str>> = search_path().map(|env| search_name(env)).collect();
-    string_vector(&names)
+/// The name `search()` shows for `environment`, an environment on the search path.
+fn search_label(context: &mut Cx<'_>, environment: Local<'_>) -> String {
+    if environment.is(handles::global_environment()) {
+        return ".GlobalEnv".to_owned();
+    }
+    if environment.is(handles::base_environment()) {
+        return "package:base".to_owned();
+    }
+    let name = handles::get_attribute(
+        context,
+        environment,
+        handles::symbol(|symbols| symbols.name),
+    );
+    let name = context.root(name);
+    handles::first_string(context, name)
+        .map(Cow::into_owned)
+        .unwrap_or_default()
+}
+
+/// The search path's environments, each rooted.
+fn search_list<'s>(context: &Cx<'s>) -> Vec<Local<'s, Environment>> {
+    search_environments(context)
+        .map(|environment| context.root(environment))
+        .collect()
+}
+
+fn do_search<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let names: Vec<String> = search_list(context)
+        .into_iter()
+        .map(|environment| search_label(context, environment.value()))
+        .collect();
+    strings(context, &names)
 }
 
 /// `as.environment`: a number is a search-path position, a string a search-path name, a list
 /// a new environment.
-pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
-    match value.kind() {
-        SexpType::Environment => Ok(value),
+pub fn environment_from<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Environment>> {
+    if let Some(environment) = value.downcast::<Environment>() {
+        return Ok(environment);
+    }
+    match value.r_type() {
         SexpType::Integer | SexpType::Real => {
-            let position = values::as_integer_scalar(value);
+            let position = handles::integer_scalar(context, value);
             if position == -1 {
                 // The calling environment.
-                return match interp().frames.len() {
-                    0 => Ok(global_env()),
-                    count => crate::eval::frame_sys_parent(
-                        count - 1,
-                        crate::eval::Reify::Site(crate::eval::Site::CallingPosition),
-                    ),
-                };
+                let count = interp().frames.len();
+                if count == 0 {
+                    return Ok(handles::global_environment());
+                }
+                let environment = context.root_answer(|context| {
+                    eval::caller_environment(context, count - 1, Reify::Site(Site::CallingPosition))
+                })?;
+                return environment
+                    .downcast::<Environment>()
+                    .ok_or_else(|| error("internal error: a frame without an environment"));
             }
             if position < 1 {
                 return Err(error("invalid 'pos' argument"));
             }
-            search_path()
-                .nth(position as usize - 1)
+            let found = search_environments(context).nth(position as usize - 1);
+            found
+                .map(|environment| context.root(environment))
                 .ok_or_else(|| error("invalid 'pos' argument"))
         }
         SexpType::String => {
-            let name = values::require_str(value, "pos")?;
+            let name = required_text(context, value, "pos")?;
             if name == ".GlobalEnv" {
-                return Ok(global_env());
+                return Ok(handles::global_environment());
             }
             if name == "package:base" {
-                return Ok(base_env());
+                return Ok(handles::base_environment());
             }
-            for env in search_path() {
-                if search_name(env) == name {
-                    return Ok(env);
+            for environment in search_list(context) {
+                if search_label(context, environment.value()) == name {
+                    return Ok(environment);
                 }
             }
             Err(error(format!(
                 "no item called \"{name}\" on the search list"
             )))
         }
-        SexpType::List => list_to_env(value, empty_env()),
-        SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
-            let data = get_attr(value, symbols().dot_xdata);
-            if data.kind() == SexpType::Environment {
-                Ok(data)
-            } else {
-                Err(error("S4 object does not extend class \"environment\""))
-            }
+        SexpType::List => list_to_environment(context, value, Some(handles::empty_environment())),
+        SexpType::Object if handles::is_s4(value) => {
+            let data = handles::get_attribute(
+                context,
+                value,
+                handles::symbol(|symbols| symbols.dot_xdata),
+            );
+            context
+                .root(data)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("S4 object does not extend class \"environment\""))
         }
         _ => Err(error("invalid object for 'as.environment'")),
     }
 }
 
-unsafe fn do_as_environment(call: &Call<'_>) -> R<Sexp> {
-    let value = call.arg(0);
-    if value.kind() == SexpType::Nil {
-        return Err(call.error("using 'as.environment(NULL)' is defunct"));
+fn do_as_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let value = arguments.value(0);
+    if value.r_type() == SexpType::Nil {
+        return Err(arguments.error("using 'as.environment(NULL)' is defunct"));
     }
-    as_environment(value)
+    Ok(environment_from(context, value)?.value())
 }
 
-unsafe fn do_pos_to_env(call: &Call<'_>) -> R<Sexp> {
-    as_environment(call.arg(0))
+fn do_pos_to_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    Ok(environment_from(context, arguments.value(0))?.value())
 }
 
-unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
-    let what = call.arg(0);
-    let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
-    let name = call.arg(2);
+fn do_attach<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let what = arguments.value(0);
+    let position = handles::integer_scalar(context, arguments.value(1)).max(2) as usize;
+    let name = arguments.value(2);
     // An attached environment is a copy of `what`'s bindings, as in GNU R, so attaching a
     // namespace leaves its own parent, the imports, in place.
-    let env = new_env(empty_env())?;
-    if what.kind() == SexpType::List {
-        fill_env(env, what, EmptyName::Skip)?;
-    } else if what.kind() == SexpType::Environment {
-        let heap = crate::heap();
-        for symbol in env_symbols(what, true, false) {
-            if let Some(cell) = heap.frame_cell(what, symbol) {
-                heap.define(env, symbol, cell.cdr())?;
-                // An active binding stays active, so reading the copy still calls its function.
-                if cell.has_gp(gp::ACTIVE_BINDING)
-                    && let Some(copy) = heap.frame_cell(env, symbol)
-                {
-                    copy.set_gp_bits(gp::ACTIVE_BINDING, true);
-                }
+    let environment = handles::new_environment(context, handles::empty_environment())?;
+    if what.r_type() == SexpType::List {
+        fill_environment(context, environment, what, EmptyName::Skip)?;
+    } else if let Some(source) = what.downcast::<Environment>() {
+        for symbol in environment_symbols(context, source.read(context).value(), true, false) {
+            let Some(binding) = handles::frame_binding(context, source, symbol) else {
+                continue;
+            };
+            let active = binding.is_active();
+            let content = context.root(binding.content());
+            let symbol = context.root(symbol);
+            handles::define_binding(context, environment, symbol, content)?;
+            // An active binding stays active, so reading the copy still calls its function.
+            if active && let Some(copy) = handles::frame_binding(context, environment, symbol) {
+                handles::set_binding_flags(context, copy, gp::ACTIVE_BINDING, true);
             }
         }
     }
-    let name_symbol = symbols().name;
-    values::set_attr(env, name_symbol, name)?;
-    let mut previous = global_env();
+    handles::set_environment_attribute(
+        context,
+        environment,
+        handles::symbol(|symbols| symbols.name),
+        name,
+    )?;
+    let mut previous = handles::global_environment().read(context);
     for _ in 2..position {
-        let next = previous.enclosure();
-        if next == base_env() {
-            break;
+        match previous.enclosure() {
+            Some(next) if !next.is(handles::base_environment()) => previous = next,
+            _ => break,
         }
-        previous = next;
     }
-    let heap = crate::heap();
-    heap.set_enclosure(env, previous.enclosure());
-    heap.set_enclosure(previous, env);
-    interp().globals.keep.push(env);
-    Ok(env)
+    let previous = context.root(previous);
+    if let Some(enclosure) = previous.read(context).enclosure() {
+        let enclosure = context.root(enclosure);
+        handles::set_enclosure(context, environment, enclosure);
+    }
+    handles::set_enclosure(context, previous, environment);
+    interp().globals.keep.push(environment.raw());
+    Ok(environment.value())
 }
 
-unsafe fn do_detach(call: &Call<'_>) -> R<Sexp> {
-    let position = values::as_integer_scalar(call.arg(0));
+fn do_detach<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let position = handles::integer_scalar(context, arguments.value(0));
     if position < 2 {
-        return Err(call.error("invalid 'pos' argument"));
+        return Err(arguments.error("invalid 'pos' argument"));
     }
-    let mut path = search_path().skip(position as usize - 2);
-    let (Some(previous), Some(env)) = (path.next(), path.next()) else {
-        return Err(call.error("invalid 'pos' argument"));
+    let mut path = search_environments(context).skip(position as usize - 2);
+    let (Some(previous), Some(environment)) = (path.next(), path.next()) else {
+        return Err(arguments.error("invalid 'pos' argument"));
     };
-    if env == base_env() {
-        return Err(call.error("detaching \"package:base\" is not allowed"));
+    if environment.is(handles::base_environment()) {
+        return Err(arguments.error("detaching \"package:base\" is not allowed"));
     }
-    crate::heap().set_enclosure(previous, env.enclosure());
-    interp().globals.keep.retain(|&kept| kept != env);
-    Ok(env)
+    let (previous, environment) = (context.root(previous), context.root(environment));
+    if let Some(enclosure) = environment.read(context).enclosure() {
+        let enclosure = context.root(enclosure);
+        handles::set_enclosure(context, previous, enclosure);
+    }
+    interp()
+        .globals
+        .keep
+        .retain(|&kept| kept != environment.raw());
+    Ok(environment.value())
 }
 
 // Options.
 
+/// The options as a tagged pairlist, for raw callers.
+pub unsafe fn options() -> Sexp {
+    handles::reading(|context| option_list(context).raw())
+}
+
 /// The options as a tagged pairlist. GNU R keeps them as the base environment's `.Options`
 /// binding, which R code reads directly.
-pub unsafe fn options() -> Sexp {
-    match crate::heap().frame_cell(base_env(), symbols().dot_options) {
-        Some(cell) => cell.cdr(),
-        None => nil(),
+pub fn option_list<'a>(context: &'a Cx<'_>) -> Gc<'a> {
+    match handles::frame_binding(
+        context,
+        handles::base_environment(),
+        handles::symbol(|symbols| symbols.dot_options),
+    ) {
+        Some(binding) => binding.content(),
+        None => handles::null().read(context),
     }
+}
+
+/// The cells of the options list, in order.
+fn option_cells<'a>(context: &'a Cx<'_>) -> impl Iterator<Item = Gc<'a, Pairlist>> {
+    let mut next = option_list(context).downcast::<Pairlist>();
+    std::iter::from_fn(move || {
+        let cell = next?;
+        next = cell.rest().downcast::<Pairlist>();
+        Some(cell)
+    })
+}
+
+/// The name of the option a cell of the options list holds.
+fn option_name(cell: Gc<'_, Pairlist>) -> Option<Gc<'_, Chars>> {
+    Some(cell.tag().downcast::<Symbol>()?.name())
 }
 
 /// Removes every option, for a start that sets them again from the C-level defaults.
 pub(crate) unsafe fn clear_options() -> R<()> {
     interp().product_options = crate::linalg::ProductOptions::default();
-    set_options(nil())
+    handles::with(|context| set_options(context, handles::null()))
 }
 
-unsafe fn set_options(list: Sexp) -> R<()> {
-    crate::heap().define_base_variable(symbols().dot_options, list)?;
-    Ok(())
+fn set_options(context: &mut Cx<'_>, list: Local<'_>) -> R<()> {
+    handles::define_base_variable(
+        context,
+        handles::symbol(|symbols| symbols.dot_options),
+        list,
+    )
+}
+
+/// The value of option `name`, or `NULL`, for raw callers.
+pub unsafe fn get_option(name: &str) -> Sexp {
+    handles::reading(|context| option_named(context, name).raw())
 }
 
 /// The value of option `name`, or `NULL`.
-pub unsafe fn get_option(name: &str) -> Sexp {
-    let mut cell = options();
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag().car().bytes() == name.as_bytes() {
-            return cell.car();
-        }
-        cell = cell.cdr();
-    }
-    nil()
+pub fn option_named<'a>(context: &'a Cx<'_>, name: &str) -> Gc<'a> {
+    option_cells(context)
+        .find(|&cell| option_name(cell).is_some_and(|option| option.bytes() == name.as_bytes()))
+        .map_or_else(|| handles::null().read(context), |cell| cell.head())
 }
 
-/// The option the string `name` (a `CHARSXP`) names, or `NULL`. An ASCII name is the same
-/// interned object as the printname of the symbol tagging its option, so it compares by
-/// identity, without reading the bytes of every option it passes.
+/// The option the string `name` (a `CHARSXP`) names, or `NULL`, for raw callers.
 pub unsafe fn option_value(name: Sexp) -> Sexp {
-    let ascii = name.has_gp(gp::ASCII);
-    let mut cell = options();
-    while cell.kind() == SexpType::Pairlist {
-        let printname = cell.tag().car();
-        if printname == name || (!ascii && printname.bytes() == name.bytes()) {
-            return cell.car();
-        }
-        cell = cell.cdr();
-    }
-    nil()
+    handles::reading(|context| option_of(context, Gc::adopt(name)).raw())
+}
+
+/// The option the string `name` names, or `NULL`. An ASCII name is the same interned object as
+/// the printname of the symbol tagging its option, so it compares by identity, without reading
+/// the bytes of every option it passes.
+pub fn option_of<'a>(context: &'a Cx<'_>, name: Gc<'_, Chars>) -> Gc<'a> {
+    let ascii = name.has_flag(gp::ASCII);
+    option_cells(context)
+        .find(|&cell| {
+            option_name(cell).is_some_and(|printname| {
+                printname.is(name) || (!ascii && printname.bytes() == name.bytes())
+            })
+        })
+        .map_or_else(|| handles::null().read(context), |cell| cell.head())
 }
 
 /// Sets the option `symbol` names, removing it for `NULL`, and returns the old value.
-pub unsafe fn set_option(symbol: Sexp, value: Sexp) -> R<Sexp> {
-    match symbol.car().bytes() {
+fn set_option<'s>(
+    context: &mut Cx<'s>,
+    symbol: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    match symbol.name().bytes() {
         b"expressions" => {
-            let depth = values::as_integer_scalar(value);
+            let depth = handles::integer_scalar(context, value);
             if depth > 0 {
                 interp().max_depth = depth.min(500_000) as u32;
             }
         }
         name @ (b"matprod" | b"ry.blas") => {
-            crate::linalg::set_product_option(&mut interp().product_options, name, value)
+            let choice = handles::first_string(context, value).map(Cow::into_owned);
+            crate::linalg::set_product_option(
+                &mut interp().product_options,
+                name,
+                choice.as_deref(),
+            );
         }
         _ => {}
     }
-    let heap = crate::heap();
-    let mut cell = options();
-    let mut previous = nil();
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag() == symbol {
-            let old = cell.car();
-            // Once replaced, the old value is reachable only from the caller.
-            heap.root(old);
-            if value == nil() {
-                if previous == nil() {
-                    set_options(cell.cdr())?;
-                } else {
-                    heap.set_cdr(previous, cell.cdr());
-                }
-            } else {
-                heap.set_car(cell, value);
+    let mut previous = None;
+    let mut found = None;
+    for cell in option_cells(context) {
+        if cell.tag().is(symbol) {
+            found = Some(cell);
+            break;
+        }
+        previous = Some(cell);
+    }
+    let previous = previous.map(|cell| context.root(cell));
+    let found = found.map(|cell| context.root(cell));
+    if let Some(cell) = found {
+        // Once replaced, the old value is reachable only from this root.
+        let old = context.root(cell.read(context).head());
+        if value.r_type() == SexpType::Nil {
+            let rest = context.root(cell.read(context).rest());
+            match previous {
+                Some(previous) => handles::set_rest(context, previous, rest),
+                None => set_options(context, rest)?,
             }
-            return Ok(old);
-        }
-        previous = cell;
-        cell = cell.cdr();
-    }
-    if value != nil() {
-        let fresh = values::cons_tagged(value, nil(), symbol)?;
-        if previous == nil() {
-            set_options(fresh)?;
         } else {
-            heap.set_cdr(previous, fresh);
+            handles::set_head(context, cell, value);
+        }
+        return Ok(old);
+    }
+    if value.r_type() != SexpType::Nil {
+        let tag = context.root(symbol).value();
+        let fresh = handles::cons(context, tag, value, handles::null())?;
+        match previous {
+            Some(previous) => handles::set_rest(context, previous, fresh),
+            None => set_options(context, fresh)?,
         }
     }
-    Ok(nil())
+    Ok(handles::null())
 }
 
-unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
-    let mut entries: Vec<(String, Sexp)> = Vec::new();
-    let mut cell = options();
-    while cell.kind() == SexpType::Pairlist {
-        entries.push((symbol_name(cell.tag()).into_owned(), cell.car()));
-        cell = cell.cdr();
-    }
-    let entries: Vec<(String, Sexp)> = match names {
-        Some(names) => names
-            .iter()
-            .map(|name| {
-                let value = entries
-                    .iter()
-                    .find(|(entry, _)| entry == name)
-                    .map_or(nil(), |(_, value)| *value);
-                (name.clone(), value)
-            })
-            .collect(),
-        None => {
-            let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
-            collation_order(&names)
-                .into_iter()
-                .map(|index| entries[index as usize].clone())
-                .collect()
-        }
-    };
-    let items: Vec<(&str, Sexp)> = entries
-        .iter()
-        .map(|(name, value)| (name.as_str(), *value))
+/// `options()`: every option, sorted by name.
+fn options_list<'s>(context: &mut Cx<'s>) -> R<Local<'s>> {
+    let entries: Vec<(String, Local<'s>)> = option_cells(context)
+        .map(|cell| {
+            let name = option_name(cell).map(|name| handles::text(name).into_owned());
+            (name.unwrap_or_default(), context.root(cell.head()))
+        })
         .collect();
-    values::named_list(&items)
+    let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+    let order = collation_order(&names);
+    let mut list = context.alloc::<List>(entries.len())?;
+    let mut labels = StringFill::new(context, entries.len())?;
+    for (position, &index) in order.iter().enumerate() {
+        let (name, value) = &entries[index as usize];
+        list.set(context, position, *value);
+        labels.push_text(context, name)?;
+    }
+    let mut list = list.owned();
+    let labels = labels.finish().finish().value();
+    handles::set_attribute(
+        context,
+        &mut list,
+        handles::symbol(|symbols| symbols.names),
+        labels,
+    )?;
+    Ok(list.finish().value())
 }
 
-pub(crate) unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
-    let mut args = crate::eval::Args::new();
-    for arg in call.args {
-        if arg.tag == nil() && arg.value.kind() == SexpType::List {
-            let names = values::names(arg.value);
-            for index in 0..length(arg.value) {
-                let tag = if names != nil() {
-                    let name = names.element(index);
-                    if name.bytes().is_empty() {
-                        nil()
-                    } else {
-                        values::install_charsxp(name)?
-                    }
-                } else {
-                    nil()
-                };
-                args.push(Arg {
-                    tag,
-                    value: arg.value.element(index),
-                });
-            }
-        } else {
-            args.push(*arg);
-        }
-    }
-    if call.args.is_empty() {
+/// The raw entry of `options()`, for a native caller that sets options as R code would.
+pub(crate) const OPTIONS: BuiltinFn = safe!(do_options);
+
+fn do_options<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    if arguments.is_empty() {
         interp().visible = true;
-        return options_list(None);
+        return options_list(context);
+    }
+    // A list without a name stands for its elements, each named by its name.
+    let mut items: SmallVec<[Tagged<'s>; 4]> = SmallVec::new();
+    for index in 0..arguments.len() {
+        let (tag, value) = (arguments.tag(index), arguments.value(index));
+        let list = match tag.r_type() {
+            SexpType::Nil => handles::dense::<List>(context, value)?,
+            _ => None,
+        };
+        let Some(list) = list else {
+            items.push(Tagged { tag, value });
+            continue;
+        };
+        let names = handles::names_attribute(context, value);
+        let names = handles::dense::<Str>(context, names)?;
+        for element in 0..list.len() {
+            let tag = match names {
+                Some(names) if !names.get(context, element).bytes().is_empty() => {
+                    let symbol = handles::install_name_at(context, names, element)?;
+                    context.root(symbol).value()
+                }
+                _ => handles::null(),
+            };
+            let value = context.root(list.get(context, element));
+            items.push(Tagged { tag, value });
+        }
     }
     let mut changed = false;
-    // Each entry is an option's name as a CHARSXP and its old or current value.
-    let mut entries: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-    for arg in &args {
-        if arg.tag != nil() {
-            let value = validate_option(&symbol_name(arg.tag), arg.value)?;
-            let old = set_option(arg.tag, value)?;
-            entries.push((arg.tag.car(), old));
+    // Each entry is an option's name and its old or current value.
+    let mut entries: SmallVec<[(Local<'s, Chars>, Local<'s>); 4]> = SmallVec::new();
+    for item in &items {
+        if let Some(symbol) = item.tag.downcast::<Symbol>() {
+            let symbol = symbol.read(context);
+            let value = validate_option(context, &handles::text(symbol.name()), item.value)?;
+            let old = set_option(context, symbol, value)?;
+            entries.push((context.root(symbol.name()), old));
             changed = true;
-        } else if arg.value.kind() == SexpType::String {
+        } else if let Some(names) = handles::dense::<Str>(context, item.value)? {
             // GNU R reads only the first name of a character argument: `options(c("a", "b"))`
             // answers `a` alone.
-            if length(arg.value) == 0 {
-                return Err(call.error("invalid argument"));
+            if names.is_empty() {
+                return Err(arguments.error("invalid argument"));
             }
-            let name = arg.value.element(0);
-            let value = get_option(&char_str(name));
+            let name = context.root(names.get(context, 0));
             // A later argument may remove the option, which leaves the value reachable only
-            // from here.
-            crate::heap().root(value);
+            // from this root.
+            let value = context.root(option_named(context, &handles::text(name.read(context))));
             entries.push((name, value));
-        } else if arg.value == nil() {
-            continue;
-        } else {
-            return Err(call.error("invalid argument"));
+        } else if item.value.r_type() != SexpType::Nil {
+            return Err(arguments.error("invalid argument"));
         }
     }
     interp().visible = !changed;
-    let list = alloc(SexpType::List, entries.len())?;
-    let names = alloc(SexpType::String, entries.len())?;
+    let mut list = context.alloc::<List>(entries.len())?;
+    let mut names = context.alloc::<Str>(entries.len())?;
     for (index, &(name, value)) in entries.iter().enumerate() {
-        values::set_elt(list, index, value);
-        values::set_elt(names, index, name);
+        list.set(context, index, value);
+        names.set(context, index, name);
     }
-    values::set_attr(list, symbols().names, names)?;
-    Ok(list)
+    let mut list = list.owned();
+    let names = names.finish().value();
+    handles::set_attribute(
+        context,
+        &mut list,
+        handles::symbol(|symbols| symbols.names),
+        names,
+    )?;
+    Ok(list.finish().value())
 }
 
 /// Whether `options()` sets the option `name` to `value` without an error, a warning or any
 /// other effect than storing the value, so that a native caller can set it through
-/// [`do_options`] knowing that no condition will name the call.
+/// [`OPTIONS`] knowing that no condition will name the call.
 pub(crate) unsafe fn option_sets_quietly(name: &str, value: Sexp) -> bool {
     // These warn about some values, or change output formatting as they are validated.
     if matches!(name, "max.print" | "nwarnings" | "OutDec" | "scipen") {
         return false;
     }
     // An invalid value is an error whose call is the caller's; it is only inspected here.
-    validate_option(name, value).is_ok()
+    handles::with(|context| {
+        let value = handles::held(context, value);
+        validate_option(context, name, value).map(|_| ())
+    })
+    .is_ok()
 }
 
-unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
+fn validate_option<'s>(context: &mut Cx<'s>, name: &str, value: Local<'s>) -> R<Local<'s>> {
     match name {
         "digits" => {
-            let digits = values::as_integer_scalar(value);
+            let digits = handles::integer_scalar(context, value);
             if !(1..=22).contains(&digits) {
                 return Err(error("invalid 'digits' parameter, allowed 1...22"));
             }
-            scalar_integer(digits)
+            handles::integer(context, digits)
         }
         "width" => {
-            let width = values::as_integer_scalar(value);
+            let width = handles::integer_scalar(context, value);
             if !(10..=10000).contains(&width) {
                 return Err(error("invalid 'width' parameter, allowed 10...10000"));
             }
-            scalar_integer(width)
+            handles::integer(context, width)
         }
         "expressions" => {
-            let depth = values::as_integer_scalar(value);
+            let depth = handles::integer_scalar(context, value);
             if !(25..=500_000).contains(&depth) {
                 return Err(error(
                     "'expressions' parameter invalid, allowed 25...500000",
                 ));
             }
-            scalar_integer(depth)
+            handles::integer(context, depth)
         }
         "warning.length" => {
-            let length = values::as_integer_scalar(value);
+            let length = handles::integer_scalar(context, value);
             if !(100..=8170).contains(&length) {
                 return Err(error("invalid value for 'warning.length'"));
             }
-            scalar_integer(length)
+            handles::integer(context, length)
         }
         "max.print" | "nwarnings" => {
-            if value.kind() == SexpType::Real
-                && length(value) > 0
-                && crate::arith::real_at(value, 0).abs() > f64::from(i32::MAX)
+            if value.r_type() == SexpType::Real
+                && handles::length(context, value) > 0
+                && handles::real_scalar(context, value).abs() > f64::from(i32::MAX)
             {
-                crate::conditions::warning("NAs introduced by coercion to integer range")?;
+                handles::warning(context, "NAs introduced by coercion to integer range")?;
             }
-            let count = values::as_integer_scalar(value);
+            let count = handles::integer_scalar(context, value);
             if count < 1 {
                 return Err(error(format!("invalid value for '{name}'")));
             }
-            scalar_integer(count)
+            handles::integer(context, count)
         }
         "matprod" => {
-            let mode = values::first_string(value).unwrap_or_default();
+            let mode = handles::first_string(context, value).unwrap_or_default();
             if !matches!(&*mode, "default" | "internal" | "blas" | "default.simd") {
                 return Err(error("invalid value for 'matprod'"));
             }
             Ok(value)
         }
         "ry.blas" => {
-            let choice = values::first_string(value).unwrap_or_default();
+            let choice = handles::first_string(context, value).unwrap_or_default();
             if !matches!(&*choice, "reference" | "host") {
                 return Err(error("invalid value for 'ry.blas'"));
             }
             Ok(value)
         }
         "warn" => {
-            let number = if length(value) == 1
+            let number = if handles::length(context, value) == 1
                 && matches!(
-                    value.kind(),
+                    value.r_type(),
                     SexpType::Logical | SexpType::Integer | SexpType::Real
                 ) {
-                crate::arith::real_at(value, 0)
+                handles::real_scalar(context, value)
             } else {
                 f64::NAN
             };
             if number.is_nan() || number < f64::from(i32::MIN) || number > f64::from(i32::MAX) {
                 return Err(error("invalid value for 'warn'"));
             }
-            scalar_integer(number as i32)
+            handles::integer(context, number as i32)
         }
         "OutDec" => {
-            let Some(mark) = values::first_string(value) else {
+            let Some(mark) = handles::first_string(context, value).map(Cow::into_owned) else {
                 return Err(error("invalid value for 'OutDec'"));
             };
             if mark.chars().count() != 1 {
-                crate::conditions::warning("'OutDec' must be a string of one character")?;
+                handles::warning(context, "'OutDec' must be a string of one character")?;
             }
             crate::format::set_output_decimal(&mark);
             Ok(value)
@@ -1491,16 +1832,16 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         // R 4.5 stores `scipen` as an integer within -9..9999, warning about a value it moves
         // there; earlier releases keep it as given and read it as an integer where it is used.
         "scipen" if crate::system::r_at_least(4, 5) => {
-            let numeric = match value.kind() {
+            let numeric = match value.r_type() {
                 SexpType::Logical | SexpType::Real => true,
-                SexpType::Integer => !values::inherits(value, "factor"),
+                SexpType::Integer => !handles::inherits(context, value, "factor"),
                 _ => false,
             };
-            if !numeric || length(value) != 1 {
+            if !numeric || handles::length(context, value) != 1 {
                 return Err(error("invalid 'scipen'"));
             }
-            let digits = if value.kind() == SexpType::Real {
-                let number = crate::arith::real_at(value, 0);
+            let digits = if value.r_type() == SexpType::Real {
+                let number = handles::real_scalar(context, value);
                 if number.is_nan() {
                     NA_INTEGER
                 } else if number >= f64::from(i32::MAX) + 1.0 || number <= f64::from(i32::MIN) {
@@ -1512,7 +1853,7 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
                     number as i32
                 }
             } else {
-                values::as_integer_scalar(value)
+                handles::integer_scalar(context, value)
             };
             const LOWEST: i32 = -9;
             const HIGHEST: i32 = 9999;
@@ -1521,14 +1862,15 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
                     NA_INTEGER => 0,
                     _ => digits.clamp(LOWEST, HIGHEST),
                 };
-                crate::conditions::warning(format!("invalid 'scipen' {digits}, used {used}"))?;
-                return scalar_integer(used);
+                handles::warning(context, format!("invalid 'scipen' {digits}, used {used}"))?;
+                return handles::integer(context, used);
             }
-            scalar_integer(digits)
+            handles::integer(context, digits)
         }
         "deparse.cutoff" => {
-            if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
-                scalar_integer(values::as_integer_scalar(value))
+            if matches!(value.r_type(), SexpType::Real | SexpType::Integer) {
+                let cutoff = handles::integer_scalar(context, value);
+                handles::integer(context, cutoff)
             } else {
                 Ok(value)
             }
@@ -1536,69 +1878,86 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         // GNU R stores a function given as the error handler as a call to it.
         "error"
             if matches!(
-                value.kind(),
+                value.r_type(),
                 SexpType::Closure | SexpType::Builtin | SexpType::Special
             ) =>
         {
-            values::lcons(value, nil())
+            Ok(handles::language(context, value, handles::null())?.value())
         }
         _ => Ok(value),
     }
 }
 
-unsafe fn do_get_option(call: &Call<'_>) -> R<Sexp> {
-    let name = call.arg(0);
-    if name.kind() != SexpType::String || length(name) != 1 {
-        return Err(error("'x' must be a character string"));
-    }
-    if name.element(0).bytes().is_empty() {
+fn do_get_option<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let name = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(name) if name.len() == 1 => name,
+        _ => return Err(error("'x' must be a character string")),
+    };
+    let name = name.get(context, 0);
+    if name.bytes().is_empty() {
         return Err(error("attempt to use zero-length variable name"));
     }
-    Ok(option_value(name.element(0)))
+    Ok(context.root(option_of(context, name)))
 }
 
 /// Sets the options GNU R's C code sets at startup, before any R code runs.
 pub unsafe fn install_default_options() -> R<()> {
-    let defaults: Vec<(&str, Sexp)> = vec![
-        ("prompt", scalar_string("> ")?),
-        ("continue", scalar_string("+ ")?),
-        ("expressions", scalar_integer(5000)?),
-        ("width", scalar_integer(80)?),
-        ("deparse.cutoff", scalar_integer(60)?),
-        ("digits", scalar_integer(7)?),
-        ("echo", scalar_bool(false)?),
-        ("verbose", scalar_bool(false)?),
-        ("check.bounds", scalar_bool(false)?),
-        ("keep.source", scalar_bool(false)?),
-        (
-            "keep.source.pkgs",
-            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
-        ),
-        ("keep.parse.data", scalar_bool(true)?),
-        ("keep.parse.data.pkgs", scalar_bool(false)?),
-        ("warning.length", scalar_integer(1000)?),
-        ("nwarnings", scalar_integer(50)?),
-        ("OutDec", scalar_string(".")?),
-        ("browserNLdisabled", scalar_bool(false)?),
-        ("CBoundsCheck", scalar_bool(false)?),
-        ("matprod", scalar_string("default")?),
-        ("PCRE_study", scalar_integer(10)?),
-        ("PCRE_use_JIT", scalar_bool(true)?),
-        ("PCRE_limit_recursion", values::fresh_logical(NA_INTEGER)?),
-        ("rl_word_breaks", scalar_string(" \t\n\"\\'`><=%;,|&{()}")?),
-        ("warn", scalar_integer(0)?),
-        ("timeout", scalar_integer(60)?),
-        ("encoding", scalar_string("native.enc")?),
-        ("show.error.messages", scalar_bool(true)?),
-        ("scipen", scalar_integer(0)?),
-        ("max.print", scalar_integer(99999)?),
-        ("add.smooth", scalar_bool(true)?),
-        ("stringsAsFactors", scalar_bool(false)?),
-        ("useFancyQuotes", scalar_bool(true)?),
-        ("catch.script.errors", scalar_bool(false)?),
+    handles::with(default_options)
+}
+
+fn default_options(context: &mut Cx<'_>) -> R<()> {
+    enum Default {
+        Text(&'static str),
+        Integer(i32),
+        Logical(bool),
+        Missing,
+    }
+    let keep_package_source = std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes");
+    let defaults = [
+        ("prompt", Default::Text("> ")),
+        ("continue", Default::Text("+ ")),
+        ("expressions", Default::Integer(5000)),
+        ("width", Default::Integer(80)),
+        ("deparse.cutoff", Default::Integer(60)),
+        ("digits", Default::Integer(7)),
+        ("echo", Default::Logical(false)),
+        ("verbose", Default::Logical(false)),
+        ("check.bounds", Default::Logical(false)),
+        ("keep.source", Default::Logical(false)),
+        ("keep.source.pkgs", Default::Logical(keep_package_source)),
+        ("keep.parse.data", Default::Logical(true)),
+        ("keep.parse.data.pkgs", Default::Logical(false)),
+        ("warning.length", Default::Integer(1000)),
+        ("nwarnings", Default::Integer(50)),
+        ("OutDec", Default::Text(".")),
+        ("browserNLdisabled", Default::Logical(false)),
+        ("CBoundsCheck", Default::Logical(false)),
+        ("matprod", Default::Text("default")),
+        ("PCRE_study", Default::Integer(10)),
+        ("PCRE_use_JIT", Default::Logical(true)),
+        ("PCRE_limit_recursion", Default::Missing),
+        ("rl_word_breaks", Default::Text(" \t\n\"\\'`><=%;,|&{()}")),
+        ("warn", Default::Integer(0)),
+        ("timeout", Default::Integer(60)),
+        ("encoding", Default::Text("native.enc")),
+        ("show.error.messages", Default::Logical(true)),
+        ("scipen", Default::Integer(0)),
+        ("max.print", Default::Integer(99999)),
+        ("add.smooth", Default::Logical(true)),
+        ("stringsAsFactors", Default::Logical(false)),
+        ("useFancyQuotes", Default::Logical(true)),
+        ("catch.script.errors", Default::Logical(false)),
     ];
-    for (name, value) in defaults {
-        set_option(values::install(name)?, value)?;
+    for (name, default) in defaults {
+        let value = match default {
+            Default::Text(text) => strings(context, &[text])?,
+            Default::Integer(number) => handles::integer(context, number)?,
+            Default::Logical(flag) => handles::logical_constant(context, flag as i32)?,
+            // A fresh vector, where GNU R's C code allocates one.
+            Default::Missing => context.scalar::<Logical>(NA_INTEGER)?.finish().value(),
+        };
+        let symbol = handles::install_bytes(context, name.as_bytes())?;
+        set_option(context, symbol, value)?;
     }
     Ok(())
 }

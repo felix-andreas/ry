@@ -202,8 +202,9 @@ pub struct Frame {
 impl Frame {
     /// Whether `env` is this frame's environment, which for a slot frame is the one that
     /// stands for it whether or not it binds anything yet.
-    pub unsafe fn owns(&self, env: Sexp) -> bool {
-        self.env.raw() == env || (self.pending.raw() == env && env.kind() == SexpType::Environment)
+    pub fn owns(&self, env: Sexp) -> bool {
+        // The pending slot holds `NULL` until the frame's environment is made.
+        self.env.raw() == env || (self.pending.raw() == env && env != values::nil())
     }
 }
 

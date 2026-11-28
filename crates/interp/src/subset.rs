@@ -2523,12 +2523,12 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
 /// GNU R's `R_getS4DataSlot`: the data part of an S4 object whose class extends a basic type,
 /// held in `.Data` or, for an environment such as a reference class object, in `.xData`.
 /// `NULL` when the class extends none.
-pub(crate) unsafe fn s4_data_part(object: Sexp) -> Sexp {
-    let data = get_attr(object, symbols().dot_data);
-    if data != nil() {
+pub(crate) fn s4_data_part<'a>(context: &'a Cx<'_>, object: Local<'_>) -> Gc<'a> {
+    let data = handles::get_attribute(context, object, handles::symbol(|symbols| symbols.dot_data));
+    if data.r_type() != SexpType::Nil {
         return data;
     }
-    get_attr(object, symbols().dot_xdata)
+    handles::get_attribute(context, object, handles::symbol(|symbols| symbols.dot_xdata))
 }
 
 /// Which of GNU R's name lookups a subscript goes through.

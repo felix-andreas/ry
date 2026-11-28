@@ -1718,8 +1718,13 @@ impl<'s> Args<'_, 's> {
 
     /// Whether the call was made from a closure's frame, which a `return` leaves.
     pub fn in_function(&self, _context: &Cx<'s>) -> bool {
-        // SAFETY: finding the frame reads the frame stack and the environment's frame mark.
-        unsafe { self.call.frame_index().is_some() }
+        self.call.frame_index().is_some()
+    }
+
+    /// The position in the frame stack of the closure frame the call was made from, without
+    /// giving a slot frame its environment; `None` when it was made from no closure frame.
+    pub fn frame_index(&self) -> Option<usize> {
+        self.call.frame_index()
     }
 
     /// `nargs()` for the call: the number of arguments the closure it was made from was
@@ -1751,9 +1756,7 @@ impl<'s> Args<'_, 's> {
         add: bool,
         after: bool,
     ) {
-        // SAFETY: finding the frame reads the frame stack, and the frame's list of exit
-        // expressions roots the expression from here on.
-        let Some(index) = (unsafe { self.call.frame_index() }) else {
+        let Some(index) = self.call.frame_index() else {
             return;
         };
         let frame = &mut crate::interp().frames[index];
@@ -2336,21 +2339,6 @@ pub fn quoted_value<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> 
         }
         _ => Ok(value),
     }
-}
-
-/// `ls(environment, all.names = TRUE, sorted = FALSE)`.
-#[inline]
-pub fn environment_names<'s>(
-    context: &mut Cx<'s>,
-    environment: Local<'s, Environment>,
-) -> R<Local<'s>> {
-    // SAFETY: the environment is rooted, and listing it allocates, which `&mut Cx` permits.
-    Ok(unsafe {
-        rooted(
-            context,
-            crate::envir::env_names(environment.raw(), true, false)?,
-        )
-    })
 }
 
 /// `1:count` as a compact sequence, when the host provides one.
@@ -3614,36 +3602,6 @@ pub fn record_profile_sample(_context: &mut Cx<'_>, name: &str) -> R<()> {
     unsafe { crate::utils::record_profile_sample(Some(name)) }
 }
 
-/// The environment a list's named elements are bound in for `eval`, enclosed by `enclosure`, or
-/// by the base environment when there is none (`envir::list_to_env`).
-pub fn list_environment_in<'s>(
-    context: &mut Cx<'s>,
-    list: Local<'_>,
-    enclosure: Option<Local<'_, Environment>>,
-) -> R<Local<'s, Environment>> {
-    let enclosure = enclosure.map_or_else(values::nil, Local::raw);
-    // SAFETY: the list and the enclosure are rooted, the environment allocates, which `&mut Cx`
-    // permits, and it is rooted before anything else allocates.
-    let environment = unsafe { rooted(context, crate::envir::list_to_env(list.raw(), enclosure)?) };
-    environment
-        .downcast::<Environment>()
-        .ok_or_else(|| error("internal error: a list made no environment"))
-}
-
-/// `sys.frame(which)` as seen from the frame of `environment`.
-pub fn sys_frame<'s>(
-    context: &mut Cx<'s>,
-    which: i32,
-    environment: Local<'_, Environment>,
-) -> R<Local<'s, Environment>> {
-    // SAFETY: the environment is rooted, and a slot frame's environment is made on demand,
-    // which allocates, as `&mut Cx` permits; the frame stack holds the environment found.
-    let frame = unsafe { rooted(context, crate::envir::sys_frame(which, environment.raw())?) };
-    frame
-        .downcast::<Environment>()
-        .ok_or_else(|| error("internal error: a frame without an environment"))
-}
-
 /// `expression` evaluated in `environment` in a context of its own, as `eval` runs it: the
 /// context counts as a frame of `function` called from the frame of `caller`, for
 /// `sys.call` and friends, and a `return` in the expression returns from it. An expression
@@ -4605,12 +4563,137 @@ pub fn assign_local(
     }
 }
 
+/// Makes `parent` the enclosure of `environment`, moving the binding epoch that inline caches
+/// trust.
+pub fn set_enclosure(
+    _context: &mut Cx<'_>,
+    environment: Local<'_, Environment>,
+    parent: Local<'_, Environment>,
+) {
+    // SAFETY: both are rooted, and re-parenting changes the heap, which `&mut Cx` permits.
+    unsafe { crate::heap().set_enclosure(environment.raw(), parent.raw()) }
+}
+
+/// Gives the frame of `environment` a hash table of about `size` buckets, as `new.env(hash =
+/// TRUE)` asks.
+pub fn set_frame_hashed(_context: &mut Cx<'_>, environment: Local<'_, Environment>, size: i32) {
+    // SAFETY: the environment is rooted, and the table allocates, which `&mut Cx` permits.
+    unsafe { crate::heap().set_frame_hashed(environment.raw(), size) }
+}
+
+/// Removes the binding of `symbol` from the frame of `environment` itself: true when there was
+/// one.
+pub fn remove_binding(
+    _context: &mut Cx<'_>,
+    environment: Local<'_, Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> R<bool> {
+    // SAFETY: both are live, and the removal changes the heap, which `&mut Cx` permits.
+    Ok(unsafe { crate::heap().remove_binding(environment.raw(), symbol.raw())? })
+}
+
+/// The symbols the frame of `environment` binds: in its listing order when `listed`, and
+/// otherwise in no particular order.
+pub fn bound_symbols(
+    _context: &Cx<'_>,
+    environment: impl Pointer<Environment>,
+    listed: bool,
+) -> Vec<Gc<'static, Symbol>> {
+    // SAFETY: the environment is live, the listing allocates no heap object, and the heap keeps
+    // a symbol for as long as it lives.
+    unsafe {
+        let heap = crate::heap();
+        let symbols = if listed {
+            heap.frame_symbols(environment.raw())
+        } else {
+            heap.bound_symbols(environment.raw())
+        };
+        symbols.into_iter().map(|symbol| Gc::adopt(symbol)).collect()
+    }
+}
+
+/// Locks or unlocks `binding` against assignment.
+pub fn set_binding_locked(binding: impl Pointer<Binding>, locked: bool) {
+    // SAFETY: the cell is live, and the flag is a bit of its header that no reader keeps
+    // across a change.
+    unsafe { binding.raw().set_gp_bits(gp::BINDING_LOCKED, locked) }
+}
+
+/// Makes reading `binding` call the function it holds.
+pub fn make_binding_active(binding: impl Pointer<Binding>) {
+    // SAFETY: as for `set_binding_locked`.
+    unsafe { binding.raw().set_gp_bits(gp::ACTIVE_BINDING, true) }
+}
+
+/// Locks the frame of `environment` against new bindings.
+pub fn lock_frame(environment: impl Pointer<Environment>) {
+    // SAFETY: as for `set_binding_locked`.
+    unsafe { environment.raw().set_gp_bits(gp::FRAME_LOCKED, true) }
+}
+
+/// Binds `symbol` to `value` in the base environment, writing through a locked binding.
+pub fn define_base_variable(
+    _context: &mut Cx<'_>,
+    symbol: impl Pointer<Symbol>,
+    value: Local<'_>,
+) -> R<()> {
+    // SAFETY: both are live, and the binding may allocate, which `&mut Cx` permits.
+    unsafe { Ok(crate::heap().define_base_variable(symbol.raw(), value.raw())?) }
+}
+
+/// Replaces the value `cell` holds.
+pub fn set_head(_context: &mut Cx<'_>, cell: Local<'_, Pairlist>, value: Local<'_>) {
+    // SAFETY: both are rooted, and the store changes the heap, which `&mut Cx` permits.
+    unsafe { crate::heap().set_car(cell.raw(), value.raw()) }
+}
+
+/// Replaces the cells that follow `cell`.
+pub fn set_rest(_context: &mut Cx<'_>, cell: Local<'_, Pairlist>, rest: Local<'_>) {
+    // SAFETY: as for `set_head`.
+    unsafe { crate::heap().set_cdr(cell.raw(), rest.raw()) }
+}
+
+/// Sets the attribute called `name` of `environment`, which every reference to it shares.
+pub fn set_environment_attribute<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'_, Environment>,
+    name: Gc<'_, Symbol>,
+    value: Local<'_>,
+) -> R<()> {
+    store_attribute(context, environment.value(), name, value)
+}
+
+/// A closure of `function`'s formals over `environment`, with no attributes, whose body shares
+/// the compiled code of `function`'s ([`bytecode::body_to_copy`]).
+pub fn rebound_closure<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    environment: Local<'_, Environment>,
+) -> R<Owned<'s>> {
+    // SAFETY: both are rooted and hold the formals and the body or the shared code table holds
+    // it, the closure allocates, which `&mut Cx` permits, and only this handle reaches it.
+    unsafe {
+        let body = crate::bytecode::body_to_copy(function.raw())?;
+        let copy = values::triple(
+            SexpType::Closure,
+            function.raw().car(),
+            body,
+            environment.raw(),
+        )?;
+        Ok(Owned::assume(rooted(context, copy)))
+    }
+}
+
+/// The table of loaded namespaces, by name.
+pub fn namespace_registry<'s>() -> Local<'s, Environment> {
+    // SAFETY: the registry is a permanent root of the heap, and an environment.
+    unsafe { Local::adopt(crate::heap().known().namespace_registry) }
+}
+
 /// The namespace registered as `name`, if it is loaded.
 pub fn registered_namespace<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
     let symbol = install_bytes(context, name.as_bytes())?;
-    // SAFETY: the registry is a permanent root of the heap.
-    let registry = unsafe { Local::adopt(crate::heap().known().namespace_registry) };
-    let namespace = frame_symbol_value(context, registry, symbol)?;
+    let namespace = frame_symbol_value(context, namespace_registry().value(), symbol)?;
     Ok(namespace.filter(|namespace| namespace.r_type() == SexpType::Environment))
 }
 
@@ -5094,21 +5177,6 @@ pub fn set_first_argument(_context: &mut Cx<'_>, call: &mut Owned<'_>, value: Lo
         crate::heap().set_car(call.cdr(), value.raw());
     }
     true
-}
-
-/// `list` as a new environment whose frame binds each named element, enclosed by the empty
-/// environment. A pairlist is read as the list it converts to.
-pub fn list_environment<'s>(context: &mut Cx<'s>, list: Local<'_>) -> R<Local<'s, Environment>> {
-    // SAFETY: the list is rooted, and the conversion and the environment allocate, which
-    // `&mut Cx` permits. The conversion's result is rooted before the environment allocates.
-    unsafe {
-        let mut list = list.raw();
-        if list.kind() == SexpType::Pairlist {
-            list = rooted(context, crate::coerce::coerce_vector(list, SexpType::List)?).raw();
-        }
-        let environment = crate::envir::list_to_env(list, values::empty_env())?;
-        Ok(Local::adopt(rooted(context, environment).raw()))
-    }
 }
 
 /// Whether the frame of `environment` itself binds `symbol` to the empty argument: a formal

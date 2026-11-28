@@ -888,7 +888,7 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
             names, index,
         ))?);
     }
-    let old = kernel(envir::do_options, &arguments, frame)?;
+    let old = kernel(envir::OPTIONS, &arguments, frame)?;
     finish(frame, old, interp().visible)
 }
 
@@ -902,7 +902,7 @@ unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
     if !settable_options(new_options) || length(new_options) == 0 {
         return decline();
     }
-    let old = kernel(envir::do_options, &[new_options], frame)?;
+    let old = kernel(envir::OPTIONS, &[new_options], frame)?;
     finish(frame, old, interp().visible)
 }
 
@@ -916,7 +916,7 @@ unsafe fn do_withr_reset_options(call: &Call<'_>) -> R<Sexp> {
     if !settable_options(old_options) {
         return decline();
     }
-    let old = kernel(envir::do_options, &[old_options], frame)?;
+    let old = kernel(envir::OPTIONS, &[old_options], frame)?;
     finish(frame, old, interp().visible)
 }
 

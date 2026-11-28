@@ -11,7 +11,7 @@ use {
         dispatch::{basic_class, class_of, class_read, s4_classes},
         handles::{
             self, Args, Chars, Cx, Gc, Integer, Local, Logical, Str, Symbol, attribute_cells,
-            attributes_unshared, base_namespace, call_function, dense, environment_names,
+            attributes_unshared, base_namespace, call_function, dense,
             get_attribute, install_name_at, integer_sequence, is_na, is_object, is_s4, length,
             logical_scalar, names_of, null, quoted, safe, safe_direct, safe_unary, set_attribute,
             set_class, stored_names, symbol, text,
@@ -468,7 +468,7 @@ fn do_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
     let object = arguments.value(0);
     if let Some(environment) = object.downcast() {
         // GNU R: `names(env)` is `ls(env, all.names = TRUE, sorted = FALSE)`.
-        return environment_names(context, environment);
+        return crate::envir::environment_names(context, environment, true, false);
     }
     names_of(context, object)
 }
