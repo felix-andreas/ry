@@ -108,8 +108,9 @@ pub struct InferenceTable<'db> {
     /// Owned by the table, like `literals`, so that a rollback drops the comparisons of the
     /// discarded inference together with the variables they name.
     pub comparisons: Vec<PendingComparison<'db>>,
-    /// The open accumulators a fold's arithmetic callback left generic, newest last: the call
-    /// that folds over one gives `Promoted<T>`, not `T` itself (the call arm of `Checker::infer`).
+    /// The accumulators a fold's arithmetic callback left generic, newest last: the call gives
+    /// `Promoted<T>` where its signature's result names the callback's accumulator
+    /// (`Checker::promote_folded`).
     folded: Vec<Ty<'db>>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
@@ -251,23 +252,24 @@ impl<'db> InferenceTable<'db> {
         self.undo.push((var, previous));
     }
 
-    /// Where the accumulators folded from here on start, for [`Self::take_folded`].
+    /// Where the accumulators folded from here on start, for [`Self::is_folded`].
     pub fn folded_mark(&self) -> usize {
         self.folded.len()
     }
 
-    /// Whether `ty` is an accumulator folded since `mark`, and forgets those accumulators.
-    pub fn take_folded(&mut self, db: &'db dyn Db, mark: usize, ty: Ty<'db>) -> bool {
-        if self.folded.len() <= mark {
-            return false;
-        }
-        // The call may hand back its accumulator already resolved, as the init settles it.
-        let resolved = self.resolve(db, ty);
-        let folded = self.folded[mark..]
-            .iter()
-            .any(|&accumulator| self.resolve(db, accumulator) == resolved);
+    pub fn forget_folded(&mut self, mark: usize) {
         self.folded.truncate(mark);
+    }
+
+    /// Whether `ty` is an accumulator folded since `mark`.
+    pub fn is_folded(&self, db: &'db dyn Db, mark: usize, ty: Ty<'db>) -> bool {
+        let Some(folded) = self.folded.get(mark..).filter(|folded| !folded.is_empty()) else {
+            return false;
+        };
+        let resolved = self.resolve(db, ty);
         folded
+            .iter()
+            .any(|&accumulator| self.resolve(db, accumulator) == resolved)
     }
 
     pub fn find(&self, var: InferenceVar) -> InferenceVar {
@@ -1374,8 +1376,8 @@ impl<'db> InferenceTable<'db> {
             return None;
         };
         let result = family?;
-        // An arithmetic callback over an open accumulator keeps it open, as `T * 2` keeps `T`:
-        // the fold's call gives `Promoted<T>`, which reduces once the init settles `T`.
+        // An arithmetic callback leaves an open accumulator open, and the fold's call gives
+        // `Promoted<T>`, which reduces once the init settles `T`.
         if result == FamilyResult::Arithmetic
             && let Some(joined) = constraint.join(Constraint::ArithmeticOrNumber)
         {

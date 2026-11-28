@@ -682,6 +682,19 @@ declared <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 l <- declared([1i64], 1L)
 #: <T: item, U> fn(ys: List<T>, init: U) -> U
 loose <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
+len <- function<A>(f: fn(A, integer) -> A, a: A) -> integer length(a)
+m <- len(function(acc, x) acc * 2, 1L)
+other <- function<A, B>(f: fn(A, integer) -> A, a: A, b: B) -> B b
+n <- other(function(acc, x) acc * 2, 1L, 2L)
+give <- function<A>(f: fn(A, integer) -> A, a: A) -> fn(A, integer) -> A f
+o <- give(function(acc, x) acc * 2, 1L)
+wrap <- function<A>(f: fn(A, integer) -> A, a: A) -> list[A] list(f(a, 1L))
+p <- wrap(function(acc, x) acc * 2, 1L)
+#: <U: arithmetic or number> fn(init: U) -> U
+pass <- function(init) other(function(acc, x) acc * 2, init, init)
+q <- function(xs, init) other(function(acc, x) acc * 2, init, init)
+#: <U: arithmetic or number> fn(init: U) -> fn(Promoted<U>, integer) -> Promoted<U>
+mk <- function(init) give(function(acc, x) acc * 2, init)
 #++++
 doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
@@ -703,6 +716,17 @@ k: integer
 declared: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 l: double
 loose: <T: item, U> fn(ys: List<T>, init: U) -> U
+len: <A> fn(f: fn(A, integer) -> A, a: A) -> integer
+m: integer
+other: <A, B> fn(f: fn(A, integer) -> A, a: A, b: B) -> B
+n: integer
+give: <A> fn(f: fn(A, integer) -> A, a: A) -> fn(A, integer) -> A
+o: fn(double, integer) -> double
+wrap: <A> fn(f: fn(A, integer) -> A, a: A) -> list[A]
+p: list[double]
+pass: <U: arithmetic or number> fn(init: U) -> U
+q: <T, U: arithmetic or number> fn([xs]: T, init: U) -> U
+mk: <U: arithmetic or number> fn(init: U) -> fn(Promoted<U>, integer) -> Promoted<U>
 713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 896..901 warning[unused] `total` is assigned but never used
 1012..1017 warning[unused] `total` is assigned but never used

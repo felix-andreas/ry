@@ -2955,7 +2955,11 @@ doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 
 So `doubled([1i64], 1i64)` is an `I64`, `doubled([1i64], 1L)` a `double`, and
 `doubled([1i64], "a")` a type error. The parameter itself keeps its type, so a function that also
-returns `init` returns `U`. R's fold returns the init itself for an empty `xs`, which the type does
+returns `init` returns `U`. Any function with a callback parameter `fn(A, T) -> A` folds the same
+way: its result reads each `A` as `Promoted<A>`, so for
+`give <- function<A>(f: fn(A, integer) -> A, a: A) -> fn(A, integer) -> A f`,
+`give(function(acc, x) acc * 2, 1L)` is `fn(double, integer) -> double`, while a result that does
+not name `A` keeps its type. R's fold returns the init itself for an empty `xs`, which the type does
 not track: `Reduce(function(acc, x) acc * 2, integer(), 1L)` types as `double` and runs as `1L`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
