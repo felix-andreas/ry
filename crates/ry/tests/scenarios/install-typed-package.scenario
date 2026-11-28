@@ -18,7 +18,7 @@ file pkg/DESCRIPTION
 | Description: Typed functions that an install must keep typed.
 | License: MIT
 file pkg/NAMESPACE
-| export(grow, total, label, total_reading, length_of, capped, step_total)
+| export(grow, total, label, total_reading, length_of, capped, step_total, twice)
 file pkg/R/typed.R
 | grow <- function(x: F64, rate: F64) -> F64 x + rate * x
 | total <- function(n: I64, rate: F64) -> F64 {
@@ -29,6 +29,7 @@ file pkg/R/typed.R
 |   sum
 | }
 | label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))
+| twice <- function<T: numeric>(y: T) -> T y * 2
 file pkg/R/strict.R
 | # typing: strict
 | alias Point = Record{x: F64, y: F64}
@@ -44,7 +45,7 @@ file pkg/R/strict.R
 
 run ry install pkg -l library
 expect exit 0
-expect stdout "typed code: closures=7 written=7"
+expect stdout "typed code: closures=8 written=7 (left out: compiles with its caller (1))"
 
 file use.R
 | library(typedpkg, lib.loc = "library")
@@ -58,6 +59,7 @@ file use.R
 | print(step_total() == 10)
 | print(label)
 | print(deparse(label)[[1]])
+| print(twice)
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry use.R
@@ -76,10 +78,11 @@ expect stdout "[1] TRUE\n[1] TRUE"
 expect stderr "typed: attached `capped` for [I64] -> I64 from typedpkg's code file"
 expect stderr "typed: attached `step_total` for [] -> I64 from typedpkg's code file"
 expect stderr lacks "`capped` runs in the interpreter"
-# An installed function keeps no source, so `print` shows the signature's annotation texts, and
-# `deparse` writes the R code another R reads.
+# An installed function keeps no source, so `print` shows the signature's annotation texts and
+# type parameters, and `deparse` writes the R code another R reads.
 expect stdout "function (name: Str, n: I64) -> Str "
 expect stdout "[1] \"function (name, n) \""
+expect stdout "function<T: numeric> (y: T) -> T "
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R
@@ -138,7 +141,7 @@ expect stdout "NULL"
 # points a script at `ry run --aot`.
 run ry build --aot pkg -l built
 expect exit 0
-expect stdout "typed code: closures=7 written=7"
+expect stdout "typed code: closures=8 written=7 (left out: compiles with its caller (1))"
 env RY_TYPED_LOG 1
 file use-built.R
 | library(typedpkg, lib.loc = "built")

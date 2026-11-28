@@ -624,6 +624,7 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - A closure without source references (an installed package, `ry run` with `keep.source = FALSE`) prints by deparsing, which wrote `function (name, n)` for `function(name: Str, n: I64) -> Str`. The signature's texts are on the closure (`annotations::signature_of`), so the deparser writes `name: T` per formal and `-> T` after the list.
 - Only `print` sets the option bit. `deparse`, `dput` and `dump` produce R code that another R reads, and a `#:`-annotated plain R file must deparse as plain R.
 - The texts are taken once per closure (`Deparser::formal_types`), so a function literal in a default deparses its own formals untyped.
+- A generic signature keeps its type parameter list's text (`Signature::binders`, from the literal or its `#:` block) as the signature's `BINDERS` element, and prints it after `function` (`function<T: numeric> (y: T) -> T`). A stream carries it as a fourth element only when it is non-empty, so a stream without type parameters keeps the three-element shape every ry reads, and `restore_signature` accepts both.
 
 ## `source()` runs a typed file as the checker elaborated it
 

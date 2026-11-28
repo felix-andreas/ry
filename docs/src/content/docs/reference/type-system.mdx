@@ -375,20 +375,23 @@ GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks r
 
 **`print` shows the annotations; `deparse` does not.** A function that keeps no source references,
 such as one from an installed package or, by default, any function under `ry run`, prints from its
-code, and `print` writes the signature's types into it. A generic function prints without its
-type parameters (`function (y: T) -> T`). `deparse` and `dput` write the erasure, because they
-produce R code that another R may read:
+code, and `print` writes the signature's types and type parameters into it. `deparse` and `dput`
+write the erasure, because they produce R code that another R may read:
 
 ```r
 scale <- function(values: double, by: double = 1) -> double values * by
 scale
 deparse(scale)
+twice <- function<T: numeric>(y: T) -> T y * 2
+twice
 ```
 
 ```text ry run runtime=ry
 function (values: double, by: double = 1) -> double 
 values * by
 [1] "function (values, by = 1) " "values * by"
+function<T: numeric> (y: T) -> T 
+y * 2
 ```
 
 Two kinds of signature are not checked at run time:

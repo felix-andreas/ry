@@ -172,3 +172,51 @@ fn with_inline_annotations_off_only_the_block_counts() {
         assert_eq!(resolved(source, false), expected, "{source}");
     }
 }
+
+#[test]
+fn a_generic_signature_keeps_its_type_parameters() {
+    let binders = |source: &str, inline: bool| {
+        let root = syntax::parse(source).syntax_node();
+        let function = root
+            .descendants()
+            .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
+            .unwrap_or_else(|| panic!("no function literal in {source:?}"));
+        signature(&function, inline)
+            .binders
+            .map(|binders| binders.text().to_string())
+    };
+    let cases = [
+        (
+            "f <- function<T: numeric>(y: T) -> T y",
+            true,
+            Some("<T: numeric>"),
+        ),
+        ("f <- \\<A, B>(a: A, b: B) -> A a", true, Some("<A, B>")),
+        (
+            "#: <T> fn(x: T) -> T\nf <- function(x) x",
+            true,
+            Some("<T>"),
+        ),
+        (
+            "#: <T> fn(x: T) -> T\nf <- function(x) x",
+            false,
+            Some("<T>"),
+        ),
+        // A binding's type takes no type parameters (a syntax error), so it declares none.
+        ("f: <T> fn(x: T) -> T <- function(x) x", true, None),
+        ("f <- function<T>(y: T) -> T y", false, None),
+        (
+            "#: <T> fn(x: T) -> T\n#: @param x {T}\nf <- function(x) x",
+            true,
+            None,
+        ),
+        ("f <- function(y: I64) -> I64 y", true, None),
+    ];
+    for (source, inline, expected) in cases {
+        assert_eq!(
+            binders(source, inline).as_deref(),
+            expected,
+            "{source:?} (inline {inline})"
+        );
+    }
+}
