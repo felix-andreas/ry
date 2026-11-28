@@ -23869,6 +23869,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 );
                 let (next, findings) = results.into_iter().next()?;
                 self.report_once(findings);
+                // A step whose type is not known decides nothing about the accumulator, so
+                // joining it in would keep the start's type (`Reduce(c, 1:3)` is `1:3`).
+                if matches!(next.kind(db), TyKind::Any | TyKind::Unknown) {
+                    return Some(next);
+                }
                 if next == accumulator {
                     break;
                 }
@@ -24184,14 +24189,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         let simplified = || {
             let mut highest = None;
             let mut lengths_vary = false;
+            let mut named = false;
             for member in members {
                 let member = self.table.shallow_resolve(db, member);
                 let atomic = combine_operand_atomic(db, member)?;
                 lengths_vary |= !matches!(member.kind(db), TyKind::Scalar(_) | TyKind::Native(_));
+                named |= matches!(member.kind(db), TyKind::NamedVector(_));
                 highest =
                     Some(highest.map_or(atomic, |highest| promote_combine_atomic(highest, atomic)));
             }
-            let vector = Ty::new(db, TyKind::Vector(scalar(db, highest?)));
+            let element = scalar(db, highest?);
+            let vector = Ty::new(
+                db,
+                match named {
+                    true => TyKind::NamedVector(element),
+                    false => TyKind::Vector(element),
+                },
+            );
             Some(match lengths_vary {
                 true => union_of(db, [vector, list]),
                 false => vector,
@@ -24258,7 +24272,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(init) => self.infer(init),
             None => element,
         };
-        self.check_reduce_flags(&bound);
+        self.check_reduce_flags(bound);
         let range = module.range(id);
         let callee_range = self.blame_range(function);
         Some(self.fold_reduce(
@@ -24302,6 +24316,15 @@ impl<'db, 'a> Checker<'db, 'a> {
             named_function: None,
         };
         let mut callback_ty = callback_ty;
+        // A base operator's value signature returns `Any`, so its steps type as the operator does.
+        let operator = match module.kind(function) {
+            ExpressionKind::NameRef(_) => self
+                .naming
+                .non_locals
+                .get(&function)
+                .and_then(|name| arithmetic_operator(name)),
+            _ => None,
+        };
         // Each step can only add members to the accumulator, so a few rounds reach the
         // fixpoint of any fold the checker can type; the bound guards a type that keeps growing.
         for round in 0..4 {
@@ -24311,13 +24334,37 @@ impl<'db, 'a> Checker<'db, 'a> {
                 true => [argument(x, element), argument(start, accumulator)],
                 false => [argument(start, accumulator), argument(x, element)],
             };
-            let returned = self.dispatch_call(
-                range,
-                callee_range,
-                callback_ty,
-                CalleeSource::Value,
-                &arguments,
-            );
+            let returned = match operator {
+                Some(operator) => {
+                    let (lhs, rhs, lhs_ty, rhs_ty) = match right {
+                        true => (x, start, element, accumulator),
+                        false => (start, x, accumulator, element),
+                    };
+                    let computed =
+                        self.infer_binary_numeric(range, operator, lhs, rhs, lhs_ty, rhs_ty);
+                    // The operator may be an S3 or S4 method of the operands' class, which the
+                    // fold does not look up, so an operand it rejects leaves the step unchecked.
+                    if self.errors.len() > step_errors {
+                        self.truncate_errors(step_errors);
+                        self.strict_origins.truncate(step_origins);
+                        any(self.db)
+                    } else {
+                        computed
+                    }
+                }
+                None => self.dispatch_call(
+                    range,
+                    callee_range,
+                    callback_ty,
+                    CalleeSource::Value,
+                    &arguments,
+                ),
+            };
+            // A step of unknown type, such as `c`'s, says nothing about the accumulator, which
+            // joining would hide (`Reduce(c, 1:3)` is not an integer).
+            if matches!(returned.kind(self.db), TyKind::Any | TyKind::Unknown) {
+                return returned;
+            }
             let widened = self.join_types(accumulator, returned);
             if widened == accumulator || round == 3 || self.errors.len() > step_errors {
                 return widened;
@@ -26420,12 +26467,10 @@ fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<&'db [RecordField<
     }
 }
 
-/// `None` unless every argument is an unnamed string literal.
-/// `lapply`'s `X` and `FUN` arguments: by name, or else the first and second positional ones.
-/// The arguments of a call to an R function with these `formals`, bound as R binds them:
-/// exact names first, then the unnamed arguments in order.
 const REDUCE_FORMALS: &[&str] = &["f", "x", "init", "right", "accumulate", "simplify"];
 
+/// The arguments of a call to an R function with these `formals`, bound as R binds them:
+/// exact names first, then the unnamed arguments in order.
 fn bind_formals(module: &Module, arguments: &[Argument], formals: &[&str]) -> BoundFormals {
     let mut values: Vec<Option<ExprId>> = formals
         .iter()
@@ -27365,9 +27410,6 @@ fn mentions_var_in_function<'db>(db: &'db dyn Db, ty: Ty<'db>, var: InferenceVar
     found
 }
 
-/// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result
-/// depends on R's coercion and dispatch rules for the operand types, which one signature cannot
-/// state, so it takes and returns `Any`.
 fn is_base_export(db: &dyn Db, name: &str) -> bool {
     stubs(db).is_some_and(|library| {
         library
@@ -27377,6 +27419,9 @@ fn is_base_export(db: &dyn Db, name: &str) -> bool {
     })
 }
 
+/// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result
+/// depends on R's coercion and dispatch rules for the operand types, which one signature cannot
+/// state, so it takes and returns `Any`.
 fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
     const OPERATORS: &[&str] = &[
         "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",
@@ -27386,6 +27431,20 @@ fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
         return None;
     }
     lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
+}
+
+/// The arithmetic operator a base operator's name reads as a value.
+fn arithmetic_operator(name: &str) -> Option<BinaryOperator> {
+    Some(match name {
+        "+" => BinaryOperator::Add,
+        "-" => BinaryOperator::Subtract,
+        "*" => BinaryOperator::Multiply,
+        "/" => BinaryOperator::Divide,
+        "^" => BinaryOperator::Power,
+        "%%" => BinaryOperator::Modulo,
+        "%/%" => BinaryOperator::IntegerDivide,
+        _ => return None,
+    })
 }
 
 /// Whether a library function returns a `List<B>` whose items no list argument supplies, so its
