@@ -6,6 +6,11 @@
 # the visibility forcing `x` left, so `ident(invisible(1))` stays invisible. Forcing `a` rebinds
 # `h`, which `relay` calls with `b`, so the interpreter finds the new `h` before it forces `b`.
 # A `match` runs its scrutinee first, so `size(build(3))` forces `build(3)` at the entry too.
+# Forcing `a` rebinds `w`, which `b` reads: `late` reads `b` after `a` and sees the new `w`, and
+# `early` reads `b` before `a` and sees the old one. A conversion such as `as.double(2L)` is read
+# ahead without forcing, so `bump` runs natively. Forcing `g()` rebinds `base`, which the left-out
+# default of `rate` reads, and assigns into `y`, which `b`'s argument reads: both are read again
+# after forcing, as R reads them after `a`.
 
 requires ry-runtime
 
@@ -49,6 +54,20 @@ file calls.R
 |   }
 | }
 | print(size(build(3)))
+| late <- function(a: F64, b: F64) -> F64 a * 100 + b
+| early <- function(a: F64, b: F64) -> F64 b + a * 100
+| w <- 1.0
+| print(late({w <- 7.0; 2.0}, w))
+| w <- 1.0
+| print(early({w <- 7.0; 2.0}, w))
+| print(c(bump(as.double(2L)), bump(as.double(as.integer(2.7))), bump(as.numeric(TRUE))))
+| base <- 12.0
+| rated <- function(a: F64, rate: F64 = base / 12.0) -> F64 a + rate
+| g <- function() { base <<- 24.0; y[1] <<- 10.0; 1.0 }
+| y <- 5.0
+| print(rated(g()))
+| y <- 5.0
+| print(late(g(), y + 1.0))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry calls.R
@@ -65,3 +84,10 @@ expect stdout "[1] \"loud b\""
 expect stderr "typed: `relay` runs in the interpreter: computing an argument changed which function `h` names, so the interpreter runs the call"
 expect stdout "6i64"
 expect stderr lacks "`size` runs in the interpreter"
+expect stdout "[1] 207"
+expect stdout "[1] 201"
+expect stdout "[1] 3 3 2"
+expect stderr lacks "`late` runs in the interpreter"
+expect stderr lacks "`early` runs in the interpreter"
+expect stderr lacks "`bump` runs in the interpreter"
+expect stdout "[1] 3 3 2\n[1] 3\n[1] 111"
