@@ -9,8 +9,8 @@ use {
         eval::{self, Reify, Site, define},
         handles::{
             self, Args, Binding, Bytecode, Cells, Chars, Closure, Cx, Elements, Environment,
-            Expression, Gc, Integer, Language, List, Local, Logical, Owned, Pairlist, Promise, Str,
-            StringFill, Symbol, Tagged, Value, safe,
+            Expression, Gc, Integer, Language, List, Local, Logical, Owned, Pairlist, Promise,
+            Real, Str, StringFill, Symbol, Tagged, Value, safe,
         },
         interp,
         sort::collation_order,
@@ -421,7 +421,17 @@ fn body_source(body: Gc<'_>) -> Gc<'_> {
 }
 
 fn do_parent_frame<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
-    let mut n = handles::integer_scalar(context, arguments.value(0));
+    let value = arguments.value(0);
+    // `n` is almost always its default, the double 1, which needs no coercion.
+    let default = matches!(
+        value.standard::<Real>().map(|real| real.as_slice(context)),
+        Some(&[number]) if number == 1.0
+    );
+    let mut n = if default {
+        1
+    } else {
+        handles::integer_scalar(context, value)
+    };
     if n == NA_INTEGER || n < 1 {
         return Err(error("invalid 'n' value"));
     }
@@ -743,11 +753,11 @@ fn strings<'s, Text: AsRef<str>>(context: &mut Cx<'s>, items: &[Text]) -> R<Loca
 }
 
 /// The text of a one-element character argument, as GNU R's `asChar` reads `mode` and `pos`.
-fn required_text(context: &mut Cx<'_>, value: Local<'_>, what: &str) -> R<String> {
+fn required_text<'a>(context: &'a mut Cx<'_>, value: Local<'_>, what: &str) -> R<Cow<'a, str>> {
     if handles::length(context, value) == 1
         && let Some(text) = handles::first_string(context, value)
     {
-        return Ok(text.into_owned());
+        return Ok(text);
     }
     Err(error(format!("invalid '{what}' argument")))
 }
@@ -848,7 +858,7 @@ fn lookup_arguments<'s>(
 ) -> R<(Local<'s, Symbol>, Local<'s, Environment>, String, bool)> {
     let symbol = name_symbol(context, arguments.value(0), "invalid first argument", true)?;
     let environment = environment_arg(context, arguments.value(1), "envir")?;
-    let mode = required_text(context, arguments.value(2), "mode")?;
+    let mode = required_text(context, arguments.value(2), "mode")?.into_owned();
     let inherits = handles::logical_scalar(context, arguments.value(3)) == 1;
     Ok((symbol, environment, mode, inherits))
 }
@@ -1417,6 +1427,7 @@ pub fn environment_from<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'
             if name == "package:base" {
                 return Ok(handles::base_environment());
             }
+            let name = name.into_owned();
             for environment in search_list(context) {
                 if search_label(context, environment.value()) == name {
                     return Ok(environment);
