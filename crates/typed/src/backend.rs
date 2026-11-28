@@ -24,7 +24,7 @@ use {
         shapes, values,
     },
     heap::object::NA_REAL_BITS,
-    interp::standard_library::Encoding,
+    interp::standard_library::UnicodeEncoding,
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
@@ -2125,7 +2125,7 @@ impl Emitter<'_> {
                     &[I32],
                     &[list, code, lossy, out],
                 )[0];
-                if *encoding != Encoding::Utf32 {
+                if *encoding != UnicodeEncoding::Utf32 {
                     let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
                     self.fail_if(bad, &inst.fail_drops)?;
                 }

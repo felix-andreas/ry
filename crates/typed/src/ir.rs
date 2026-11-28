@@ -9,7 +9,7 @@
 //! value must be shared and a `Drop` where a local dies, and lists what a failing instruction
 //! must drop before it gives up.
 
-use {interp::standard_library::Encoding, smallvec::SmallVec, std::fmt};
+use {interp::standard_library::UnicodeEncoding, smallvec::SmallVec, std::fmt};
 
 /// A local's index into [`Function::locals`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -619,13 +619,13 @@ pub enum Op {
     ByteCount(Local),
     /// `Str.to_utf8`, `Str.to_utf16` or `Str.to_utf32`: the string's code units, as a list of
     /// `I64`s.
-    Encode(Encoding, Local),
+    Encode(UnicodeEncoding, Local),
     /// A string decoded from a list of `I64` code units ([`interp::standard_library::decode`]),
     /// failing for a unit out of the encoding's range. A strict decoding assigns into `valid`
     /// whether the units are valid, and an empty string when they are not; a lossy one has no
     /// `valid`.
     Decode {
-        encoding: Encoding,
+        encoding: UnicodeEncoding,
         units: Local,
         valid: Option<Local>,
     },
@@ -880,7 +880,7 @@ impl Op {
             // A split string has at least one piece, so only a later piece can be missing.
             Piece { index, .. } => *index != 1,
             // Every number is a possible UTF-32 unit, valid or not.
-            Decode { encoding, .. } => *encoding != Encoding::Utf32,
+            Decode { encoding, .. } => *encoding != UnicodeEncoding::Utf32,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

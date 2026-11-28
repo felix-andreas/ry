@@ -3031,12 +3031,12 @@ unsafe fn str_to_utf8(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf8, false)
+    from_units(call, UnicodeEncoding::Utf8, false)
 }
 
 /// A Unicode encoding the standard library converts strings to and from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Encoding {
+pub enum UnicodeEncoding {
     Utf8,
     Utf16,
     Utf32,
@@ -3061,21 +3061,15 @@ pub enum Decoded {
 /// `Str.from_utf32` and their lossy forms in every tier. A lossy decoding replaces each invalid
 /// sequence with U+FFFD. R strings cannot hold NUL, so a NUL is invalid like any other unit a
 /// string cannot carry.
-pub fn decode(encoding: Encoding, units: &[i64], lossy: bool) -> Decoded {
-    let out_of_range = |range: std::ops::RangeInclusive<i64>| {
-        units
-            .iter()
-            .position(|unit| !range.contains(unit))
-            .map(|position| Decoded::OutOfRange {
-                position,
-                unit: units[position],
-            })
-    };
+pub fn decode(encoding: UnicodeEncoding, units: &[i64], lossy: bool) -> Decoded {
+    if let Some(position) = units.iter().position(|&unit| !in_range(encoding, unit)) {
+        return Decoded::OutOfRange {
+            position,
+            unit: units[position],
+        };
+    }
     let text = match encoding {
-        Encoding::Utf8 => {
-            if let Some(error) = out_of_range(0..=255) {
-                return error;
-            }
+        UnicodeEncoding::Utf8 => {
             let bytes: Vec<u8> = units.iter().map(|&unit| unit as u8).collect();
             if lossy {
                 String::from_utf8_lossy(&bytes).into_owned()
@@ -3086,10 +3080,7 @@ pub fn decode(encoding: Encoding, units: &[i64], lossy: bool) -> Decoded {
                 }
             }
         }
-        Encoding::Utf16 => {
-            if let Some(error) = out_of_range(0..=65535) {
-                return error;
-            }
+        UnicodeEncoding::Utf16 => {
             let units: Vec<u16> = units.iter().map(|&unit| unit as u16).collect();
             if lossy {
                 String::from_utf16_lossy(&units)
@@ -3100,7 +3091,7 @@ pub fn decode(encoding: Encoding, units: &[i64], lossy: bool) -> Decoded {
                 }
             }
         }
-        Encoding::Utf32 => {
+        UnicodeEncoding::Utf32 => {
             let mut text = String::with_capacity(units.len());
             for &unit in units {
                 match u32::try_from(unit).ok().and_then(char::from_u32) {
@@ -3121,34 +3112,62 @@ pub fn decode(encoding: Encoding, units: &[i64], lossy: bool) -> Decoded {
     }
 }
 
+/// Whether a number can be a code unit of the encoding at all, valid or not.
+pub fn in_range(encoding: UnicodeEncoding, unit: i64) -> bool {
+    match encoding {
+        UnicodeEncoding::Utf8 => (0..=255).contains(&unit),
+        UnicodeEncoding::Utf16 => (0..=65535).contains(&unit),
+        UnicodeEncoding::Utf32 => true,
+    }
+}
+
 /// `Str.from_utf8`, `Str.from_utf16` or `Str.from_utf32`, or a lossy form.
-unsafe fn from_units(call: &Call<'_>, encoding: Encoding, lossy: bool) -> R<Sexp> {
+unsafe fn from_units(call: &Call<'_>, encoding: UnicodeEncoding, lossy: bool) -> R<Sexp> {
     let (parameter, reason) = match encoding {
-        Encoding::Utf8 => ("bytes", "BadUtf8"),
-        Encoding::Utf16 => ("units", "BadUtf16"),
-        Encoding::Utf32 => ("code_points", "BadUtf32"),
+        UnicodeEncoding::Utf8 => ("bytes", "BadUtf8"),
+        UnicodeEncoding::Utf16 => ("units", "BadUtf16"),
+        UnicodeEncoding::Utf32 => ("code_points", "BadUtf32"),
     };
     let [list] = arguments(call, [parameter])?;
     let mut units = Vec::new();
-    for item in list_elements(call, parameter, list)? {
-        units.push(whole(call, parameter, item)?);
+    // Each item is checked whole and in range before the next, so the first bad item reports.
+    for (position, item) in list_elements(call, parameter, list)?
+        .into_iter()
+        .enumerate()
+    {
+        let unit = whole(call, parameter, item)?;
+        if !in_range(encoding, unit) {
+            return Err(out_of_range(call, parameter, encoding, position, unit));
+        }
+        units.push(unit);
     }
     match decode(encoding, &units, lossy) {
         Decoded::Text(text) if lossy => scalar_string(&text),
         Decoded::Text(text) => ok(scalar_string(&text)?),
         Decoded::Invalid => err(reason),
         Decoded::OutOfRange { position, unit } => {
-            let largest = if encoding == Encoding::Utf8 {
-                255
-            } else {
-                65535
-            };
-            Err(call.error(format!(
-                "`{parameter}` must hold numbers from 0 to {largest}, but item {} is {unit}",
-                position + 1
-            )))
+            Err(out_of_range(call, parameter, encoding, position, unit))
         }
     }
+}
+
+/// The error for a unit at a 0-based position that cannot be a code unit of the encoding.
+fn out_of_range(
+    call: &Call<'_>,
+    parameter: &str,
+    encoding: UnicodeEncoding,
+    position: usize,
+    unit: i64,
+) -> Unwind {
+    let largest = if encoding == UnicodeEncoding::Utf8 {
+        255
+    } else {
+        65535
+    };
+    call.error(format!(
+        "`{parameter}` must hold numbers from 0 to {largest}, but item {} is {unit}",
+        position + 1
+    ))
 }
 
 unsafe fn str_to_i64(call: &Call<'_>) -> R<Sexp> {
@@ -3210,7 +3229,7 @@ unsafe fn str_walk_utf8_with_index(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf8_lossy(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf8, true)
+    from_units(call, UnicodeEncoding::Utf8, true)
 }
 
 unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
@@ -3219,11 +3238,11 @@ unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf16(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf16, false)
+    from_units(call, UnicodeEncoding::Utf16, false)
 }
 
 unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf16, true)
+    from_units(call, UnicodeEncoding::Utf16, true)
 }
 
 unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
@@ -3232,11 +3251,11 @@ unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn str_from_utf32(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf32, false)
+    from_units(call, UnicodeEncoding::Utf32, false)
 }
 
 unsafe fn str_from_utf32_lossy(call: &Call<'_>) -> R<Sexp> {
-    from_units(call, Encoding::Utf32, true)
+    from_units(call, UnicodeEncoding::Utf32, true)
 }
 
 // Num.

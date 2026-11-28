@@ -25,8 +25,8 @@ use {
         records::{Fields, Layout},
     },
     interp::{
-        eval::in_tail_position, numbers::Observed, records::rest_name, standard_library::Encoding,
-        values as rvalues,
+        eval::in_tail_position, numbers::Observed, records::rest_name,
+        standard_library::UnicodeEncoding, values as rvalues,
     },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -2003,11 +2003,11 @@ impl Lowering<'_> {
         Ok((list, ty))
     }
 
-    /// `List.concat(first, second)`. An empty list on either side takes the other's item type.
-    /// `List.concat`, or `List.concat_utf8` as the concatenation with the string's bytes.
+    /// `List.concat(first, second)`, or `List.concat_utf8` as the concatenation with the
+    /// string's bytes. An empty list on either side takes the other's item type.
     unsafe fn concat(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [first, second] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `List.concat`"));
+            return Err(Refusal::new("a malformed list concatenation"));
         };
         let first = self.value(first)?;
         let mut second = self.value(second)?;
@@ -2017,7 +2017,7 @@ impl Lowering<'_> {
                     "a `List.concat_utf8` of something other than a string",
                 ));
             }
-            second = self.encode(Encoding::Utf8, second);
+            second = self.encode(UnicodeEncoding::Utf8, second);
         }
         self.usable(first)?;
         self.usable(second)?;
@@ -2029,7 +2029,7 @@ impl Lowering<'_> {
             (item(self.builder.ty(first)), item(self.builder.ty(second)))
         else {
             return Err(Refusal::new(
-                "a `List.concat` of something other than ry lists",
+                "a list concatenation of something other than ry lists",
             ));
         };
         match (self.pending_family(first), self.pending_family(second)) {
@@ -2042,7 +2042,7 @@ impl Lowering<'_> {
         let ty = self.builder.ty(first);
         if ty != self.builder.ty(second) {
             return Err(Refusal::new(
-                "a `List.concat` of lists of different item types",
+                "a list concatenation of lists of different item types",
             ));
         }
         Ok(self.builder.emit(ty, Op::Extend(first, second)))
@@ -5751,9 +5751,9 @@ impl Lowering<'_> {
                 }
                 Ok(match name {
                     "Str.count_utf8_bytes" => self.builder.emit(Type::I64, Op::ByteCount(a)),
-                    "Str.to_utf8" => self.encode(Encoding::Utf8, a),
-                    "Str.to_utf16" => self.encode(Encoding::Utf16, a),
-                    "Str.to_utf32" => self.encode(Encoding::Utf32, a),
+                    "Str.to_utf8" => self.encode(UnicodeEncoding::Utf8, a),
+                    "Str.to_utf16" => self.encode(UnicodeEncoding::Utf16, a),
+                    "Str.to_utf32" => self.encode(UnicodeEncoding::Utf32, a),
                     "Str.with_ascii_uppercased" => {
                         self.builder.emit(Type::Str, Op::Text(Text::AsciiUpper, a))
                     }
@@ -6316,7 +6316,7 @@ impl Lowering<'_> {
                             "a `Str.walk_utf8` of something other than a string",
                         ));
                     }
-                    list = self.encode(Encoding::Utf8, list);
+                    list = self.encode(UnicodeEncoding::Utf8, list);
                 }
                 let ty = self.builder.ty(list);
                 let walkable = if over_dict {
@@ -11104,9 +11104,9 @@ impl Lowering<'_> {
             ));
         }
         let (encoding, reason) = match name {
-            "Str.from_utf8" | "Str.from_utf8_lossy" => (Encoding::Utf8, "BadUtf8"),
-            "Str.from_utf16" | "Str.from_utf16_lossy" => (Encoding::Utf16, "BadUtf16"),
-            _ => (Encoding::Utf32, "BadUtf32"),
+            "Str.from_utf8" | "Str.from_utf8_lossy" => (UnicodeEncoding::Utf8, "BadUtf8"),
+            "Str.from_utf16" | "Str.from_utf16_lossy" => (UnicodeEncoding::Utf16, "BadUtf16"),
+            _ => (UnicodeEncoding::Utf32, "BadUtf32"),
         };
         if name.ends_with("_lossy") {
             return Ok(self.builder.emit(
@@ -11166,7 +11166,7 @@ impl Lowering<'_> {
     }
 
     /// The code units of a string in an encoding, as a list of `I64`s.
-    fn encode(&mut self, encoding: Encoding, string: Local) -> Local {
+    fn encode(&mut self, encoding: UnicodeEncoding, string: Local) -> Local {
         self.builder.emit(
             Type::Vector {
                 item: Item::I64,

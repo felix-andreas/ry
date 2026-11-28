@@ -30,7 +30,7 @@ use {
         },
         rmath::fround,
         sort::collate,
-        standard_library::{Decoded, Encoding, decode},
+        standard_library::{Decoded, UnicodeEncoding, decode},
     },
     smallvec::SmallVec,
     std::{
@@ -2435,19 +2435,18 @@ unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
     !(((differing & LOW_BITS) + LOW_BITS) | differing | LOW_BITS) & inside
 }
 
-/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
 /// `Str.to_utf8`, `Str.to_utf16` or `Str.to_utf32` of a borrowed string, by an
-/// [`Encoding`]'s discriminant.
+/// [`UnicodeEncoding`]'s discriminant.
 pub unsafe extern "C" fn ry_str_encode(lo: u64, hi: u64, encoding: u64) -> *mut List {
     let string = Str { lo, hi };
     let text = string.as_str();
     match encoding_of(encoding) {
-        Encoding::Utf8 => units_list(text.len(), text.bytes().map(i64::from)),
-        Encoding::Utf16 => units_list(
+        UnicodeEncoding::Utf8 => units_list(text.len(), text.bytes().map(i64::from)),
+        UnicodeEncoding::Utf16 => units_list(
             text.encode_utf16().count(),
             text.encode_utf16().map(i64::from),
         ),
-        Encoding::Utf32 => units_list(
+        UnicodeEncoding::Utf32 => units_list(
             text.chars().count(),
             text.chars()
                 .map(|character| i64::from(u32::from(character))),
@@ -2463,7 +2462,7 @@ unsafe fn units_list(length: usize, units: impl Iterator<Item = i64>) -> *mut Li
     list
 }
 
-/// A string decoded from a borrowed list of `I64` code units, by an [`Encoding`]'s
+/// A string decoded from a borrowed list of `I64` code units, by an [`UnicodeEncoding`]'s
 /// discriminant, written to `out`: 1, 2 with an empty string when a strict decoding finds the
 /// units invalid, or 0 when a unit is out of the encoding's range, which the interpreter
 /// reports.
@@ -2486,11 +2485,13 @@ pub unsafe extern "C" fn ry_list_decode(
     }
 }
 
-fn encoding_of(code: u64) -> Encoding {
+/// The encoding whose discriminant the backend passes, which is always one of the three.
+fn encoding_of(code: u64) -> UnicodeEncoding {
     match code {
-        code if code == Encoding::Utf8 as u64 => Encoding::Utf8,
-        code if code == Encoding::Utf16 as u64 => Encoding::Utf16,
-        _ => Encoding::Utf32,
+        code if code == UnicodeEncoding::Utf8 as u64 => UnicodeEncoding::Utf8,
+        code if code == UnicodeEncoding::Utf16 as u64 => UnicodeEncoding::Utf16,
+        code if code == UnicodeEncoding::Utf32 as u64 => UnicodeEncoding::Utf32,
+        _ => unreachable!("the backend passes an encoding's discriminant"),
     }
 }
 
