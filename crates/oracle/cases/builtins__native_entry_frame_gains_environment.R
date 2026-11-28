@@ -9,4 +9,7 @@ f <- function(x) identical(x, g0)
 for (i in 1:3) print(f({ assign("g0", 2, envir = frame_of(f)); 2 }))
 h <- function(x) identical(x, g0)
 for (i in 1:3) print(h({ invisible(sys.frames()); 1 }))
+# A value read before the forcing stays alive when the forcing rebinds its variable.
+k <- function(x) { y <- c(1, 2, 3) * 2; identical(y, x) }
+for (i in 1:3) print(k({ assign("y", NULL, envir = frame_of(k)); invisible(gc()); c(2, 4, 6) }))
 print(g0)

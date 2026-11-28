@@ -833,6 +833,8 @@ pub unsafe fn native_entry_by_value(
     let entry = registered(function);
     let forcing = compiled && !tagged && matches!(entry, Some(Entry::Whole { inlined: true, .. }));
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
+    // How many of `args` a forcing has rooted.
+    let mut rooted = 0;
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -847,7 +849,7 @@ pub unsafe fn native_entry_by_value(
                     // far more cheaply than an evaluation.
                     match eval::settled_without_code(value)? {
                         Some(value) => value,
-                        None => eval::force_promise(value)?,
+                        None => forced_keeping(&args[rooted..], value, &mut rooted)?,
                     }
                 }
                 // Otherwise the binding goes through as it is: each entry resolves only the
@@ -866,6 +868,26 @@ pub unsafe fn native_entry_by_value(
         cell = cell.cdr();
     }
     enter(function, entry, &args)
+}
+
+/// The value of `promise`, forced after rooting `gathered`, the arguments read before it that
+/// no forcing has rooted yet, and rooted itself. The R code a forcing runs can rebind the
+/// variables those values came from (and the promise's own), which would leave them reachable
+/// only from the argument list. Only tier 0 forces here, and the instruction releases the
+/// handle stack after the call.
+#[inline(never)]
+unsafe fn forced_keeping(gathered: &[Arg], promise: Sexp, rooted: &mut usize) -> R<Sexp> {
+    // SAFETY: the caller is a tier 0 instruction, which releases what this roots.
+    unsafe {
+        handles::in_caller_scope(|context| {
+            for arg in gathered {
+                context.root(Gc::adopt(arg.value));
+            }
+            *rooted += gathered.len() + 1;
+            let promise = context.root(Gc::adopt(promise));
+            Ok(context.root(Gc::adopt(eval::force_promise(promise.raw())?)).raw())
+        })
+    }
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
