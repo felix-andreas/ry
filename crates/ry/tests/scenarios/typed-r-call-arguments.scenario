@@ -1,0 +1,55 @@
+# An argument R code wrote as a call stays lazy, as in R, and native code still runs the call when
+# the body reads the parameter before it runs anything else: the native entry forces the argument
+# there, in the call's frame. `swapped` reads `b` first, so `b`'s code runs first. `noted` runs R
+# code before it reads `x`, so its argument stays lazy and the interpreter runs the call. A
+# forcing error names the call, as the interpreter's does. A body that only reads `x` returns with
+# the visibility forcing `x` left, so `ident(invisible(1))` stays invisible. Forcing `a` rebinds
+# `h`, which `relay` calls with `b`, so the interpreter finds the new `h` before it forces `b`.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+
+file calls.R
+| seen <- character()
+| say <- function(text, value) {
+|   seen <<- c(seen, text)
+|   value
+| }
+| swapped <- function(a: F64, b: F64) -> F64 b - a
+| noted <- function(x: F64) -> F64 {
+|   seen <<- c(seen, "body")
+|   x + 1
+| }
+| bump <- function(x: F64) -> F64 x + 1
+| print(swapped(say("a", 1), say("b", 2)))
+| print(noted(say("x", 1)))
+| print(paste(seen, collapse = " "))
+| cat(tryCatch(bump(stop("boom")), error = function(e) deparse(conditionCall(e))), "\n")
+| print(bump(sys.nframe() + 0.5))
+| ident <- function(x: F64) -> F64 x
+| print(withVisible(ident(invisible(1)))$visible)
+| h <- function(v: F64) -> F64 v * 10
+| relay <- function(a: F64, b: F64) -> F64 a + h(b)
+| loud <- function(v) {
+|   seen <<- c(seen, "loud")
+|   v * 100
+| }
+| seen <- character()
+| print(relay({h <- loud; 1}, say("b", 4)))
+| print(paste(seen, collapse = " "))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry calls.R
+expect exit 0
+expect stdout "[1] 1"
+expect stdout "[1] \"b a body x\""
+expect stdout "bump(stop(\"boom\"))"
+expect stdout "[1] 1.5"
+expect stderr "typed: compiled for [Dbl, Dbl] -> Dbl"
+expect stderr "typed: `noted` runs in the interpreter: argument 1 is `say(\"x\", 1)`, which R code wrote, so it stays lazy until the function uses it, as in R, and the function may run other code before it reads it, or never read it"
+expect stdout "[1] FALSE"
+expect stdout "[1] 401"
+expect stdout "[1] \"loud b\""
+expect stderr "typed: `relay` runs in the interpreter: computing an argument changed which function `h` names, so the interpreter runs the call"
