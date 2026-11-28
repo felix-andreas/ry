@@ -556,6 +556,21 @@ pub(crate) fn bit(words: &[u64], index: usize) -> bool {
         .is_some_and(|word| word & (1 << (index % 64)) != 0)
 }
 
+/// The loads whose pc [`Builder::collect_slots`] maps to the variable's slot, so that feedback
+/// a compiled load records at that pc reaches the recompile's plan of the variable.
+pub(crate) fn marks(op: Op) -> bool {
+    matches!(op, Op::GetVar | Op::Argument | Op::Subscript)
+}
+
+/// Sets `slot` in a bitset that grows to hold it.
+fn mark_slot(words: &mut List<'_, u64>, slot: usize) {
+    let length = (slot + 1).div_ceil(64);
+    if words.len() < length {
+        words.resize(length, 0);
+    }
+    set_bit(words, slot, true);
+}
+
 fn set_bit(words: &mut [u64], index: usize, value: bool) {
     if let Some(word) = words.get_mut(index / 64) {
         if value {
@@ -905,8 +920,9 @@ pub enum Action<'a> {
         slot: usize,
         src: usize,
         /// Whether a compact sequence is copied on the way in: the body assigns into the
-        /// variable, which expands the sequence anyway, and a plain vector keeps its loads and
-        /// element assignments native.
+        /// variable, whose first assignment would expand the sequence, and a plain vector keeps
+        /// its loads and element assignments native. A variable once found holding an ALTREP
+        /// vector compiled code does not copy ([`feedback::UNCOPIED_ALTREP`]) is never expanded.
         expand: bool,
     },
     /// A function lookup resolved at compile time; the speculations check it still holds.
@@ -1169,6 +1185,9 @@ pub struct Plan<'a> {
     before: List<'a, Option<StateId>>,
     pub live: Live<'a>,
     pub slots: List<'a, Sexp>,
+    /// By slot, the pc of a variable load ([`marks`]) of the variable, where a `Peek` of the
+    /// same body records what it finds.
+    pub loads: List<'a, Option<usize>>,
     pub registers: usize,
     pub loops: usize,
     pub speculations: List<'a, Speculation>,
@@ -1903,6 +1922,7 @@ unsafe fn plan_at<'a>(
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
         slots: List::new_in(arena),
+        loads: List::new_in(arena),
         speculated: Map::with_hasher_in(FxBuildHasher, arena),
         speculations: List::new_in(arena),
         registers,
@@ -1911,6 +1931,7 @@ unsafe fn plan_at<'a>(
         locals,
         hints: List::new_in(arena),
         modified: List::new_in(arena),
+        uncopied: List::new_in(arena),
         declared: List::new_in(arena),
         callees: Map::with_hasher_in(FxBuildHasher, arena),
         formals: values::pairlist_items(formals)
@@ -2006,6 +2027,7 @@ unsafe fn plan_at<'a>(
         before,
         live,
         slots: builder.slots,
+        loads: builder.loads,
         registers,
         loops,
         speculations: builder.speculations,
@@ -2179,6 +2201,8 @@ struct Builder<'a> {
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
     slots: List<'a, Sexp>,
+    /// [`Plan::loads`].
+    loads: List<'a, Option<usize>>,
     /// Speculation results by symbol, so each lookup resolves once.
     speculated: Map<'a, Sexp, Option<Sexp>>,
     speculations: List<'a, Speculation>,
@@ -2196,9 +2220,13 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
-    /// By slot, whether the body assigns into the variable's value (`x[i] <- v`, `names(x) <-
+    /// By slot, a bitset of the variables the body assigns into (`x[i] <- v`, `names(x) <-
     /// v`), which turns a compact sequence the variable held into a plain vector.
-    modified: List<'a, bool>,
+    modified: List<'a, u64>,
+    /// By slot, a bitset of the variables a compiled load found holding an ALTREP vector it does
+    /// not copy ([`feedback::UNCOPIED_ALTREP`]), so that every load of the variable keeps it
+    /// boxed.
+    uncopied: List<'a, u64>,
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
     /// The plan of each closure asked to be inlined with a frame of its own and the type of
@@ -2256,23 +2284,25 @@ impl<'a> Builder<'a> {
                 if !self.slot_of.contains_key(&symbol) {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
+                    self.loads.push(None);
                     self.hints.push(Ty::Bottom);
-                    self.modified.push(false);
                     self.declared.push(Ty::Boxed);
                 }
+                let slot = self.slot_of[&symbol];
+                if marks(inst.op) && self.loads[slot].is_none() {
+                    self.loads[slot] = Some(inst.pc);
+                }
                 if matches!(inst.op, Op::SubAssign | Op::SubAssignMatrix | Op::Replace) {
-                    self.modified[self.slot_of[&symbol]] = true;
+                    mark_slot(&mut self.modified, slot);
                 }
                 let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
                 if matches!(inst.op, Op::GetVar | Op::Subscript)
                     && bits & feedback::ACTIVE_BINDING != 0
                 {
-                    let slot = self.slot_of[&symbol];
-                    let words = (slot + 1).div_ceil(64);
-                    if self.volatile.len() < words {
-                        self.volatile.resize(words, 0);
-                    }
-                    set_bit(&mut self.volatile, slot, true);
+                    mark_slot(&mut self.volatile, slot);
+                }
+                if bits & feedback::UNCOPIED_ALTREP != 0 {
+                    mark_slot(&mut self.uncopied, slot);
                 }
             }
         }
@@ -2370,7 +2400,7 @@ impl<'a> Builder<'a> {
     /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
     /// before it has read anything, the type the closure's signature declares for that formal.
     fn load_ty(&self, pc: usize, slot: usize) -> Ty {
-        if self.never_ran(pc) {
+        if self.never_ran(pc) && !bit(&self.uncopied, slot) {
             return self.declared[slot];
         }
         // A variable that has held both an integer and a double scalar, such as the argument
@@ -2389,15 +2419,23 @@ impl<'a> Builder<'a> {
     /// r`, holds a compact sequence only until the first assignment, so it loads as the plain
     /// vector, which also covers feedback that has seen both: the load copies a sequence it
     /// still finds compact (see `sequence_contents` in codegen), where a guess of a sequence
-    /// would fail on the next pass, deoptimize and recompile the body.
+    /// would fail on the next pass, deoptimize and recompile the body. A variable that has held
+    /// an ALTREP vector compiled code does not copy ([`feedback::UNCOPIED_ALTREP`]) loads boxed,
+    /// because R keeps it compact unless an assignment into it runs, which a static `modified`
+    /// cannot tell.
     fn variable_ty(&self, slot: usize, bits: u32) -> Ty {
+        if bit(&self.uncopied, slot) {
+            return Ty::Boxed;
+        }
+        let modified = bit(&self.modified, slot);
+        let bits = bits & !feedback::UNCOPIED_ALTREP;
         let within = |mask: u32| bits & !mask == 0;
         let integers =
             feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR | feedback::INTEGER_SEQUENCE;
         let doubles = feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR | feedback::DOUBLE_SEQUENCE;
         match from_feedback(bits) {
-            Ty::IntSeq if self.modified[slot] => Ty::IntVec,
-            Ty::DblSeq if self.modified[slot] => Ty::DblVec,
+            Ty::IntSeq if modified => Ty::IntVec,
+            Ty::DblSeq if modified => Ty::DblVec,
             Ty::Boxed if bits != 0 && within(integers) => Ty::IntVec,
             Ty::Boxed if bits != 0 && within(doubles) => Ty::DblVec,
             ty => ty,
@@ -2738,7 +2776,9 @@ impl<'a> Builder<'a> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                let expand = self.modified[slot] && matches!(ty, Ty::IntSeq | Ty::DblSeq);
+                let expand = bit(&self.modified, slot)
+                    && !bit(&self.uncopied, slot)
+                    && matches!(ty, Ty::IntSeq | Ty::DblSeq);
                 let ty = match ty {
                     Ty::IntSeq if expand => Ty::IntVec,
                     Ty::DblSeq if expand => Ty::DblVec,
