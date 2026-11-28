@@ -5212,7 +5212,7 @@ pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
-#[inline]
+#[inline(always)]
 pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
@@ -9588,9 +9588,7 @@ fn assign_variable<'s>(
         let enclosure = enclosure_of(context, environment);
         return assign_outward(context, symbol, value, enclosure);
     }
-    let binding =
-        handles::frame_binding(context, environment, symbol).map(|cell| context.root(cell));
-    handles::assign_local(context, symbol, value, environment, binding)
+    handles::assign_in_frame(context, symbol, value, environment)
 }
 
 /// Where `<<-` from `environment` starts: its enclosure, or the empty environment itself, whose

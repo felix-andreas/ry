@@ -462,9 +462,9 @@ fn do_environment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local
     }
     match function.r_type() {
         SexpType::Nil => match arguments.frame_index() {
-            Some(index) => context.root_answer(|context| {
-                eval::caller_environment(context, index, Reify::Site(Site::EnvironmentCall))
-            }),
+            Some(index) => {
+                handles::frame_sys_parent(context, index, Reify::Site(Site::EnvironmentCall))
+            }
             None => Ok(handles::global_environment().value()),
         },
         SexpType::Builtin | SexpType::Special => Ok(handles::null()),
@@ -783,8 +783,9 @@ fn name_symbol<'s>(
         }
         return Err(error("attempt to use zero-length variable name"));
     }
-    let symbol = handles::install_name_at(context, names, 0)?;
-    Ok(context.root(symbol))
+    Ok(handles::interned_symbol(handles::install_name_at(
+        context, names, 0,
+    )?))
 }
 
 fn symbol_text(context: &Cx<'_>, symbol: Local<'_, Symbol>) -> String {
@@ -798,9 +799,7 @@ fn do_assign<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
     if handles::logical_scalar(context, arguments.value(3)) == 1 {
         eval::assign_outward(context, symbol, value, environment)?;
     } else {
-        let binding = handles::frame_binding(context, environment, symbol)
-            .map(|binding| context.root(binding));
-        handles::assign_local(context, symbol, value, environment, binding)?;
+        handles::assign_in_frame(context, symbol, value, environment)?;
     }
     Ok(value)
 }

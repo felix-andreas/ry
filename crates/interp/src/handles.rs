@@ -4587,6 +4587,46 @@ pub fn assign_local(
     }
 }
 
+/// `symbol <- value` in `environment`'s own frame, through the binding it has there, if any.
+/// The binding needs no root of its own: the frame holds it, and nothing before the store can
+/// remove it.
+#[inline]
+pub fn assign_in_frame(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    value: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<()> {
+    // SAFETY: every handle is rooted, and the binding is read from the rooted environment's
+    // frame right before the store. An active binding's function runs after the cell is read,
+    // and the cell is not read again.
+    unsafe {
+        let cell = crate::heap().frame_cell(environment.raw(), symbol.raw());
+        crate::eval::assign_local(symbol.raw(), value.raw(), environment.raw(), cell)
+    }
+}
+
+/// The environment frame `index` was called from, as `environment()` and `parent.frame()`
+/// return it, without a root: the interpreter frames hold it.
+#[inline]
+pub fn frame_sys_parent<'s>(
+    _context: &mut Cx<'s>,
+    index: usize,
+    cause: crate::eval::Reify,
+) -> R<Local<'s>> {
+    // SAFETY: the answer is frame `index`'s recorded `sys.parent`, or its caller's environment
+    // or pending environment, which a reified environment is stored as. Frames up to `index`
+    // return only after every scope opened by code they call has ended.
+    unsafe { Ok(Local::adopt(crate::eval::frame_sys_parent(index, cause)?)) }
+}
+
+/// A symbol as a handle of any scope, without a root: the symbol table keeps every symbol.
+#[inline]
+pub fn interned_symbol<'s>(symbol: Gc<'_, Symbol>) -> Local<'s, Symbol> {
+    // SAFETY: as in `root_unless_permanent`.
+    unsafe { Local::adopt(symbol.raw()) }
+}
+
 /// Makes `parent` the enclosure of `environment`, moving the binding epoch that inline caches
 /// trust.
 pub fn set_enclosure(
