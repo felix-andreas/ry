@@ -1,0 +1,27 @@
+# A small typed function inlines where it is called, however many lambdas sit between it and the
+# typed function that calls it, so the loops around the call fuse and no list is built per row.
+# `RY_TYPED_LOG` prints a "compiled for" line for each function compiled on its own, so a weight
+# called inside the lambdas of `rows` would add a line for `[I64, I64] -> Dbl`.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file rows.R
+| weight <- function(i: I64, j: I64) -> F64 1 / Num.to_f64(i + j + 1)
+| rows <- function(u: List<F64>, n: I64) -> List<F64>
+|   List.map(List.range(0, n - 1), \(i) List.sum(List.map(List.range(0, n - 1), \(j) u[[j + 1]] * weight(i, j))))
+| twice <- function(u: List<F64>, n: I64) -> List<F64> rows(rows(u, n), n)
+| run <- function(n: I64) -> List<F64> twice(List.repeat(1, n), n)
+| print(List.to_r(run(3)))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry rows.R
+expect exit 0
+expect stdout "[1] 2.636111 1.473611 1.038611"
+expect stderr "typed: compiled for [I64] -> Vector { item: Dbl, array: true }"
+expect stderr lacks "-> Dbl in"
+expect stderr lacks "runs in the interpreter"

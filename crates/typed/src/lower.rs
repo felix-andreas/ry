@@ -418,8 +418,9 @@ const FORCING_BASE_FUNCTIONS: [&str; 11] = [
 
 /// How many variables and walks a function's lowering widens to more tags before it gives up.
 const MAX_WIDENINGS: usize = 8;
-/// How deep in inlined functions a call of a typed function may still inline, which leaves
-/// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
+/// How many typed functions a call of a typed function may sit inside and still inline. The
+/// lambdas between them do not count, so a small function called in a lambda of a lambda
+/// inlines and its loops can fuse; `MAX_INLINE_DEPTH` bounds all levels together.
 const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
@@ -2740,7 +2741,7 @@ impl Lowering<'_> {
             && (!own || self.self_inlines < MAX_SELF_CALLS)
             && !self.inlining.contains(&function)
             && !self.called.contains(&function)
-            && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
+            && self.inlined.iter().filter(|inlined| inlined.typed).count() < MAX_TYPED_INLINE_DEPTH
             && rvalues::pairlist_items(function.car()).len() == values.len()
             && small_body(body, name, &mut own_calls, &mut 0)
         {
