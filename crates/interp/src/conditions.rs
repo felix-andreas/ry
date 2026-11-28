@@ -564,6 +564,9 @@ pub(crate) fn signal<'s>(
         return Err(unwind);
     }
     activity::count(Counter::ConditionsSignalled);
+    if interp().handlers.is_none() {
+        return Ok(null());
+    }
     let saved = interp().handlers.clone();
     let _saved = set_aside(saved.clone(), None);
     // A calling handler may change the condition's class, which GNU R reads afresh for each
@@ -639,8 +642,8 @@ pub unsafe fn print_warnings(heading: &str) -> R<()> {
 /// own.
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
-        let condition = handles::held(context, condition);
-        let call = handles::held(context, condition_call);
+        let condition = handles::adopt(context, condition);
+        let call = handles::adopt(context, condition_call);
         Ok(signal(context, condition, call)?.raw())
     })
 }
