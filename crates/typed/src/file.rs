@@ -2931,6 +2931,7 @@ unsafe fn attach_inner(
     if code_image::hash(code) != version.hash {
         return Err("its code does not match the file");
     }
+    let invisible = lower::returns_invisibly(closure)?;
     let mut resolved: FxHashMap<u32, Speculation> = FxHashMap::default();
     let mut speculations = Vec::with_capacity(version.lookups.len());
     for &lookup in &version.lookups {
@@ -3019,6 +3020,7 @@ unsafe fn attach_inner(
         sites: (0, 0),
         guessed,
         cells: SmallVec::new(),
+        invisible,
     })))
 }
 

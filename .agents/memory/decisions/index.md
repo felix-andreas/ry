@@ -697,6 +697,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `print` writes a closure's annotations; `deparse` writes the erasure
 - `source()` runs a typed file as the checker elaborated it
 - A recursion that takes a function compiles once per passed function (settled)
+- A typed call shows its value as R would, from the body's paths (settled)
 
 ## DataFrame and the table engine
 

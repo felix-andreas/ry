@@ -5909,7 +5909,7 @@ interpreted
 | a `Set` whose elements are not `I64` or `Str` | convert the elements to `I64` or `Str`, or keep them in a `List` |
 | a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
-| a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
+| a function whose paths disagree about showing its value: one ends in an assignment, a loop or another expression whose value R returns invisibly, and another ends in a visible value or a `return` | end every path the same way, for example with the value itself |
 
 The rule covers the function's body. How R code calls a native function is not checked, so these
 calls from the interpreter run in the interpreter with no finding:
