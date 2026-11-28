@@ -24,7 +24,10 @@ use {
         object::{NA_INTEGER, Sexp, SexpType},
         records::{Fields, Layout},
     },
-    interp::{eval::in_tail_position, numbers::Observed, records::rest_name, values as rvalues},
+    interp::{
+        eval::in_tail_position, numbers::Observed, records::rest_name,
+        standard_library::UnicodeEncoding, values as rvalues,
+    },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{
@@ -418,8 +421,9 @@ const FORCING_BASE_FUNCTIONS: [&str; 11] = [
 
 /// How many variables and walks a function's lowering widens to more tags before it gives up.
 const MAX_WIDENINGS: usize = 8;
-/// How deep in inlined functions a call of a typed function may still inline, which leaves
-/// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
+/// How many typed functions a call of a typed function may sit inside and still inline. The
+/// lambdas between them do not count, so a small function called in a lambda of a lambda
+/// inlines and its loops can fuse; `MAX_INLINE_DEPTH` bounds all levels together.
 const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
@@ -1999,13 +2003,22 @@ impl Lowering<'_> {
         Ok((list, ty))
     }
 
-    /// `List.concat(first, second)`. An empty list on either side takes the other's item type.
-    unsafe fn concat(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+    /// `List.concat(first, second)`, or `List.concat_utf8` as the concatenation with the
+    /// string's bytes. An empty list on either side takes the other's item type.
+    unsafe fn concat(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [first, second] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `List.concat`"));
+            return Err(Refusal::new("a malformed list concatenation"));
         };
         let first = self.value(first)?;
-        let second = self.value(second)?;
+        let mut second = self.value(second)?;
+        if name == "List.concat_utf8" {
+            if self.builder.ty(second) != Type::Str {
+                return Err(Refusal::new(
+                    "a `List.concat_utf8` of something other than a string",
+                ));
+            }
+            second = self.encode(UnicodeEncoding::Utf8, second);
+        }
         self.usable(first)?;
         self.usable(second)?;
         let item = |ty: Type| match ty {
@@ -2016,7 +2029,7 @@ impl Lowering<'_> {
             (item(self.builder.ty(first)), item(self.builder.ty(second)))
         else {
             return Err(Refusal::new(
-                "a `List.concat` of something other than ry lists",
+                "a list concatenation of something other than ry lists",
             ));
         };
         match (self.pending_family(first), self.pending_family(second)) {
@@ -2029,7 +2042,7 @@ impl Lowering<'_> {
         let ty = self.builder.ty(first);
         if ty != self.builder.ty(second) {
             return Err(Refusal::new(
-                "a `List.concat` of lists of different item types",
+                "a list concatenation of lists of different item types",
             ));
         }
         Ok(self.builder.emit(ty, Op::Extend(first, second)))
@@ -2740,7 +2753,7 @@ impl Lowering<'_> {
             && (!own || self.self_inlines < MAX_SELF_CALLS)
             && !self.inlining.contains(&function)
             && !self.called.contains(&function)
-            && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
+            && self.inlined.iter().filter(|inlined| inlined.typed).count() < MAX_TYPED_INLINE_DEPTH
             && rvalues::pairlist_items(function.car()).len() == values.len()
             && small_body(body, name, &mut own_calls, &mut 0)
         {
@@ -4801,7 +4814,9 @@ impl Lowering<'_> {
             | "Dict.walk"
             | "Dict.walk_until"
             | "Set.walk"
-            | "Set.walk_until" => self.walk(name, &arguments),
+            | "Set.walk_until"
+            | "Str.walk_utf8"
+            | "Str.walk_utf8_with_index" => self.walk(name, &arguments),
             "List.any" | "List.all" => self.any_all(name == "List.all", &arguments),
             "List.product" => self.product(&arguments),
             "List.single" | "List.prepend" => self.single_or_prepend(name, &arguments),
@@ -5448,7 +5463,7 @@ impl Lowering<'_> {
                     .builder
                     .emit(Type::Str, Op::ReplaceEach(string, pattern, replacement)))
             }
-            "List.concat" => self.concat(&arguments),
+            "List.concat" | "List.concat_utf8" => self.concat(name, &arguments),
             "List.swap" => self.swap(&arguments),
             "List.is_empty" => {
                 let [list] = arguments.exactly(1)?[..] else {
@@ -5718,6 +5733,8 @@ impl Lowering<'_> {
             }
             "Str.count_utf8_bytes"
             | "Str.to_utf8"
+            | "Str.to_utf16"
+            | "Str.to_utf32"
             | "Str.with_ascii_uppercased"
             | "Str.with_ascii_lowercased"
             | "Str.trim"
@@ -5734,13 +5751,9 @@ impl Lowering<'_> {
                 }
                 Ok(match name {
                     "Str.count_utf8_bytes" => self.builder.emit(Type::I64, Op::ByteCount(a)),
-                    "Str.to_utf8" => self.builder.emit(
-                        Type::Vector {
-                            item: Item::I64,
-                            array: true,
-                        },
-                        Op::ToUtf8(a),
-                    ),
+                    "Str.to_utf8" => self.encode(UnicodeEncoding::Utf8, a),
+                    "Str.to_utf16" => self.encode(UnicodeEncoding::Utf16, a),
+                    "Str.to_utf32" => self.encode(UnicodeEncoding::Utf32, a),
                     "Str.with_ascii_uppercased" => {
                         self.builder.emit(Type::Str, Op::Text(Text::AsciiUpper, a))
                     }
@@ -5752,22 +5765,12 @@ impl Lowering<'_> {
                     _ => self.builder.emit(Type::Str, Op::Text(Text::TrimEnd, a)),
                 })
             }
-            "Str.from_utf8_lossy" => {
-                let [bytes] = arguments.exactly(1)?[..] else {
-                    return Err(Refusal::new("a malformed `Str` function"));
-                };
-                let bytes = self.value(bytes)?;
-                let numbers = Type::Vector {
-                    item: Item::I64,
-                    array: true,
-                };
-                if self.builder.ty(bytes) != numbers {
-                    return Err(Refusal::new(
-                        "a `Str.from_utf8_lossy` of something other than a list of I64s",
-                    ));
-                }
-                Ok(self.builder.emit(Type::Str, Op::FromUtf8Lossy(bytes)))
-            }
+            "Str.from_utf8"
+            | "Str.from_utf8_lossy"
+            | "Str.from_utf16"
+            | "Str.from_utf16_lossy"
+            | "Str.from_utf32"
+            | "Str.from_utf32_lossy" => self.decode(name, &arguments),
             "Str.starts_with"
             | "Str.ends_with"
             | "Str.contains"
@@ -6275,7 +6278,9 @@ impl Lowering<'_> {
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
         let backwards = name.starts_with("List.walk_backwards");
-        let with_index = name.starts_with("List.walk_with_index");
+        let with_index =
+            name.starts_with("List.walk_with_index") || name == "Str.walk_utf8_with_index";
+        let bytes = name.starts_with("Str.walk_utf8");
         let from = name.starts_with("List.walk_from");
         let over_dict = name.starts_with("Dict.") || name.starts_with("Set.");
         let until = name.ends_with("_until");
@@ -6304,7 +6309,15 @@ impl Lowering<'_> {
         let (list, ty) = match range {
             Some(_) => (None, Type::Null),
             None => {
-                let list = self.value(list)?;
+                let mut list = self.value(list)?;
+                if bytes {
+                    if self.builder.ty(list) != Type::Str {
+                        return Err(Refusal::new(
+                            "a `Str.walk_utf8` of something other than a string",
+                        ));
+                    }
+                    list = self.encode(UnicodeEncoding::Utf8, list);
+                }
                 let ty = self.builder.ty(list);
                 let walkable = if over_dict {
                     ty.entry_items().is_some()
@@ -11071,32 +11084,96 @@ impl Lowering<'_> {
                 parsed: parses,
             },
         );
-        let (valid, invalid, join) = (
+        self.checked_result(parses, number, "InvalidNumStr")
+    }
+
+    /// `Str.from_utf8`, `Str.from_utf16` or `Str.from_utf32`, or a lossy form.
+    unsafe fn decode(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [units] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Str` function"));
+        };
+        let units = self.value(units)?;
+        let numbers = Type::Vector {
+            item: Item::I64,
+            array: true,
+        };
+        self.settle(units, Item::I64)?;
+        if self.builder.ty(units) != numbers {
+            return Err(Refusal::new(
+                "a decoding of something other than a list of I64s",
+            ));
+        }
+        let (encoding, reason) = match name {
+            "Str.from_utf8" | "Str.from_utf8_lossy" => (UnicodeEncoding::Utf8, "BadUtf8"),
+            "Str.from_utf16" | "Str.from_utf16_lossy" => (UnicodeEncoding::Utf16, "BadUtf16"),
+            _ => (UnicodeEncoding::Utf32, "BadUtf32"),
+        };
+        if name.ends_with("_lossy") {
+            return Ok(self.builder.emit(
+                Type::Str,
+                Op::Decode {
+                    encoding,
+                    units,
+                    valid: None,
+                },
+            ));
+        }
+        let valid = self.builder.local(Type::Bool);
+        let text = self.builder.emit(
+            Type::Str,
+            Op::Decode {
+                encoding,
+                units,
+                valid: Some(valid),
+            },
+        );
+        self.checked_result(valid, text, reason)
+    }
+
+    /// `:Ok(value)` when `valid`, else `:Err(:<reason>)`.
+    unsafe fn checked_result(
+        &mut self,
+        valid: Local,
+        value: Local,
+        reason: &str,
+    ) -> Result<Local, Refusal> {
+        let (then, otherwise, join) = (
             self.builder.block(),
             self.builder.block(),
             self.builder.block(),
         );
         self.builder.terminate(Terminator::Branch {
-            condition: parses,
-            then: valid,
-            otherwise: invalid,
+            condition: valid,
+            then,
+            otherwise,
         });
-        self.builder.switch_to(valid);
-        let ok = self.tag("Ok", &[number])?;
-        self.builder.switch_to(invalid);
-        let reason = self.tag("InvalidNumStr", &[])?;
+        self.builder.switch_to(then);
+        let ok = self.tag("Ok", &[value])?;
+        self.builder.switch_to(otherwise);
+        let reason = self.tag(reason, &[])?;
         let err = self.tag("Err", &[reason])?;
         let Some(Type::Tag(union)) = joined(self.builder.ty(ok), self.builder.ty(err)) else {
-            return Err(Refusal::new("a parse result"));
+            return Err(Refusal::new("a checked result"));
         };
         let result = self.builder.local(Type::Tag(union));
         self.builder.push(Some(result), Op::Copy(err));
         self.builder.terminate(Terminator::Jump(join));
-        self.builder.switch_to(valid);
+        self.builder.switch_to(then);
         self.builder.push(Some(result), Op::Copy(ok));
         self.builder.terminate(Terminator::Jump(join));
         self.builder.switch_to(join);
         Ok(result)
+    }
+
+    /// The code units of a string in an encoding, as a list of `I64`s.
+    fn encode(&mut self, encoding: UnicodeEncoding, string: Local) -> Local {
+        self.builder.emit(
+            Type::Vector {
+                item: Item::I64,
+                array: true,
+            },
+            Op::Encode(encoding, string),
+        )
     }
 
     unsafe fn paste(&mut self, paste0: bool, arguments: &Arguments) -> Result<Local, Refusal> {

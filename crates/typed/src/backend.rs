@@ -24,6 +24,7 @@ use {
         shapes, values,
     },
     heap::object::NA_REAL_BITS,
+    interp::standard_library::UnicodeEncoding,
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
@@ -226,9 +227,9 @@ All => values::ry_all,
     FormatPaddedInt => values::ry_format_padded_int,
     ListCoerce => values::ry_list_coerce,
     ListConcat => values::ry_list_concat,
+    ListDecode => values::ry_list_decode,
     ListEndsWith => values::ry_list_ends_with,
     ListFree => values::ry_list_free,
-    ListFromUtf8Lossy => values::ry_list_from_utf8_lossy,
     ListJoin => values::ry_list_join,
     ListNchar => values::ry_list_nchar,
     ListNew => values::ry_list_new,
@@ -267,6 +268,7 @@ All => values::ry_all,
     StrConcat => values::ry_str_concat,
     StrContains => values::ry_str_contains,
     StrDropAffix => values::ry_str_drop_affix,
+    StrEncode => values::ry_str_encode,
     StrEndsWith => values::ry_str_ends_with,
     StrEqual => values::ry_str_equal,
     StrFind => values::ry_str_find,
@@ -280,7 +282,6 @@ All => values::ry_all,
     StrStartsWith => values::ry_str_starts_with,
     StrToDbl => values::ry_str_to_dbl,
     StrToI64 => values::ry_str_to_i64,
-    StrToUtf8 => values::ry_str_to_utf8,
     StrTolower => values::ry_str_tolower,
     StrToupper => values::ry_str_toupper,
     StrTrim => values::ry_str_trim,
@@ -2098,23 +2099,41 @@ impl Emitter<'_> {
                 let list = self.call_words(function, I64, &[pointer]);
                 SmallVec::from_slice(&[list])
             }
-            Op::ToUtf8(a) => {
+            Op::Encode(encoding, a) => {
                 let x = self.get(*a)?;
-                let list = self.call_words(Helper::StrToUtf8, I64, &[x[0], x[1]]);
+                let encoding = self.iconst(*encoding as i64);
+                let list = self.call_words(Helper::StrEncode, I64, &[x[0], x[1], encoding]);
                 SmallVec::from_slice(&[list])
             }
-            Op::FromUtf8Lossy(a) => {
-                let list = self.one(*a)?;
+            Op::Decode {
+                encoding,
+                units,
+                valid,
+            } => {
+                let list = self.one(*units)?;
                 let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     16,
                     3,
                 ));
                 let out = self.builder.ins().stack_addr(I64, slot, 0);
-                let decoded =
-                    self.call(Helper::ListFromUtf8Lossy, &[I64; 2], &[I32], &[list, out])[0];
-                let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, decoded, 0);
-                self.fail_if(bad, &inst.fail_drops)?;
+                let code = self.iconst(*encoding as i64);
+                let lossy = self.iconst(i64::from(valid.is_none()));
+                let status = self.call(
+                    Helper::ListDecode,
+                    &[I64; 4],
+                    &[I32],
+                    &[list, code, lossy, out],
+                )[0];
+                if *encoding != UnicodeEncoding::Utf32 {
+                    let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                    self.fail_if(bad, &inst.fail_drops)?;
+                }
+                if let Some(valid) = valid {
+                    let decoded = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 1);
+                    let decoded = self.logical(decoded);
+                    self.set(*valid, &[decoded])?;
+                }
                 self.load_item(out, Item::Str)
             }
             Op::RepeatStr(a, count) => {

@@ -30,6 +30,7 @@ use {
         },
         rmath::fround,
         sort::collate,
+        standard_library::{Decoded, UnicodeEncoding, decode},
     },
     smallvec::SmallVec,
     std::{
@@ -2434,38 +2435,64 @@ unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
     !(((differing & LOW_BITS) + LOW_BITS) | differing | LOW_BITS) & inside
 }
 
-/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
-pub unsafe extern "C" fn ry_str_to_utf8(lo: u64, hi: u64) -> *mut List {
+/// `Str.to_utf8`, `Str.to_utf16` or `Str.to_utf32` of a borrowed string, by an
+/// [`UnicodeEncoding`]'s discriminant.
+pub unsafe extern "C" fn ry_str_encode(lo: u64, hi: u64, encoding: u64) -> *mut List {
     let string = Str { lo, hi };
-    let bytes = string.bytes();
-    let list = list_alloc(I64, bytes.len(), bytes.len());
-    for (slot, &byte) in slice_mut::<i64>((*list).data, bytes.len())
-        .iter_mut()
-        .zip(bytes)
-    {
-        *slot = i64::from(byte);
+    let text = string.as_str();
+    match encoding_of(encoding) {
+        UnicodeEncoding::Utf8 => units_list(text.len(), text.bytes().map(i64::from)),
+        UnicodeEncoding::Utf16 => units_list(
+            text.encode_utf16().count(),
+            text.encode_utf16().map(i64::from),
+        ),
+        UnicodeEncoding::Utf32 => units_list(
+            text.chars().count(),
+            text.chars()
+                .map(|character| i64::from(u32::from(character))),
+        ),
+    }
+}
+
+unsafe fn units_list(length: usize, units: impl Iterator<Item = i64>) -> *mut List {
+    let list = list_alloc(I64, length, length);
+    for (slot, unit) in slice_mut::<i64>((*list).data, length).iter_mut().zip(units) {
+        *slot = unit;
     }
     list
 }
 
-/// `Str.from_utf8_lossy` of a borrowed list of `I64`s, written to `out`: 1, or 0 when an item is
-/// not a byte, which the interpreter reports. R strings hold no NUL byte, so it is replaced like
-/// a byte that is not UTF-8.
-pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str) -> u32 {
-    let mut bytes = Vec::with_capacity((*list).length as usize);
-    for &item in items::<i64>(list) {
-        match u8::try_from(item) {
-            Ok(byte) => bytes.push(byte),
-            Err(_) => return 0,
+/// A string decoded from a borrowed list of `I64` code units, by an [`UnicodeEncoding`]'s
+/// discriminant, written to `out`: 1, 2 with an empty string when a strict decoding finds the
+/// units invalid, or 0 when a unit is out of the encoding's range, which the interpreter
+/// reports.
+pub unsafe extern "C" fn ry_list_decode(
+    list: *mut List,
+    encoding: u64,
+    lossy: u64,
+    out: *mut Str,
+) -> u32 {
+    match decode(encoding_of(encoding), items::<i64>(list), lossy != 0) {
+        Decoded::Text(text) => {
+            *out = str_from_bytes(text.as_bytes());
+            1
         }
+        Decoded::Invalid => {
+            *out = str_from_bytes(b"");
+            2
+        }
+        Decoded::OutOfRange { .. } => 0,
     }
-    let text = String::from_utf8_lossy(&bytes);
-    *out = if text.contains('\0') {
-        str_from_bytes(text.replace('\0', "\u{FFFD}").as_bytes())
-    } else {
-        str_from_bytes(text.as_bytes())
-    };
-    1
+}
+
+/// The encoding whose discriminant the backend passes, which is always one of the three.
+fn encoding_of(code: u64) -> UnicodeEncoding {
+    match code {
+        code if code == UnicodeEncoding::Utf8 as u64 => UnicodeEncoding::Utf8,
+        code if code == UnicodeEncoding::Utf16 as u64 => UnicodeEncoding::Utf16,
+        code if code == UnicodeEncoding::Utf32 as u64 => UnicodeEncoding::Utf32,
+        _ => unreachable!("the backend passes an encoding's discriminant"),
+    }
 }
 
 /// The string at a 0-based index, with a count of its own.
