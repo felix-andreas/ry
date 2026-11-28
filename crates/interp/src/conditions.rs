@@ -639,8 +639,8 @@ pub unsafe fn print_warnings(heading: &str) -> R<()> {
 /// own.
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
-        let condition = handles::adopt(context, condition);
-        let call = handles::adopt(context, condition_call);
+        let condition = handles::held(context, condition);
+        let call = handles::held(context, condition_call);
         Ok(signal(context, condition, call)?.raw())
     })
 }

@@ -2876,9 +2876,7 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
     }
     handles::with_result(|context| {
         let name = handles::held(context, name);
-        let env = handles::held(context, env)
-            .downcast::<Environment>()
-            .ok_or_else(|| error("invalid environment for the generic function"))?;
+        let env = handles::held(context, env);
         let generic = handles::held(context, generic);
         crate::methods::dispatch_generic(context, name, env, generic).map(Local::raw)
     })

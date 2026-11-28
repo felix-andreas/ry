@@ -142,7 +142,7 @@ pub fn force_deferred_unit(context: &mut Cx<'_>, key: &str, generic: Option<&[u8
 pub fn dispatch_generic<'s>(
     context: &mut Cx<'s>,
     name: Local<'s>,
-    env: Local<'s, Environment>,
+    env: Local<'s>,
     generic: Local<'s>,
 ) -> R<Local<'s>> {
     activity::count(Counter::S4Dispatches);
@@ -153,6 +153,9 @@ pub fn dispatch_generic<'s>(
             "expected a generic function or a primitive for dispatch, got an object of class \"{}\"",
             first_text(context, class)
         )));
+    };
+    let Some(env) = env.downcast::<Environment>() else {
+        return Err(error("invalid environment for the generic function"));
     };
     // A package loader may hold back methods for this generic, which must be in its tables
     // before it selects one.
@@ -1427,13 +1430,20 @@ fn run_unit(context: &mut Cx<'_>, position: usize, lazy: Option<&[u8]>) -> R<()>
     if !first && lazy.is_none() {
         return Ok(());
     }
-    // The handle holds `force` while it runs: an entry with no unit left is removed and its
-    // preserve released, and any other may be replaced while the call runs.
+    // `force` stays preserved while it runs, as a loader's registration holds it: an entry
+    // with no unit left hands its preserve over, and any other may be replaced during the call.
     let force = context.root(definitions.force.get(context));
     if definitions.lazy.is_empty() {
-        let removed = deferred.remove(position);
-        crate::heap().release(removed.force.raw());
+        deferred.remove(position);
+    } else {
+        crate::heap().preserve(force.raw());
     }
+    let result = run_force(context, force, lazy);
+    crate::heap().release(force.raw());
+    result
+}
+
+fn run_force(context: &mut Cx<'_>, force: Local<'_, Closure>, lazy: Option<&[u8]>) -> R<()> {
     let argument = match lazy {
         Some(generic) => {
             handles::text_vector(context, &[String::from_utf8_lossy(generic)])?.value()
@@ -1713,7 +1723,10 @@ fn external_pointer_prototype<'s>(
 /// definition passed in is returned as it is.
 fn class_from_cache<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
     let (class, table) = (arguments.value(0), arguments.value(1));
-    if class.r_type() != SexpType::String && !handles::is_s4(class) {
+    if class.r_type() != SexpType::String {
+        if handles::is_s4(class) {
+            return Ok(class);
+        }
         return Err(
             arguments.error("class should be either a character-string name or a class definition")
         );
@@ -1746,8 +1759,8 @@ fn get_generic_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>)
         return Err(arguments.error("invalid environment for the generic function"));
     };
     let package = first_text(context, package);
+    force_deferred(context, symbol.name().bytes(), Lookup::Generic)?;
     let generic_name = handles::text(symbol.name());
-    force_deferred(context, generic_name.as_bytes(), Lookup::Generic)?;
     let generic = find_generic(context, symbol, env, &package)?;
     if generic.is(handles::null()) && handles::logical_scalar(context, must_find) == 1 {
         return Err(arguments.error(format!(
@@ -1977,9 +1990,7 @@ fn quick_method_check_routine<'s>(
 fn select_method<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
     let (env, mut methods_list, evaluate) =
         (arguments.value(1), arguments.value(2), arguments.value(3));
-    let Some(env) = env.downcast::<Environment>() else {
-        return Err(arguments.error("invalid environment for method selection"));
-    };
+    let env = env.downcast::<Environment>();
     let evaluate = handles::logical_scalar(context, evaluate) == 1;
     let argument_slot = handles::install_bytes(context, b"argument")?;
     let methods_slot = handles::install_bytes(context, b"methods")?;
@@ -1989,8 +2000,9 @@ fn select_method<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<
         }
         let argument = slot_value(context, methods_list, argument_slot)?;
         let methods = slot_value(context, methods_list, methods_slot)?;
-        let class = match argument.downcast::<Symbol>() {
-            Some(symbol)
+        // An argument that is not a name, or not bound in an environment, selects as missing.
+        let class = match (argument.downcast::<Symbol>(), env) {
+            (Some(symbol), Some(env))
                 if !bound_missing(context, handles::permanent(symbol), env).unwrap_or(true) =>
             {
                 let value = if evaluate {
@@ -2013,9 +2025,6 @@ fn select_method<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<
 
 fn standard_generic<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
     let (name, env, generic) = (arguments.value(0), arguments.value(1), arguments.value(2));
-    let Some(env) = env.downcast::<Environment>() else {
-        return Err(arguments.error("invalid environment for the generic function"));
-    };
     dispatch_generic(context, name, env, generic)
 }
 
@@ -2081,7 +2090,8 @@ fn primitive_name<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R
     if !matches!(object.r_type(), SexpType::Builtin | SexpType::Special) {
         return Err(arguments.error("'R_get_primname' called on a non-primitive"));
     }
-    let name = handles::builtin_definition(object)?.name;
+    let name =
+        handles::builtin_definition(object).map_or("<unknown>", |definition| definition.name);
     Ok(handles::text_vector(context, &[name])?.value())
 }
 
