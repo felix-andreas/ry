@@ -11,7 +11,8 @@
 //! function, and [`crate::unbox`] replaces them with their fields. A list is fused away when:
 //!
 //! - One counted loop, the producer, fills it once per iteration: a `Push` onto a list that starts
-//!   empty, or a `Set` at its own counter into a list as long as the one it counts over. Making the
+//!   empty, or a `Set` at its own counter (or a copy of it) into a list as long as the one it
+//!   counts over. Making the
 //!   list cannot fail (a capacity is known not to be negative); a `NaN` stored in a list of doubles
 //!   gives up the call, and that test stays where the store was.
 //! - Another counted loop, the consumer, reads it from first to last without leaving early.
@@ -474,7 +475,7 @@ fn match_fusion(
                 return None;
             }
             let source = set_source(shape, &producer, producer_blocks, fill, creation, length)?;
-            if position != producer.counter {
+            if !holds_counter(shape, &producer, producer_blocks, fill, position) {
                 return None;
             }
             (item, Some(source))
@@ -672,7 +673,15 @@ fn set_source(
         at = from;
     }
     // The new list and the loop's end are both the length of one list, read while that list
-    // cannot have been assigned in between: on the straight path into the guard.
+    // cannot have been assigned in between: on the straight path into the guard. An earlier
+    // fusion leaves the length behind copies.
+    let mut length = length;
+    for _ in 0..MAX_COPIES {
+        match shape.definition(length)? {
+            (_, &Op::Copy(copied)) => length = copied,
+            _ => break,
+        }
+    }
     let (counted_at, &Op::Length(source)) = shape.definition(length)? else {
         return None;
     };
@@ -701,6 +710,57 @@ fn set_source(
             .only(source)
             .is_some_and(|site| assigned_before(site, counted_at) && assigned_before(site, end_at));
     stable.then_some(source)
+}
+
+/// Whether `position` holds the producer's counter where the `Set` at `fill` reads it: it is
+/// the counter, or its one assignment in the loop copies the counter on the straight path
+/// into the `Set`, as an earlier fusion leaves a consumer's position.
+fn holds_counter(
+    shape: &Shape,
+    producer: &Loop,
+    producer_blocks: &Bits,
+    fill: Site,
+    position: Local,
+) -> bool {
+    if position == producer.counter {
+        return true;
+    }
+    let mut assigned = producer_blocks.iter().flat_map(|block| {
+        shape.function.blocks[block]
+            .insts
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, inst)| {
+                inst.assigned()
+                    .contains(&position)
+                    .then_some(((block as u32, index as u32), &inst.op))
+            })
+    });
+    let (Some((site, &Op::Copy(copied))), None) = (assigned.next(), assigned.next()) else {
+        return false;
+    };
+    if copied != producer.counter {
+        return false;
+    }
+    // The counter changes only in the step block, which no straight path into the `Set`
+    // from inside the iteration crosses.
+    let mut at = fill.0;
+    for _ in 0..MAX_BETWEEN {
+        if at == site.0 {
+            return at != fill.0 || site.1 < fill.1;
+        }
+        let [from] = shape.predecessors[at as usize][..] else {
+            return false;
+        };
+        if !matches!(shape.terminator(from), Terminator::Jump(_))
+            || !producer_blocks.contains(from as usize)
+            || from == producer.step
+        {
+            return false;
+        }
+        at = from;
+    }
+    false
 }
 
 /// The function with the list of `fusion` gone and its two loops one, or `None` when the

@@ -1066,3 +1066,14 @@ fn fused_pipelines_compute_what_unfused_ones_do() {
         "only {fused_some} of {pipelines} pipelines had a list fused away"
     );
 }
+
+#[test]
+fn two_maps_and_a_walk_become_one_loop() {
+    for lengths in [false, true] {
+        assert_fuses_all(&Pipeline {
+            stages: vec![map_of(0), map_of(1), walk_of(2)],
+            lengths,
+            ..Pipeline::default()
+        });
+    }
+}
