@@ -96,6 +96,15 @@ pub struct PendingComparison<'db> {
     pub operator: Option<&'static str>,
 }
 
+/// A call's fold targets beside the callee's other type variables: an expected return that
+/// resolves as a target does names it only when no other variable of the callee resolves so,
+/// since `fn(a: A, b: B)` given one value twice unifies `A` with `B`.
+#[derive(Debug, Default)]
+pub struct FoldTargets {
+    pub targets: SmallVec<[InferenceVar; 2]>,
+    pub others: SmallVec<[InferenceVar; 8]>,
+}
+
 #[derive(Debug, Default)]
 pub struct InferenceTable<'db> {
     entries: Vec<Entry<'db>>,
@@ -111,7 +120,7 @@ pub struct InferenceTable<'db> {
     /// The accumulators of the call being checked that a callback's arithmetic may leave
     /// generic, as `Checker::fold_targets` finds them; the checker sets and restores them
     /// around each call, so a rollback leaves them alone.
-    pub fold_targets: SmallVec<[InferenceVar; 2]>,
+    pub fold_targets: FoldTargets,
     /// The fold targets a callback's arithmetic left generic, newest last: the call reads each
     /// as `Promoted<A>` in its result (`Checker::promote_folded`).
     folded: Vec<InferenceVar>,
@@ -1311,13 +1320,12 @@ impl<'db> InferenceTable<'db> {
         actual: Ty<'db>,
         expected: Ty<'db>,
     ) -> Option<Result<(), UnifyError<'db>>> {
-        let raw_expected = expected;
+        let target = self.fold_target(db, expected);
         let expected = self.shallow_resolve(db, expected);
         let open = match *expected.kind(db) {
             TyKind::Var(var) => Some(self.find(var)),
             _ => None,
         };
-        let target = self.fold_target(db, raw_expected, expected);
         if open.is_none() && target.is_none() {
             return None;
         }
@@ -1431,33 +1439,51 @@ impl<'db> InferenceTable<'db> {
         Some(settled)
     }
 
-    /// The fold target `expected` names: the raw variable itself, or else the one target that
-    /// resolves to what `expected` resolves to.
-    fn fold_target(
-        &self,
-        db: &'db dyn Db,
-        raw_expected: Ty<'db>,
-        expected: Ty<'db>,
-    ) -> Option<InferenceVar> {
-        if self.fold_targets.is_empty() {
-            return None;
-        }
-        if let TyKind::Var(var) = *raw_expected.kind(db)
-            && self.fold_targets.contains(&var)
+    /// The fold target `expected` names: the callee's own variable, or the one target that
+    /// resolves to what `expected` resolves to while no other variable of the callee does, as an
+    /// init passed before the callback leaves it (`List.walk(ys, init, f)`).
+    fn fold_target(&self, db: &'db dyn Db, expected: Ty<'db>) -> Option<InferenceVar> {
+        let scope = &self.fold_targets;
+        if let TyKind::Var(var) = *expected.kind(db)
+            && scope.targets.contains(&var)
         {
             return Some(var);
         }
-        let mut matching = self.fold_targets.iter().copied().filter(|&target| {
-            match (
-                *expected.kind(db),
-                self.shallow_resolve(db, Ty::new(db, TyKind::Var(target))),
-            ) {
-                (TyKind::Var(var), _) => self.find(var) == self.find(target),
-                (_, resolved) => resolved == expected,
-            }
-        });
+        let resolved = self.shallow_resolve(db, expected);
+        let names =
+            |var: InferenceVar| self.shallow_resolve(db, Ty::new(db, TyKind::Var(var))) == resolved;
+        let mut matching = scope
+            .targets
+            .iter()
+            .copied()
+            .filter(|&target| names(target));
         let target = matching.next()?;
-        matching.next().is_none().then_some(target)
+        let shared = matching.next().is_some() || scope.others.iter().any(|&other| names(other));
+        (!shared).then_some(target)
+    }
+
+    /// Settles a folded target the call bound to a concrete type as what the fold returns from
+    /// it (`integer` gives `double`), so the callback reads its accumulator as the later
+    /// iterations see it. A generic or class type keeps its binding.
+    pub fn settle_folded(&mut self, db: &'db dyn Db, target: InferenceVar) {
+        let var = self.find(target);
+        let Entry::Bound { ty, widening } = *self.entry(var) else {
+            return;
+        };
+        let bound = self.resolve(db, ty);
+        if contains_inference_var(db, bound) {
+            return;
+        }
+        let promoted = self.family(db, FamilyResult::Arithmetic, bound);
+        if promoted != bound && !matches!(promoted.kind(db), TyKind::Family(..)) {
+            self.set(
+                var,
+                Entry::Bound {
+                    ty: promoted,
+                    widening,
+                },
+            );
+        }
     }
 
     fn family_operand_constraint(&self, db: &'db dyn Db, operand: Ty<'db>) -> Constraint {

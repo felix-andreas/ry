@@ -711,6 +711,10 @@ w <- two(function(acc, x) acc * 2, 1:2, 3:4)
 first <- function<A>(a: A, f: fn(A, integer) -> A) -> A f(a, 1L)
 x <- first(1L, function(acc, x) acc * 2)
 y <- Reduce(function(acc, x) acc * 2, 1:3, 1L)
+both <- function<A, B>(a: A, b: B, k: fn(A) -> integer, f: fn(A, integer) -> A, g: fn(B, integer) -> B) -> B g(b, 1L)
+z <- function(init) both(init, init, function(v) 1L, function(acc, x) acc * 2, function(acc, x) acc)
+named <- function<A>(f: fn(acc: A, x: integer) -> A, a: A) -> A f(a, 1L)
+zz <- function(init) named(function(acc, x) acc * 2, init)
 #++++
 doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
@@ -758,6 +762,10 @@ w: double[]
 first: <A> fn(a: A, f: fn(A, integer) -> A) -> A
 x: Unknown
 y: double
+both: <A, B> fn(a: A, b: B, k: fn(A) -> integer, f: fn(A, integer) -> A, g: fn(B, integer) -> B) -> B
+z: fn(init: double) -> double
+named: <A> fn(f: fn(acc: A, x: integer) -> A, a: A) -> A
+zz: <T: arithmetic or number> fn(init: T) -> Promoted<T>
 713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 896..901 warning[unused] `total` is assigned but never used
 1012..1017 warning[unused] `total` is assigned but never used

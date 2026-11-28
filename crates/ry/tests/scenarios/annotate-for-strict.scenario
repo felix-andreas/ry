@@ -67,3 +67,16 @@ run ry check --annotate R/scale.R
 expect exit 0
 expect stdout "added 1 inferred annotation"
 expect file R/scale.R "vapply(values, function(v: double) -> double v * 2, numeric(1))"
+
+# A fold's callback reads its accumulator as the later iterations see it, so an `integer` init
+# annotates the callback with the `double` its arithmetic makes, and the written file checks.
+file R/fold.R
+| total <- Reduce(function(acc, x) if (x > 1L) acc * 2 else acc, 1:3, 1L)
+
+run ry check --annotate R/fold.R
+expect exit 0
+expect stdout "added 2 inferred annotations"
+expect file R/fold.R "total: double <- Reduce(function(acc: double, x: integer) -> double if (x > 1L) acc * 2 else acc, 1:3, 1L)"
+
+run ry check R/fold.R
+expect exit 0

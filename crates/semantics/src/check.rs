@@ -16,8 +16,9 @@ use {
             is_whole_number_double,
         },
         infer::{
-            Entry, FunctionMismatch, InferenceTable, PendingComparison, RecordMismatch, Snapshot,
-            UNCHECKED_WITNESS, UnifyError, apply_definition, constraint_rejects, numeric_join,
+            Entry, FoldTargets, FunctionMismatch, InferenceTable, PendingComparison,
+            RecordMismatch, Snapshot, UNCHECKED_WITNESS, UnifyError, apply_definition,
+            constraint_rejects, numeric_join,
         },
         metadata::{
             imported_by_name, imports_every_name, is_own_package, own_package_reaches,
@@ -4885,7 +4886,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }),
                     arena,
                 );
+                // Only an ordinary call names fold targets, so a callback of any other call
+                // never matches an enclosing call's.
+                let enclosing_fold_targets = mem::take(&mut self.table.fold_targets);
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
+                self.table.fold_targets = enclosing_fold_targets;
                 for &value in &literal_arguments {
                     self.literal_reads.remove(value);
                     let argument = self.recorded_type(value);
@@ -15147,12 +15152,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// parameters mentions, because the call reads `A` as `Promoted<A>` only in its result
     /// (`.agents/memory/decisions/type-checker.md`, "A fold over an open accumulator gives
     /// `Promoted<T>`"). An overloaded or wrapped callee has none, and its fold settles `A`.
-    fn fold_targets(&self, callee_ty: Ty<'db>) -> SmallVec<[InferenceVar; 2]> {
+    fn fold_targets(&self, callee_ty: Ty<'db>) -> FoldTargets {
         let db = self.db;
-        let mut targets = SmallVec::new();
-        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
-            return targets;
+        let mut scope = FoldTargets::default();
+        let callee_ty = self.table.shallow_resolve(db, callee_ty);
+        let TyKind::Function(function) = callee_ty.kind(db) else {
+            return scope;
         };
+        let targets = &mut scope.targets;
         let parameters: SmallVec<[Ty<'db>; 8]> = function
             .positional
             .iter()
@@ -15167,23 +15174,35 @@ impl<'db, 'a> Checker<'db, 'a> {
             let TyKind::Var(accumulator) = *callback.ret.kind(db) else {
                 continue;
             };
-            let mentioned = |ty: Ty<'db>| mentions_var_in_function(db, ty, accumulator);
-            let elsewhere = parameters
+            // The callback takes the accumulator as one parameter of its own, named or not.
+            let mut callback_parameters = callback
+                .positional
                 .iter()
-                .enumerate()
-                .any(|(other, &ty)| other != index && mentioned(ty))
-                || callback
-                    .positional
-                    .iter()
-                    .skip(1)
-                    .chain(callback.named.iter().map(|parameter| &parameter.ty))
-                    .chain(callback.variadic.iter().map(|rest| &rest.element))
-                    .any(|&ty| mentions_var(db, ty, accumulator));
-            if !elsewhere && !targets.contains(&accumulator) {
+                .chain(callback.named.iter().map(|parameter| &parameter.ty))
+                .chain(callback.variadic.iter().map(|rest| &rest.element))
+                .filter(|&&ty| mentions_var(db, ty, accumulator));
+            let takes_it_once = callback_parameters
+                .next()
+                .is_some_and(|&ty| *ty.kind(db) == TyKind::Var(accumulator))
+                && callback_parameters.next().is_none();
+            let elsewhere = parameters.iter().enumerate().any(|(other, &ty)| {
+                other != index && mentions_var_in_function(db, ty, accumulator)
+            });
+            if takes_it_once && !elsewhere && !targets.contains(&accumulator) {
                 targets.push(accumulator);
             }
         }
-        targets
+        if !scope.targets.is_empty() {
+            let mut variables = FxHashSet::default();
+            collect_vars(db, callee_ty, &mut variables);
+            let mut others: SmallVec<[InferenceVar; 8]> = variables
+                .into_iter()
+                .filter(|var| !scope.targets.contains(var))
+                .collect();
+            others.sort_unstable();
+            scope.others = others;
+        }
+        scope
     }
 
     /// The call's `result` with each accumulator its callbacks folded since `mark` read as
@@ -15194,7 +15213,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             return result;
         }
         let mut memo = FxHashMap::default();
-        self.promote_accumulators(&folded, result, &mut memo)
+        let promoted = self.promote_accumulators(&folded, result, &mut memo);
+        for &target in &folded {
+            self.table.settle_folded(self.db, target);
+        }
+        promoted
     }
 
     fn promote_accumulators(
