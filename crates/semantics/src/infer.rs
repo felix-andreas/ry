@@ -349,6 +349,19 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// [`Self::shallow_resolve`] without computing a family at the top.
+    fn resolve_vars_only(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+        let mut current = ty;
+        while let Some(var) = current.as_var(db) {
+            let representative = self.find(var);
+            match self.entries[representative.0 as usize] {
+                Entry::Bound { ty: bound, .. } => current = bound,
+                _ => return Ty::new(db, TyKind::Var(representative)),
+            }
+        }
+        current
+    }
+
     /// The result of `result` over `operand` as far as this table decides it: an open operand
     /// whose constraint admits only ry's numbers or only R's types picks that side's outcome.
     pub fn family(&self, db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
@@ -1329,14 +1342,17 @@ impl<'db> InferenceTable<'db> {
         if open.is_none() && target.is_none() {
             return None;
         }
-        let actual = self.shallow_resolve(db, actual);
+        // A family whose operand the call already bound (`Promoted<A>` with the init's `A =
+        // integer`) stays a family here, or it would compute to `double` and read as a
+        // callback returning a type other than the accumulator's.
+        let actual = self.resolve_vars_only(db, actual);
         let members = match actual.kind(db) {
             TyKind::Union(members) => *members,
             _ => std::slice::from_ref(&actual),
         };
         let mut family = None;
         for &member in members {
-            let member = self.shallow_resolve(db, member);
+            let member = self.resolve_vars_only(db, member);
             let operand = match *member.kind(db) {
                 TyKind::Family(result, operand)
                     if family.is_none_or(|known: FamilyResult| {
@@ -3361,9 +3377,6 @@ fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
     }
 }
 
-/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
-/// whether it is a vector. A union of numeric types ranks as its widest member, since every
-/// member coerces to that one (`double | integer` widens a binding to `double`).
 /// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
 /// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
 /// it). `None` when a type is not numeric.
@@ -3392,6 +3405,9 @@ pub(crate) fn numeric_join<'db>(
     })
 }
 
+/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
+/// whether it is a vector. A union of numeric types ranks as its widest member, since every
+/// member coerces to that one (`double | integer` widens a binding to `double`).
 fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
     let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
         TyKind::Scalar(Atomic::Logical) => Some(0),
