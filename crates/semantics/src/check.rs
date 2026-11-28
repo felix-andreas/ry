@@ -1037,7 +1037,6 @@ fn check_item_in<'db>(
         },
         scheme_arena: Vec::new(),
         literal_reads: Bitset::new_in(arena, expressions),
-        fold_mark: 0,
         ry_components: Bitset::new_in(arena, expressions),
         recorded: RecordedTypes {
             types: vec![None; expressions],
@@ -2156,8 +2155,6 @@ struct Checker<'db, 'a> {
     /// The reads that may keep a literal variable open, because they are an operand whose
     /// other operand may decide it. Every other read decides it as R's type.
     literal_reads: Bitset<'a, ExprId>,
-    /// Where the call being inferred starts its accumulators in `InferenceTable::folded`.
-    fold_mark: usize,
     /// The tuple items, record fields and tag payloads of a literal bound to a name where
     /// `binds_ry_value` holds, which are ry values as a scalar literal bound there is.
     ry_components: Bitset<'a, ExprId>,
@@ -4888,10 +4885,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }),
                     arena,
                 );
-                let outer_fold_mark = mem::replace(&mut self.fold_mark, self.table.folded_mark());
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
-                self.table.forget_folded(self.fold_mark);
-                self.fold_mark = outer_fold_mark;
                 for &value in &literal_arguments {
                     self.literal_reads.remove(value);
                     let argument = self.recorded_type(value);
@@ -15105,9 +15099,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             false => self.without_null_beside_functions(callee_ty),
         };
         self.mark_unforced_missing_reads(callee_ty, arguments);
+        let fold_targets = self.fold_targets(callee_ty);
+        let enclosing_fold_targets = mem::replace(&mut self.table.fold_targets, fold_targets);
+        let fold_mark = self.table.folded_mark();
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         if self.arity_tested_by_formals(callee, callee_ty, &call_arguments) {
+            self.table.fold_targets = enclosing_fold_targets;
+            self.table.forget_folded(fold_mark);
             return unknown(self.db);
         }
         let source = match self.is_lookup(callee) {
@@ -15118,6 +15117,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let errors_before = self.errors.len();
         let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
         self.call_first_var = enclosing_call_first_var;
+        self.table.fold_targets = enclosing_fold_targets;
+        let result = self.promote_folded(fold_mark, result);
         // A call its callee refuses can leave the callee's result variables unbound, and
         // printing one would show a bare `T`. A result the declaration fixes is kept.
         if self.errors.len() > errors_before {
@@ -15139,6 +15140,81 @@ impl<'db, 'a> Checker<'db, 'a> {
             return result;
         }
         self.drop_unconstrained_members(result, &valueless_candidates, instantiated)
+    }
+
+    /// The accumulators a call to `callee_ty` may leave generic under a callback's arithmetic:
+    /// the `A` of each callback parameter `fn(A, T) -> A` that no other function type among the
+    /// parameters mentions, because the call reads `A` as `Promoted<A>` only in its result
+    /// (`.agents/memory/decisions/type-checker.md`, "A fold over an open accumulator gives
+    /// `Promoted<T>`"). An overloaded or wrapped callee has none, and its fold settles `A`.
+    fn fold_targets(&self, callee_ty: Ty<'db>) -> SmallVec<[InferenceVar; 2]> {
+        let db = self.db;
+        let mut targets = SmallVec::new();
+        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
+            return targets;
+        };
+        let parameters: SmallVec<[Ty<'db>; 8]> = function
+            .positional
+            .iter()
+            .copied()
+            .chain(function.named.iter().map(|parameter| parameter.ty))
+            .chain(function.variadic.map(|rest| rest.element))
+            .collect();
+        for (index, &parameter) in parameters.iter().enumerate() {
+            let TyKind::Function(callback) = parameter.kind(db) else {
+                continue;
+            };
+            let TyKind::Var(accumulator) = *callback.ret.kind(db) else {
+                continue;
+            };
+            let mentioned = |ty: Ty<'db>| mentions_var_in_function(db, ty, accumulator);
+            let elsewhere = parameters
+                .iter()
+                .enumerate()
+                .any(|(other, &ty)| other != index && mentioned(ty))
+                || callback.positional.iter().skip(1).any(|&ty| mentioned(ty) || mentions_var(db, ty, accumulator))
+                || callback.named.iter().any(|parameter| mentioned(parameter.ty));
+            if !elsewhere && !targets.contains(&accumulator) {
+                targets.push(accumulator);
+            }
+        }
+        targets
+    }
+
+    /// The call's `result` with each accumulator its callbacks folded since `mark` read as
+    /// `Promoted<A>` wherever the result names it.
+    fn promote_folded(&mut self, mark: usize, result: Ty<'db>) -> Ty<'db> {
+        let folded = self.table.forget_folded(mark);
+        if folded.is_empty() {
+            return result;
+        }
+        let mut memo = FxHashMap::default();
+        self.promote_accumulators(&folded, result, &mut memo)
+    }
+
+    fn promote_accumulators(
+        &self,
+        accumulators: &[InferenceVar],
+        ty: Ty<'db>,
+        memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
+    ) -> Ty<'db> {
+        let db = self.db;
+        if !contains_inference_var(db, ty) {
+            return ty;
+        }
+        if let Some(&promoted) = memo.get(&ty) {
+            return promoted;
+        }
+        let promoted = match *ty.kind(db) {
+            TyKind::Var(var) if accumulators.contains(&var) => {
+                self.table.family(db, FamilyResult::Arithmetic, ty)
+            }
+            _ => map_child_types(db, ty, &mut |child| {
+                self.promote_accumulators(accumulators, child, memo)
+            }),
+        };
+        memo.insert(ty, promoted);
+        promoted
     }
 
     /// The callee's freshly instantiated type parameters (`instantiated`) that the types of the
@@ -20435,12 +20511,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .unwrap_or_else(|| {
                             self.narrow_echoed_parameter_unions(function, arguments)
                         });
-                    let ret = self
-                        .elementwise_return(function, arguments, ret)
-                        .unwrap_or(ret);
-                    self.promote_folded(function, ret)
+                    self.elementwise_return(function, arguments, ret)
+                        .unwrap_or(ret)
                 } else {
-                    self.promote_folded(function, function.ret)
+                    function.ret
                 }
             }
             TyKind::Any | TyKind::Unknown => unknown(self.db),
@@ -20752,58 +20826,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         } else {
             flag.when_false
         })
-    }
-
-    /// `ret` with `Promoted<A>` wherever it names an accumulator `A` the call folded: a
-    /// callback parameter `fn(A, T) -> A` whose argument's arithmetic left `A` open
-    /// (`InferenceTable::family_fixed_point`). Only the signature's own variable counts, so
-    /// `other(f, init, init)` returning its `b` gives `init`'s type even where `a` and `b` unify.
-    fn promote_folded(&mut self, function: &FunctionType<'db>, ret: Ty<'db>) -> Ty<'db> {
-        let db = self.db;
-        let mut accumulators: SmallVec<[InferenceVar; 2]> = SmallVec::new();
-        let parameters = function
-            .positional
-            .iter()
-            .copied()
-            .chain(function.named.iter().map(|parameter| parameter.ty));
-        for parameter in parameters {
-            if let TyKind::Function(callback) = parameter.kind(db)
-                && let TyKind::Var(accumulator) = *callback.ret.kind(db)
-                && self.table.is_folded(db, self.fold_mark, callback.ret)
-            {
-                accumulators.push(accumulator);
-            }
-        }
-        if accumulators.is_empty() {
-            return ret;
-        }
-        let mut memo = FxHashMap::default();
-        self.promote_accumulators(&accumulators, ret, &mut memo)
-    }
-
-    fn promote_accumulators(
-        &self,
-        accumulators: &[InferenceVar],
-        ty: Ty<'db>,
-        memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
-    ) -> Ty<'db> {
-        let db = self.db;
-        if !contains_inference_var(db, ty) {
-            return ty;
-        }
-        if let Some(&promoted) = memo.get(&ty) {
-            return promoted;
-        }
-        let promoted = match *ty.kind(db) {
-            TyKind::Var(var) if accumulators.contains(&var) => {
-                self.table.family(db, FamilyResult::Arithmetic, ty)
-            }
-            _ => map_child_types(db, ty, &mut |child| {
-                self.promote_accumulators(accumulators, child, memo)
-            }),
-        };
-        memo.insert(ty, promoted);
-        promoted
     }
 
     /// A call to a function whose body forwards its formals to `Reduce` folds like `Reduce`
@@ -27186,6 +27208,35 @@ fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<Inferenc
         into.insert(*var);
     }
     for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
+}
+
+/// Whether `ty` names the inference variable `var` anywhere.
+fn mentions_var<'db>(db: &'db dyn Db, ty: Ty<'db>, var: InferenceVar) -> bool {
+    if !contains_inference_var(db, ty) {
+        return false;
+    }
+    if *ty.kind(db) == TyKind::Var(var) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| found = found || mentions_var(db, child, var));
+    found
+}
+
+/// Whether `ty` names the inference variable `var` inside a function type, where a callback
+/// would see the accumulator under another type than the fold's result promotes.
+fn mentions_var_in_function<'db>(db: &'db dyn Db, ty: Ty<'db>, var: InferenceVar) -> bool {
+    if !contains_inference_var(db, ty) {
+        return false;
+    }
+    if matches!(ty.kind(db), TyKind::Function(_)) {
+        return mentions_var(db, ty, var);
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_var_in_function(db, child, var)
+    });
+    found
 }
 
 /// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result

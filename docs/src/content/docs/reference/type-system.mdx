@@ -2955,12 +2955,16 @@ doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 
 So `doubled([1i64], 1i64)` is an `I64`, `doubled([1i64], 1L)` a `double`, and
 `doubled([1i64], "a")` a type error. The parameter itself keeps its type, so a function that also
-returns `init` returns `U`. Any function with a callback parameter `fn(A, T) -> A` folds the same
-way: its result reads each `A` as `Promoted<A>`, so for
+returns `init` returns `U`. A call of any function with a callback parameter `fn(A, T) -> A` folds
+the same way, and its result reads each `A` as `Promoted<A>`: for
 `give <- function<A>(f: fn(A, integer) -> A, a: A) -> fn(A, integer) -> A f`,
 `give(function(acc, x) acc * 2, 1L)` is `fn(double, integer) -> double`, while a result that does
-not name `A` keeps its type. R's fold returns the init itself for an empty `xs`, which the type does
-not track: `Reduce(function(acc, x) acc * 2, integer(), 1L)` types as `double` and runs as `1L`.
+not name `A` keeps its type. Only a callback that is itself a parameter of one signature folds
+open, and not through an overloaded function such as `purrr::reduce`. One inside a record, a list
+or a union settles its accumulator as `double`, as does a difference of two accumulators
+(`acc - acc`), so `function(ys, init) List.walk(ys, init, function(acc, y) acc - acc)` takes
+`init: double`. R's fold returns the init itself for an empty `xs`, which the type does not track:
+`Reduce(function(acc, x) acc * 2, integer(), 1L)` types as `double` and runs as `1L`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

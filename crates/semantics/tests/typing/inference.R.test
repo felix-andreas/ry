@@ -695,6 +695,22 @@ pass <- function(init) other(function(acc, x) acc * 2, init, init)
 q <- function(xs, init) other(function(acc, x) acc * 2, init, init)
 #: <U: arithmetic or number> fn(init: U) -> fn(Promoted<U>, integer) -> Promoted<U>
 mk <- function(init) give(function(acc, x) acc * 2, init)
+r <- purrr::reduce(1:3, function(acc, x) acc * 2, .init = 1L)
+opt <- function<A>(f: (fn(A, integer) -> A) | NULL, a: A) -> A a
+s <- opt(function(acc, x) acc * 2, 1L)
+rec <- function<A>(r: list{f: fn(A, integer) -> A}, a: A) -> A a
+t <- rec(list(f = function(acc, x) acc * 2), 1L)
+lst <- function<A>(fs: list[fn(A, integer) -> A], a: A) -> A a
+u <- lst(list(function(acc, x) acc * 2), 1L)
+dots <- function<A>(a: A, ...: fn(A, integer) -> A) -> A a
+v <- dots(1L, function(acc, x) acc * 2)
+#: <U: arithmetic or number> fn(init: U) -> fn(U) -> U
+mk3 <- function(init) function(v) v * 2
+two <- function<A>(f: fn(A, integer) -> A, a: A, b: A) -> A b
+w <- two(function(acc, x) acc * 2, 1:2, 3:4)
+first <- function<A>(a: A, f: fn(A, integer) -> A) -> A f(a, 1L)
+x <- first(1L, function(acc, x) acc * 2)
+y <- Reduce(function(acc, x) acc * 2, 1:3, 1L)
 #++++
 doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
@@ -727,9 +743,27 @@ p: list[double]
 pass: <U: arithmetic or number> fn(init: U) -> U
 q: <T, U: arithmetic or number> fn([xs]: T, init: U) -> U
 mk: <U: arithmetic or number> fn(init: U) -> fn(Promoted<U>, integer) -> Promoted<U>
+r: double
+opt: <A> fn(f: (fn(A, integer) -> A) | NULL, a: A) -> A
+s: double
+rec: <A> fn(r: list{f: fn(A, integer) -> A}, a: A) -> A
+t: double
+lst: <A> fn(fs: list[fn(A, integer) -> A], a: A) -> A
+u: double
+dots: <A> fn(a: A, ...: fn(A, integer) -> A) -> A
+v: Unknown
+mk3: <U: arithmetic or number> fn(init: U) -> fn(U) -> U
+two: <A> fn(f: fn(A, integer) -> A, a: A, b: A) -> A
+w: double[]
+first: <A> fn(a: A, f: fn(A, integer) -> A) -> A
+x: Unknown
+y: double
 713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 896..901 warning[unused] `total` is assigned but never used
 1012..1017 warning[unused] `total` is assigned but never used
 1096..1106 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
 1134..1139 warning[unused] `total` is assigned but never used
 1486..1510 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
+2748..2772 error[type-mismatch] this function must return `integer`, but it returns `double`
+2851..2868 error[type-mismatch] expected `fn(U) -> U`, found `fn(v: T) -> Promoted<T>`
+3056..3080 error[type-mismatch] this function must return `integer`, but it returns `double`

@@ -59,12 +59,12 @@ pub enum Widening {
     /// Settled as the outcome a callback keeps (`Compared<T> = T`), so another R type joins it
     /// as a union rather than rebinding it.
     Joined,
-    /// Settled as R's outcome of a difference a fold's callback takes on its accumulator
-    /// (`Subtracted<T> = T` binds `double`). The first value that meets it settles it: one that
+    /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
+    /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
     /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
     /// to what the fold returns from that init under `result`: a number vector promotes
     /// (`integer[]` gives `double[]`), a ry number keeps its type, and a class keeps its type
-    /// when the family does (a class closed under arithmetic, not a `Date`).
+    /// when the family does (`Date` under `Promoted`, not under `Subtracted`).
     Folded {
         constraint: Constraint,
         result: FamilyResult,
@@ -108,10 +108,13 @@ pub struct InferenceTable<'db> {
     /// Owned by the table, like `literals`, so that a rollback drops the comparisons of the
     /// discarded inference together with the variables they name.
     pub comparisons: Vec<PendingComparison<'db>>,
-    /// The accumulators a fold's arithmetic callback left generic, newest last: the call gives
-    /// `Promoted<T>` where its signature's result names the callback's accumulator
-    /// (`Checker::promote_folded`).
-    folded: Vec<Ty<'db>>,
+    /// The accumulators of the call being checked that a callback's arithmetic may leave
+    /// generic, as `Checker::fold_targets` finds them; the checker sets and restores them
+    /// around each call, so a rollback leaves them alone.
+    pub fold_targets: SmallVec<[InferenceVar; 2]>,
+    /// The fold targets a callback's arithmetic left generic, newest last: the call reads each
+    /// as `Promoted<A>` in its result (`Checker::promote_folded`).
+    folded: Vec<InferenceVar>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
     pub definitions: Option<TypeDefinitions<'db>>,
@@ -252,24 +255,14 @@ impl<'db> InferenceTable<'db> {
         self.undo.push((var, previous));
     }
 
-    /// Where the accumulators folded from here on start, for [`Self::is_folded`].
+    /// Where the accumulators folded from here on start, for [`Self::forget_folded`].
     pub fn folded_mark(&self) -> usize {
         self.folded.len()
     }
 
-    pub fn forget_folded(&mut self, mark: usize) {
-        self.folded.truncate(mark);
-    }
-
-    /// Whether `ty` is an accumulator folded since `mark`.
-    pub fn is_folded(&self, db: &'db dyn Db, mark: usize, ty: Ty<'db>) -> bool {
-        let Some(folded) = self.folded.get(mark..).filter(|folded| !folded.is_empty()) else {
-            return false;
-        };
-        let resolved = self.resolve(db, ty);
-        folded
-            .iter()
-            .any(|&accumulator| self.resolve(db, accumulator) == resolved)
+    /// The fold targets folded since `mark`, which the table forgets.
+    pub fn forget_folded(&mut self, mark: usize) -> Vec<InferenceVar> {
+        self.folded.split_off(mark.min(self.folded.len()))
     }
 
     pub fn find(&self, var: InferenceVar) -> InferenceVar {
@@ -1318,12 +1311,16 @@ impl<'db> InferenceTable<'db> {
         actual: Ty<'db>,
         expected: Ty<'db>,
     ) -> Option<Result<(), UnifyError<'db>>> {
+        let raw_expected = expected;
         let expected = self.shallow_resolve(db, expected);
-        let accumulator = match *expected.kind(db) {
-            TyKind::Var(var) => Ok(self.find(var)),
-            TyKind::Rigid(name) => Err(name),
-            _ => return None,
+        let open = match *expected.kind(db) {
+            TyKind::Var(var) => Some(self.find(var)),
+            _ => None,
         };
+        let target = self.fold_target(db, raw_expected, expected);
+        if open.is_none() && target.is_none() {
+            return None;
+        }
         let actual = self.shallow_resolve(db, actual);
         let members = match actual.kind(db) {
             TyKind::Union(members) => *members,
@@ -1344,49 +1341,56 @@ impl<'db> InferenceTable<'db> {
                 _ => member,
             };
             let operand = self.shallow_resolve(db, operand);
-            let same = match (*operand.kind(db), accumulator) {
-                (TyKind::Var(operand), Ok(var)) => self.find(operand) == var,
-                (TyKind::Rigid(_), Err(_)) => operand == expected,
-                _ => false,
+            let same = match (*operand.kind(db), open) {
+                (TyKind::Var(operand), Some(var)) => self.find(operand) == var,
+                _ => operand == expected,
             };
             if !same {
                 return None;
             }
         }
-        let var = match accumulator {
-            Ok(var) => var,
-            // A declared accumulator `U` the family may promote (`<U: arithmetic or number>`)
-            // folds as an open one does: the call gives `Promoted<U>`.
-            Err(name) => {
-                let declared = self
-                    .rigid_constraints
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(Constraint::Unconstrained);
-                if family? != FamilyResult::Arithmetic
-                    || declared.join(Constraint::ArithmeticOrNumber) != Some(declared)
-                {
-                    return None;
+        let result = family?;
+        // A fold target's accumulator stays what the init gives it under the callback's
+        // arithmetic: the call reads it as `Promoted<A>` (`Checker::promote_folded`).
+        if result == FamilyResult::Arithmetic
+            && let Some(target) = target
+        {
+            let settled = match open {
+                Some(var) => match *self.entry(var) {
+                    Entry::Unbound { constraint, .. } => constraint
+                        .join(Constraint::ArithmeticOrNumber)
+                        .map(|joined| self.constrain(db, var, joined)),
+                    _ => None,
+                },
+                None => {
+                    let admits = match *expected.kind(db) {
+                        TyKind::Rigid(name) => {
+                            let declared = self
+                                .rigid_constraints
+                                .get(&name)
+                                .copied()
+                                .unwrap_or(Constraint::Unconstrained);
+                            declared.join(Constraint::ArithmeticOrNumber) == Some(declared)
+                        }
+                        _ => {
+                            constraint_rejects(db, self, Constraint::ArithmeticOrNumber, expected)
+                                .is_none()
+                        }
+                    };
+                    admits.then_some(Ok(()))
                 }
-                self.folded.push(expected);
-                return Some(Ok(()));
+            };
+            if let Some(settled) = settled {
+                if settled.is_ok() {
+                    self.folded.push(target);
+                }
+                return Some(settled);
             }
-        };
+        }
+        let var = open?;
         let Entry::Unbound { constraint, .. } = *self.entry(var) else {
             return None;
         };
-        let result = family?;
-        // An arithmetic callback leaves an open accumulator open, and the fold's call gives
-        // `Promoted<T>`, which reduces once the init settles `T`.
-        if result == FamilyResult::Arithmetic
-            && let Some(joined) = constraint.join(Constraint::ArithmeticOrNumber)
-        {
-            let constrained = self.constrain(db, var, joined);
-            if constrained.is_ok() {
-                self.folded.push(expected);
-            }
-            return Some(constrained);
-        }
         let snapshot = self.snapshot();
         let r_outcome = result.r_outcome(db);
         let settled = if constraint_rejects(db, self, constraint, r_outcome).is_none() {
@@ -1427,6 +1431,32 @@ impl<'db> InferenceTable<'db> {
             self.rollback(snapshot);
         }
         Some(settled)
+    }
+
+    /// The fold target `expected` names: the raw variable itself, or else the one target that
+    /// resolves to what `expected` resolves to.
+    fn fold_target(
+        &self,
+        db: &'db dyn Db,
+        raw_expected: Ty<'db>,
+        expected: Ty<'db>,
+    ) -> Option<InferenceVar> {
+        if self.fold_targets.is_empty() {
+            return None;
+        }
+        if let TyKind::Var(var) = *raw_expected.kind(db)
+            && self.fold_targets.contains(&var)
+        {
+            return Some(var);
+        }
+        let mut matching = self.fold_targets.iter().copied().filter(|&target| {
+            match (*expected.kind(db), self.shallow_resolve(db, Ty::new(db, TyKind::Var(target)))) {
+                (TyKind::Var(var), _) => self.find(var) == self.find(target),
+                (_, resolved) => resolved == expected,
+            }
+        });
+        let target = matching.next()?;
+        matching.next().is_none().then_some(target)
     }
 
     fn family_operand_constraint(&self, db: &'db dyn Db, operand: Ty<'db>) -> Constraint {
