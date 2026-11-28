@@ -25,7 +25,7 @@
 22 crates/interp/src/code_image.rs
 65 crates/interp/src/coerce.rs
 19 crates/interp/src/combine.rs
-51 crates/interp/src/conditions.rs
+15 crates/interp/src/conditions.rs
 180 crates/interp/src/connections.rs
 30 crates/interp/src/console_server.rs
 14 crates/interp/src/crash.rs
@@ -41,7 +41,7 @@
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-299 crates/interp/src/handles.rs
+307 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 23 crates/interp/src/interp.rs

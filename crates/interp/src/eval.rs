@@ -1021,7 +1021,7 @@ fn force_unforced<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Lo
             promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
             // A handler that jumps out of this warning leaves the promise marked as under
             // evaluation, as in GNU R, where the next force reports the recursive reference.
-            handles::warning(context, "restarting interrupted promise evaluation")?;
+            conditions::warn(context, "restarting interrupted promise evaluation")?;
         }
         let result = promise_result(context, promise);
         promise.read(context).set_flags(PROMISE_SEEN, false);
@@ -1239,7 +1239,7 @@ pub(crate) fn enclosed_value<'s>(
     interp().visible = true;
     let (symbol, enclosure) = (context.root(symbol), context.root(enclosure));
     match symbol_value(context, symbol, enclosure) {
-        Err(Unwind::Error(failure)) => Err(handles::signal_error(context, failure)),
+        Err(Unwind::Error(failure)) => Err(conditions::signal_failure(context, failure)),
         result => result,
     }
 }
@@ -1255,7 +1255,7 @@ fn eval_enclosed_name<'s>(
     let enclosure = context.root(handles::live_frame(context, owner).enclosure());
     let lexical = move |context: &Cx<'s>| context.root(handles::live_frame(context, owner).call());
     match symbol_value_reporting(context, symbol, enclosure, lexical, ArgumentReader::Getvar) {
-        Err(Unwind::Error(failure)) => Err(handles::signal_error(context, failure)),
+        Err(Unwind::Error(failure)) => Err(conditions::signal_failure(context, failure)),
         result => result,
     }
 }

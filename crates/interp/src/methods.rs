@@ -1083,7 +1083,7 @@ unsafe fn catching_errors(
                 if condition == nil() {
                     Ok(Err(interp().error_message.clone()))
                 } else {
-                    Ok(Err(conditions::condition_message(condition)))
+                    Ok(Err(conditions::condition_message(condition)?))
                 }
             }
             other => Err(Unwind::Jump(other)),

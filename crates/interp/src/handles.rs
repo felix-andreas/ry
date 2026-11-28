@@ -31,7 +31,7 @@ use {
         strings::Encoding,
     },
     smallvec::SmallVec,
-    std::{borrow::Cow, marker::PhantomData, ops::Range, ptr::NonNull},
+    std::{borrow::Cow, marker::PhantomData, ops::Range, ptr::NonNull, rc::Rc},
 };
 
 /// A builtin in safe Rust: it reaches the heap only through the context, and its arguments and
@@ -331,14 +331,6 @@ pub fn logical_constant<'s>(_context: &Cx<'s>, value: i32) -> R<Local<'s>> {
 #[inline]
 pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
     Ok(context.scalar::<Integer>(value)?.finish().value())
-}
-
-/// Raises a warning against the running call.
-#[inline]
-pub fn warning(_context: &mut Cx<'_>, message: impl Into<String>) -> R<()> {
-    // SAFETY: a warning may run a calling handler, which is R code and so needs the `&mut Cx`
-    // this takes.
-    unsafe { conditions::warning(message) }
 }
 
 /// A copy of `vector` with its own element storage, which the caller may fill or change. List
@@ -1469,6 +1461,21 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
     }
 }
 
+/// [`with`] for a body that cannot fail and whose answer holds no heap reference.
+///
+/// # Safety
+///
+/// As for [`with`].
+pub unsafe fn scoped<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> T) -> T {
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    // SAFETY: as in `with`.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *heap)) };
+    let answer = body(&mut context);
+    heap.release_handles(mark);
+    answer
+}
+
 /// The host's task-callback `routine` called with the `.Call` arguments `args`.
 ///
 /// # Safety
@@ -1704,9 +1711,8 @@ impl<'s> Args<'_, 's> {
     }
 
     /// Raises a warning that names the call.
-    pub fn warning(&self, _context: &mut Cx<'s>, message: impl Into<String>) -> R<()> {
-        // SAFETY: a warning may run a calling handler, which is R code and so needs `&mut Cx`.
-        unsafe { conditions::warning_call(self.call.call, message) }
+    pub fn warning(&self, context: &mut Cx<'s>, message: impl Into<String>) -> R<()> {
+        conditions::warn_in(context, self.expression(), message)
     }
 
     /// The name of the primitive called, which an error from a shared body such as `&&` and
@@ -2627,25 +2633,6 @@ pub fn element_text<'s>(
         let chars = crate::coerce::element_as_charsxp(vector.raw(), index)?;
         Ok(context.root(Gc::<Chars>::adopt(chars)))
     }
-}
-
-/// Signals an error condition of `classes` with `fields` besides the message and the call,
-/// then reports it as the default handler does. `None` names the running call.
-pub fn classed_error(
-    _context: &mut Cx<'_>,
-    call: Option<Local<'_>>,
-    message: &str,
-    classes: &[&str],
-    fields: &[(&str, Local<'_>)],
-) -> Unwind {
-    let fields: SmallVec<[(&str, Sexp); 4]> = fields
-        .iter()
-        .map(|&(name, value)| (name, value.raw()))
-        .collect();
-    let call = call.map_or_else(values::unbound, |call| call.raw());
-    // SAFETY: the fields and the call are rooted, and the handlers are R code, which `&mut Cx`
-    // permits.
-    unsafe { conditions::classed_error(call, message, classes, &fields) }
 }
 
 /// The empty argument, as an empty symbol in a call evaluates, which the heap keeps for as
@@ -3734,12 +3721,6 @@ pub fn type_name(value: impl Pointer<Value>) -> &'static str {
     unsafe { crate::coerce::type_name(value.raw()) }
 }
 
-/// Raises a warning that names `call`.
-pub fn warning_in(_context: &mut Cx<'_>, call: Local<'_>, message: impl Into<String>) -> R<()> {
-    // SAFETY: a warning may run a calling handler, which is R code and so needs `&mut Cx`.
-    unsafe { conditions::warning_call(call.raw(), message) }
-}
-
 /// The value of the option `name`, or `NULL` when it is unset.
 pub fn option<'s>(context: &Cx<'s>, name: &str) -> Local<'s> {
     // SAFETY: the options list holds the value, and the lookup allocates nothing.
@@ -4490,12 +4471,6 @@ pub fn evaluating<'c>(
 ) -> crate::capture::Scope {
     // SAFETY: the environment is live when the recorder reads it, which it does at once.
     unsafe { crate::capture::evaluating(|| environment().raw()) }
-}
-
-/// `failure`, signalled as an error raised by the evaluator (`conditions::signal_error`).
-pub fn signal_error(_context: &mut Cx<'_>, failure: crate::unwind::RError) -> Unwind {
-    // SAFETY: signalling runs the calling handlers, which are R code, as `&mut Cx` permits.
-    unsafe { conditions::signal_error(failure) }
 }
 
 /// What a read by name of `symbol` finds in the slot of the live slot frame that `environment`
@@ -6227,4 +6202,188 @@ pub fn with_rng_state<'s, T>(context: &mut Cx<'s>, body: impl FnOnce(&mut Cx<'s>
     // SAFETY: as above.
     unsafe { crate::random::put_rng_state()? };
     Ok(answer)
+}
+
+/// `expression` deparsed, the first line only.
+pub fn deparse_first_line(_context: &mut Cx<'_>, expression: Local<'_>) -> String {
+    // SAFETY: the expression is rooted, and deparsing allocates, which `&mut Cx` permits.
+    unsafe { crate::deparse::deparse_first_line(expression.raw()) }
+}
+
+/// `expression` deparsed into lines of about `cutoff` bytes, with the `deparse::options`
+/// bits `options`.
+pub fn deparse_lines(
+    _context: &mut Cx<'_>,
+    expression: Local<'_>,
+    cutoff: usize,
+    options: u32,
+) -> Vec<String> {
+    // SAFETY: as in `deparse_first_line`.
+    unsafe { crate::deparse::deparse_lines(expression.raw(), cutoff, options) }
+}
+
+/// A new character vector of `items`.
+pub fn text_vector<'s, Text: AsRef<str>>(
+    context: &mut Cx<'s>,
+    items: &[Text],
+) -> R<Local<'s, Str>> {
+    let mut fill = StringFill::new(context, items.len())?;
+    for item in items {
+        fill.push_text(context, item.as_ref())?;
+    }
+    Ok(fill.finish().finish())
+}
+
+/// A new list of the values of `items`, named by their names.
+pub fn named_list<'s>(context: &mut Cx<'s>, items: &[(&str, Local<'_>)]) -> R<Owned<'s, List>> {
+    let mut names = StringFill::new(context, items.len())?;
+    for &(name, _) in items {
+        names.push_text(context, name)?;
+    }
+    let names = names.finish().finish();
+    let mut list = context.alloc::<List>(items.len())?;
+    for (index, &(_, value)) in items.iter().enumerate() {
+        list.set(context, index, value);
+    }
+    let mut list = list.owned();
+    set_attribute(
+        context,
+        &mut list,
+        symbol(|symbols| symbols.names),
+        names.value(),
+    )?;
+    Ok(list)
+}
+
+/// The call `function(arguments...)`, with no argument named.
+pub fn call_of<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_>,
+    arguments: &[Local<'_>],
+) -> R<Local<'s, Language>> {
+    let arguments: SmallVec<[Tagged<'_>; 4]> = arguments
+        .iter()
+        .map(|&value| Tagged {
+            tag: null(),
+            value: value.value(),
+        })
+        .collect();
+    let rest = chain(context, &arguments, null())?;
+    language(context, function, rest)
+}
+
+/// Each expression of the expression vector `expressions` evaluated in `environment`, in
+/// order.
+pub fn evaluate_all(
+    _context: &mut Cx<'_>,
+    expressions: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<()> {
+    // SAFETY: both are rooted, and evaluation runs R code, which `&mut Cx` permits.
+    unsafe { crate::eval::eval_all(expressions.raw(), environment.raw()).map(drop) }
+}
+
+/// The call a condition raised against `call` names: the innermost closure call for the
+/// unbound marker, and the whole assignment for a replacement call (`unwind::resolve_call`).
+pub fn resolved_call<'s>(context: &mut Cx<'s>, call: Local<'_>) -> Local<'s> {
+    // SAFETY: the call is rooted, resolving one may allocate a call, which `&mut Cx` permits,
+    // and the result is rooted before anything else allocates.
+    unsafe { rooted(context, crate::unwind::resolve_call(call.raw())) }
+}
+
+/// The call of `failure` as a value of the scope.
+pub fn failure_call<'s>(context: &Cx<'s>, failure: &crate::unwind::RError) -> Local<'s> {
+    // SAFETY: an error holds the call it names live until it is signalled, as its raiser's
+    // frame or root keeps it, and an unwind roots it whenever a scope it leaves releases
+    // (`Unwind::root`). The root here takes over before anything allocates.
+    unsafe { rooted(context, failure.call) }
+}
+
+/// An entry of the handler stack, with the objects it holds as values of the context's scope.
+pub struct HandlerView<'a> {
+    pub entry: &'a Rc<conditions::Handler>,
+    /// The condition class the entry handles: a `CHARSXP`, or `NULL` for none.
+    pub class: Gc<'a>,
+    pub function: Gc<'a>,
+    pub target: Gc<'a>,
+}
+
+/// The entries of the handler stack in effect, top first.
+pub fn handler_entries<'a>(_context: &'a Cx<'_>) -> impl Iterator<Item = HandlerView<'a>> {
+    let mut entry = crate::interp().handlers.as_ref();
+    std::iter::from_fn(move || {
+        let handler = entry?;
+        entry = handler.next.as_ref();
+        // SAFETY: the stack in effect is traced, so the objects of its entries are live, and
+        // nothing collects while the shared context lends them out.
+        unsafe {
+            Some(HandlerView {
+                entry: handler,
+                class: Gc::adopt(handler.class),
+                function: Gc::adopt(handler.handler),
+                target: Gc::adopt(handler.target),
+            })
+        }
+    })
+}
+
+/// The entries of the restart stack in effect, innermost first, each with its restart.
+pub fn restart_entries<'a>(
+    _context: &'a Cx<'_>,
+) -> impl Iterator<Item = (&'a Rc<conditions::RestartEntry>, Gc<'a>)> {
+    let mut entry = crate::interp().restarts.as_ref();
+    std::iter::from_fn(move || {
+        let restart = entry?;
+        entry = restart.next.as_ref();
+        // SAFETY: the stack in effect is traced, and nothing collects while the shared context
+        // lends the restart out.
+        Some((restart, unsafe { Gc::adopt(restart.restart) }))
+    })
+}
+
+/// The calls a traceback lists, outermost first, with their srcrefs (`NULL` for none): every
+/// closure frame's, and every foreign call between the frames it was made from and those it
+/// called back into.
+pub fn context_calls<'a>(context: &'a Cx<'_>) -> Vec<(Gc<'a>, Gc<'a>)> {
+    let interp = crate::interp();
+    let mut foreign = interp.foreign_calls.iter().peekable();
+    let mut calls = Vec::with_capacity(interp.frames.len() + interp.foreign_calls.len());
+    // SAFETY: the frames and the foreign calls in progress are traced, and nothing collects
+    // while the shared context lends their calls out.
+    unsafe {
+        for (depth, frame) in interp.frames.iter().enumerate() {
+            while let Some(&(call, _)) = foreign.next_if(|(_, below)| *below <= depth) {
+                calls.push((Gc::adopt(call), null().read(context)));
+            }
+            calls.push((Gc::adopt(frame.call.raw()), Gc::adopt(frame.srcref.raw())));
+        }
+        calls.extend(foreign.map(|&(call, _)| (Gc::adopt(call), null().read(context))));
+    }
+    calls
+}
+
+/// The deferred warnings, taken from the interpreter, with their calls as values of the scope.
+pub fn take_warnings<'s>(context: &Cx<'s>) -> Vec<(Local<'s>, String)> {
+    let warnings = std::mem::take(&mut crate::interp().warnings);
+    warnings
+        .into_iter()
+        // SAFETY: the deferred warnings were traced until the take, and each call is rooted
+        // before anything allocates.
+        .map(|(call, message)| (unsafe { rooted(context, call) }, message))
+        .collect()
+}
+
+/// Ends the tracked moves in progress before the default error handler runs, which may
+/// evaluate `options(error =)` (`moves::handling_error`).
+pub fn handling_error(_context: &mut Cx<'_>) -> R<()> {
+    // SAFETY: ending a move runs R code, which `&mut Cx` permits.
+    unsafe { crate::moves::handling_error() }
+}
+
+/// Tells an attached debugger about an error no handler took, before the program unwinds
+/// (`debugger::uncaught_error`). `text` is the error as R prints it.
+pub fn uncaught_error(_context: &mut Cx<'_>, text: &str) -> R<()> {
+    // SAFETY: the debugger may evaluate R code while it holds the program, which `&mut Cx`
+    // permits.
+    unsafe { crate::debugger::uncaught_error(text) }
 }
