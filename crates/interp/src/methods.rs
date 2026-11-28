@@ -231,8 +231,13 @@ pub(crate) fn select_in_slots(
     if position + 1 != state.frames.len() || !state.globals.deferred_definitions.is_empty() {
         return Ok(None);
     }
-    let generic = context.root(handles::live_frame(context, position).function());
-    let Some(mut site) = valid_site(context, generic.read(context)) else {
+    // SAFETY: the generic's frame holds its function until the call returns, after the
+    // caller's scope ends.
+    let generic = unsafe {
+        handles::held(context, handles::live_frame(context, position).function().raw())
+    };
+    let Some(mut site) = valid_site(context, handles::live_frame(context, position).function())
+    else {
         return Ok(None);
     };
     // `standardGeneric` dispatches for the innermost generic on the stack that `name` names,
@@ -258,62 +263,64 @@ pub(crate) fn select_in_slots(
     while let Some(&place) = site.positions.get(index) {
         let place = place as usize;
         let frame = handles::live_frame(context, position);
-        let value = if frame.is_missing_formal(place) {
-            handles::missing_argument()
+        let read = if frame.is_missing_formal(place) {
+            Some(handles::missing_argument().read(context))
         } else {
             let value = frame.slot(place);
             match value.downcast::<Promise>() {
-                None => context.root(value),
-                Some(promise) if !handles::is_unbound(promise.result()) => {
-                    context.root(promise.result())
-                }
-                Some(promise) => match eval::settle_without_code(context, promise) {
-                    Some(value) => context.root(value),
-                    None => {
-                        let promise = context.root(promise);
-                        let symbol = site.signature[index];
-                        let forced = catching_errors(context, handles::null(), |context| {
-                            handles::force(context, promise.value())
-                        })?;
-                        let value = match forced {
-                            Ok(value) => value,
-                            Err(message) => {
-                                let generic_name = first_text(context, name);
-                                return Err(argument_error(
-                                    context,
-                                    symbol,
-                                    &generic_name,
-                                    &message,
-                                ));
-                            }
-                        };
-                        // The argument's code may have defined a method or left the frame
-                        // with an environment, so the site and the frame are read again.
-                        if position + 1 != interp().frames.len()
-                            || handles::live_frame(context, position)
-                                .environment()
-                                .is_some()
-                        {
-                            return Ok(None);
-                        }
-                        match valid_site(context, generic.read(context)) {
-                            Some(again) if again.positions.len() > index => site = again,
-                            _ => return Ok(None),
-                        }
-                        value
+                None => Some(value),
+                Some(promise) if !handles::is_unbound(promise.result()) => Some(promise.result()),
+                Some(promise) => eval::settle_without_code(context, promise),
+            }
+        };
+        let value = match read {
+            // SAFETY: the generic's frame holds the value in its slot, itself or as the value
+            // of the promise there, until the call returns, after the caller's scope ends.
+            // Only the frame's own code assigns its slots while no environment stands for it,
+            // and the loop gives up once forcing an argument makes one.
+            Some(value) => unsafe { handles::held(context, value.raw()) },
+            None => {
+                let frame = handles::live_frame(context, position);
+                let promise = context.root(frame.slot(place));
+                let symbol = site.signature[index];
+                let forced = catching_errors(context, handles::null(), |context| {
+                    handles::force(context, promise)
+                })?;
+                let value = match forced {
+                    Ok(value) => value,
+                    Err(message) => {
+                        let generic_name = first_text(context, name);
+                        return Err(argument_error(context, symbol, &generic_name, &message));
                     }
-                },
+                };
+                // The argument's code may have defined a method or left the frame with an
+                // environment, so the site and the frame are read again.
+                if position + 1 != interp().frames.len()
+                    || handles::live_frame(context, position)
+                        .environment()
+                        .is_some()
+                {
+                    return Ok(None);
+                }
+                match valid_site(context, handles::live_frame(context, position).function()) {
+                    Some(again) if again.positions.len() > index => site = again,
+                    _ => return Ok(None),
+                }
+                value
             }
         };
         arguments.push(value);
         index += 1;
     }
-    let classes = class_keys(context, &site.signature, &arguments)?;
-    let Some(entry) = site
-        .entries
-        .iter()
-        .find(|entry| same_classes(&entry.classes, &classes))
-    else {
+    let classes = class_identities(context, &site.signature, &arguments)?;
+    let Some(entry) = site.entries.iter().find(|entry| {
+        entry.classes.len() == classes.len()
+            && entry
+                .classes
+                .iter()
+                .zip(&classes)
+                .all(|(held, &class)| held.raw() == class)
+    }) else {
         return Ok(None);
     };
     if !entry.plain
@@ -519,6 +526,40 @@ fn class_keys<'s>(
         classes.push(class);
     }
     Ok(classes)
+}
+
+/// The first class of each signature argument as [`class_keys`] gives it, as the address of
+/// the string alone: a site's entries compare classes by identity, and their own strings are
+/// held, so an address read here can match only a string that is alive. Nothing is rooted,
+/// which keeps the dispatch fast path free of roots.
+fn class_identities<'s>(
+    context: &mut Cx<'s>,
+    signature: &[Gc<'static, Symbol>],
+    argument_values: &[Local<'s>],
+) -> R<SmallVec<[Sexp; 2]>> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut classes = SmallVec::new();
+    for (&symbol, &value) in signature.iter().zip(argument_values) {
+        let class = if handles::is_missing_argument(value) {
+            handles::symbol(|symbols| symbols.missing).name().raw()
+        } else if symbol.is(dots) {
+            match value.standard::<Str>() {
+                Some(class) if !class.is_empty() => class.read(context).get(0).raw(),
+                _ => return class_keys(context, signature, argument_values).map(raw_keys),
+            }
+        } else {
+            match dispatch::class_read(context, value)?.standard::<Str>() {
+                Some(class) if !class.is_empty() => class.get(0).raw(),
+                _ => return class_keys(context, signature, argument_values).map(raw_keys),
+            }
+        };
+        classes.push(class);
+    }
+    Ok(classes)
+}
+
+fn raw_keys(classes: SmallVec<[Local<'_, Chars>; 2]>) -> SmallVec<[Sexp; 2]> {
+    classes.iter().map(|class| class.raw()).collect()
 }
 
 /// Selects the method of `generic` for the signature arguments' `values` and classes, from its
@@ -1482,19 +1523,38 @@ pub(crate) fn cached_class_definition<'s>(
         return Ok(handles::null());
     };
     let package_symbol = handles::symbol(|symbols| symbols.package);
-    let package = context.root(handles::get_attribute(context, class, package_symbol));
-    if let Some(package) = handles::dense::<Str>(context, package)?
-        && !package.is_empty()
-    {
-        let defined = context.root(handles::get_attribute(context, value, package_symbol));
-        if let Some(defined) = handles::dense::<Str>(context, defined)?
-            && defined.len() == 1
-            && defined.get(context, 0).bytes() != package.get(context, 0).bytes()
-        {
-            return Ok(handles::null());
+    let package = handles::get_attribute(context, class, package_symbol);
+    let defined = handles::get_attribute(context, value, package_symbol);
+    let elsewhere = match (package.standard::<Str>(), defined.standard::<Str>()) {
+        (Some(package), Some(defined)) => {
+            !package.is_empty()
+                && defined.len() == 1
+                && defined.get(0).bytes() != package.get(0).bytes()
         }
-    }
-    Ok(value)
+        _ if package.r_type() == SexpType::String && defined.r_type() == SexpType::String => {
+            defined_elsewhere(context, class, value)?
+        }
+        _ => false,
+    };
+    Ok(if elsewhere { handles::null() } else { value })
+}
+
+/// Whether the class definition `value` names a package other than the first that the
+/// `package` attribute of `class` names, for attributes that are not both standard vectors.
+#[cold]
+fn defined_elsewhere(context: &mut Cx<'_>, class: Local<'_>, value: Local<'_>) -> R<bool> {
+    let package_symbol = handles::symbol(|symbols| symbols.package);
+    let package = context.root(handles::get_attribute(context, class, package_symbol));
+    let Some(package) = handles::dense::<Str>(context, package)? else {
+        return Ok(false);
+    };
+    let defined = context.root(handles::get_attribute(context, value, package_symbol));
+    let Some(defined) = handles::dense::<Str>(context, defined)? else {
+        return Ok(false);
+    };
+    Ok(!package.is_empty()
+        && defined.len() == 1
+        && defined.get(context, 0).bytes() != package.get(context, 0).bytes())
 }
 
 /// `getGeneric(name, where = env)` for a plain name: the generic visible from `env`, after
@@ -2125,6 +2185,22 @@ fn frame_forced<'s>(
     env: Local<'_, Environment>,
     symbol: impl Pointer<Symbol>,
 ) -> R<Option<Local<'s>>> {
+    let Some(binding) = handles::frame_binding(context, env, symbol) else {
+        return Ok(None);
+    };
+    if !binding.is_active() {
+        let content = binding.content();
+        let value = match content.downcast::<Promise>() {
+            _ if handles::is_unbound(content) => return Ok(None),
+            None => content,
+            Some(promise) if !handles::is_unbound(promise.result()) => promise.result(),
+            Some(_) => {
+                let promise = context.root(content);
+                return handles::force(context, promise).map(Some);
+            }
+        };
+        return Ok(Some(context.root(value)));
+    }
     match eval::frame_content(context, env, symbol)? {
         Some(value) if !handles::is_unbound(value) => handles::force(context, value).map(Some),
         _ => Ok(None),
