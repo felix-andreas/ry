@@ -889,7 +889,7 @@ gap <- function(a, b) a - b
 g <- gap(3i64, 1i64)
 d <- gap(Sys.Date(), Sys.Date())
 #++++
-gap: <T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>
+gap: <T: arithmetic or number> fn(a: T, b: T) -> Subtracted<T>
 g: I64
 d: double
 

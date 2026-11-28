@@ -62,10 +62,12 @@ pub enum Widening {
     /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
     /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
     /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
-    /// to what the fold returns from that init: a number vector promotes (`integer[]` gives
-    /// `double[]`), and a class with arithmetic (`Date`) or a ry number keeps its type.
+    /// to what the fold returns from that init under `result`: a number vector promotes
+    /// (`integer[]` gives `double[]`), a ry number keeps its type, and a class keeps its type
+    /// when the family does (`Date` under `Promoted`, not under `Subtracted`).
     Folded {
         constraint: Constraint,
+        result: FamilyResult,
     },
 }
 
@@ -333,15 +335,18 @@ impl<'db> InferenceTable<'db> {
                 // A ry `List` compares and computes item by item.
                 if let Some(item) = array_element(db, operand) {
                     return match result {
-                        FamilyResult::Arithmetic => operand,
+                        FamilyResult::Arithmetic | FamilyResult::Difference => operand,
                         FamilyResult::Comparison => array(db, self.family(db, result, item)),
                     };
                 }
                 return match self.representation(db, *name, arguments) {
                     Some(representation) if is_ry_value_type(db, representation) => match result {
-                        FamilyResult::Arithmetic => operand,
+                        FamilyResult::Arithmetic | FamilyResult::Difference => operand,
                         FamilyResult::Comparison => self.family(db, result, representation),
                     },
+                    // A class's arithmetic methods give the class (`Sys.Date() - 0.5` is a
+                    // `Date`, a `matrix` times 2 a `matrix`), as a fold's accumulator does.
+                    _ if self.keeps_class(result, *name) => operand,
                     _ => result.r_outcome(db),
                 };
             }
@@ -361,7 +366,9 @@ impl<'db> InferenceTable<'db> {
                 if constraint != Constraint::Unconstrained
                     && constraint
                         .join(match result {
-                            FamilyResult::Arithmetic => Constraint::Number,
+                            FamilyResult::Arithmetic | FamilyResult::Difference => {
+                                Constraint::Number
+                            }
                             FamilyResult::Comparison => Constraint::ArrayItem,
                         })
                         .is_none() =>
@@ -370,6 +377,17 @@ impl<'db> InferenceTable<'db> {
             }
             _ => family_result(db, result, operand),
         }
+    }
+
+    /// Whether a family over the class `name` gives the class back: arithmetic does for a
+    /// class with any arithmetic method, a difference of two of it only for one closed under
+    /// arithmetic (two dates subtract to a `difftime`).
+    fn keeps_class(&self, result: FamilyResult, name: Name<'db>) -> bool {
+        self.arithmetic_classes.is_some_and(|classes| match result {
+            FamilyResult::Arithmetic => classes.contains(name.symbol()),
+            FamilyResult::Difference => classes.closed_under_arithmetic(name.symbol()),
+            FamilyResult::Comparison => false,
+        })
     }
 
     /// Also expands aliases. Self-referential bindings and aliases cut to
@@ -1227,13 +1245,21 @@ impl<'db> InferenceTable<'db> {
         mismatch: UnifyError<'db>,
     ) -> Result<(), UnifyError<'db>> {
         match (result, other.kind(db)) {
-            (FamilyResult::Arithmetic, TyKind::Native(native)) if native.is_number() => {
+            (FamilyResult::Arithmetic | FamilyResult::Difference, TyKind::Native(native))
+                if native.is_number() =>
+            {
+                self.unify(db, operand, other)
+            }
+            (_, TyKind::Named(name, _)) if self.keeps_class(result, *name) => {
                 self.unify(db, operand, other)
             }
             (FamilyResult::Comparison, TyKind::Native(NativeScalar::Bool)) => self
                 .constrain_family_operand(db, operand, Constraint::ArrayItem)
                 .map_err(|_| mismatch),
-            (FamilyResult::Arithmetic, TyKind::Scalar(Atomic::Double))
+            (
+                FamilyResult::Arithmetic | FamilyResult::Difference,
+                TyKind::Scalar(Atomic::Double),
+            )
             | (FamilyResult::Comparison, TyKind::Scalar(Atomic::Logical)) => {
                 let side = self.family_operand_constraint(db, operand).r_side();
                 self.constrain_family_operand(db, operand, side)
@@ -1281,8 +1307,12 @@ impl<'db> InferenceTable<'db> {
         for &member in members {
             let member = self.shallow_resolve(db, member);
             let operand = match *member.kind(db) {
-                TyKind::Family(result, operand) if family.is_none_or(|known| known == result) => {
-                    family = Some(result);
+                TyKind::Family(result, operand)
+                    if family.is_none_or(|known: FamilyResult| {
+                        (known == FamilyResult::Comparison) == (result == FamilyResult::Comparison)
+                    }) =>
+                {
+                    family = Some(family.map_or(result, |known| known.compose(result)));
                     operand
                 }
                 _ => member,
@@ -1304,7 +1334,9 @@ impl<'db> InferenceTable<'db> {
                 // and one that arithmetic keeps or promotes rebinds it (`Promoted<T> = T`).
                 let widening = match result {
                     FamilyResult::Comparison => Widening::Joined,
-                    FamilyResult::Arithmetic => Widening::Folded { constraint },
+                    FamilyResult::Arithmetic | FamilyResult::Difference => {
+                        Widening::Folded { constraint, result }
+                    }
                 };
                 self.set(
                     var,
@@ -1316,13 +1348,17 @@ impl<'db> InferenceTable<'db> {
             })
         } else {
             match result {
-                FamilyResult::Arithmetic if constraint.join(Constraint::Number).is_some() => {
+                FamilyResult::Arithmetic | FamilyResult::Difference
+                    if constraint.join(Constraint::Number).is_some() =>
+                {
                     self.constrain(db, var, Constraint::Number)
                 }
                 FamilyResult::Comparison => {
                     self.bind(db, var, native_scalar(db, NativeScalar::Bool))
                 }
-                FamilyResult::Arithmetic => Err(UnifyError::Occurs(var, actual)),
+                FamilyResult::Arithmetic | FamilyResult::Difference => {
+                    Err(UnifyError::Occurs(var, actual))
+                }
             }
         };
         if settled.is_err() {
@@ -1375,13 +1411,15 @@ impl<'db> InferenceTable<'db> {
     ) -> Result<Ty<'db>, UnifyError<'db>> {
         let r_admitted = constraint_rejects(db, self, constraint, result.r_outcome(db)).is_none();
         let ry_side = match result {
-            FamilyResult::Arithmetic => constraint
+            FamilyResult::Arithmetic | FamilyResult::Difference => constraint
                 .families()
                 .map_or(constraint, |(_, ry_half)| ry_half),
             FamilyResult::Comparison => Constraint::ArrayItem,
         };
         let ry_admitted = match result {
-            FamilyResult::Arithmetic => constraint.join(Constraint::Number).is_some(),
+            FamilyResult::Arithmetic | FamilyResult::Difference => {
+                constraint.join(Constraint::Number).is_some()
+            }
             FamilyResult::Comparison => {
                 constraint_rejects(db, self, constraint, native_scalar(db, NativeScalar::Bool))
                     .is_none()
@@ -1509,7 +1547,7 @@ impl<'db> InferenceTable<'db> {
             Widening::Numeric => {
                 self.widen_numeric_binding(db, representative, bound, actual, widening)
             }
-            Widening::Folded { constraint } => {
+            Widening::Folded { constraint, result } => {
                 // The outcome is provisional until the first value meets it: one that fits
                 // settles it, and one that does not rebinds it once, so a value checked
                 // against the outcome never goes unchecked against what it rebinds to.
@@ -1524,7 +1562,9 @@ impl<'db> InferenceTable<'db> {
                 let folded = match numeric_join(db, [bound, actual]) {
                     _ if constraint_rejects(db, self, constraint, actual).is_some() => None,
                     Some(promoted) => Some(promoted),
-                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => Some(actual),
+                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => {
+                        Some(self.family(db, result, actual))
+                    }
                     None => None,
                 };
                 let Some(folded) = folded else {
@@ -1685,7 +1725,7 @@ impl<'db> InferenceTable<'db> {
         {
             let r_side = self.family_operand_constraint(db, operand).r_side();
             let ry_side = match result {
-                FamilyResult::Arithmetic => Constraint::Number,
+                FamilyResult::Arithmetic | FamilyResult::Difference => Constraint::Number,
                 FamilyResult::Comparison => Constraint::ArrayItem,
             };
             let mut sides = [
@@ -2875,7 +2915,9 @@ pub(crate) fn constraint_rejects<'db>(
     if let TyKind::Family(result, operand) = ty.kind(db) {
         let admissible = constraint_rejects(db, table, constraint, result.r_outcome(db)).is_none()
             || match result {
-                FamilyResult::Arithmetic => constraint.join(Constraint::Number).is_some(),
+                FamilyResult::Arithmetic | FamilyResult::Difference => {
+                    constraint.join(Constraint::Number).is_some()
+                }
                 FamilyResult::Comparison => {
                     constraint_rejects(db, table, constraint, result.ry_outcome(db, *operand))
                         .is_none()
