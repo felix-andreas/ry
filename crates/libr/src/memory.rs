@@ -432,7 +432,7 @@ pub unsafe extern "C" fn Rf_allocSExp(kind: SEXPTYPE) -> Sexp {
         let nil = runtime.nil();
         let object = match kind.shape() {
             // Every symbol is interned, so that code may keep one unrooted: the symbol table
-            // holds it for the heap's whole life. GNU R's uninterned symbol has no name to print.
+            // holds it for the heap's whole life. The one GNU R makes has a `NULL` print name.
             _ if kind == SexpType::Symbol => {
                 return Err(error("allocSExp cannot allocate a symbol: use install()"));
             }
