@@ -559,8 +559,8 @@ recursive <- function(k) {
 not_recursive <- function() shift(Sys.Date())
 #++++
 shift: <T: arithmetic or number> fn(x: T) -> Promoted<T>
-recursive: <T: arithmetic or number> fn(k: T) -> double
-not_recursive: fn() -> double
+recursive: <T: arithmetic or number> fn(k: T) -> Date
+not_recursive: fn() -> Date
 
 #---- every_arithmetic_operator_method_makes_its_class_arithmetic
 # Dispatch built the method name from all seven arithmetic spellings while the
@@ -599,9 +599,9 @@ md: Mod
 dv: Div
 tg: Tag
 bump: <T: arithmetic or number> fn(x: T) -> Promoted<T>
-double
-double
-double
+Pow
+Mod
+Div
 T
 669..671 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `Tag`
 

@@ -126,7 +126,7 @@ span <- function(from, to) to - from
 day <- as.Date("2024-01-02")
 gap <- span(day, day)
 #++++
-span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
+span: <T: arithmetic or number> fn(from: T, to: T) -> Subtracted<T>
 day: Date
 gap: double
 
@@ -179,7 +179,7 @@ day: Date
 dates: Unknown
 inferred: Unknown
 gaps: difftime
-shifted: double
+shifted: Date
 negated: Unknown
 470..475 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`), found `T`. Declare `<T: num>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number
 523..526 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`

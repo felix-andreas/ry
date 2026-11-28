@@ -256,9 +256,8 @@ thread_local! {
     /// The arguments the running code read ahead from variables that an R call it makes could
     /// change before the code reads them ([`Watching`]).
     static WATCHING: Cell<Option<Watching>> = const { Cell::new(None) };
-    /// Whether an R call changed a variable an argument the code had not read yet was read
-    /// from, which made the code give up.
-    static WATCH_TRIPPED: Cell<bool> = const { Cell::new(false) };
+    /// What an R call the code made changed that made the code give up.
+    static TRIPPED: Cell<Option<Tripped>> = const { Cell::new(None) };
     /// The call the interpreter is running again because its native code ran out of depth
     /// budget or stack. Every native entry inside it declines: each would recurse as deep and
     /// stop again, which made a deep recursion quadratic.
@@ -282,6 +281,20 @@ struct Running {
     args: *const Arg,
     count: usize,
     sys_parent: Sexp,
+    /// The running code, whose lookups an R call it makes may change.
+    compiled: &'static Compiled,
+    params: *const Type,
+    param_count: usize,
+}
+
+/// What an R call changed that the running code assumed, which makes the code give up.
+#[derive(Clone, Copy)]
+enum Tripped {
+    /// A variable an argument the code had not read yet was read from ([`Watching`]).
+    Watch,
+    /// A function or value the code, or a function it calls, was compiled against: the code
+    /// would go on calling what the name found when it started.
+    Rebound,
 }
 
 /// What the native entry read when it read a call's arguments ahead without forcing them.
@@ -538,6 +551,9 @@ pub unsafe fn call(
         args: typed.args.as_ptr(),
         count: typed.args.len(),
         sys_parent: typed.sys_parent,
+        compiled,
+        params: params.as_ptr(),
+        param_count: params.len(),
     }));
     let words = arguments.words.as_ptr();
     let mut run = |limit: usize| {
@@ -561,7 +577,7 @@ pub unsafe fn call(
     for value in held {
         value.decrement_refcount();
     }
-    let tripped = WATCH_TRIPPED.take();
+    let tripped = TRIPPED.take();
     if status != 0 {
         arguments.release();
         let unwind = PARKED.take();
@@ -683,7 +699,7 @@ unsafe fn compiled_or_refusal(
     {
         // A function the code calls was rebound since it compiled, or a `match` over any tag
         // misses shapes confirmed since: compile it again.
-        Some(Some(compiled)) if !current(compiled) || !cells_hold(&key, compiled) => {}
+        Some(Some(compiled)) if !current(compiled) || !cells_hold(function, params, compiled) => {}
         Some(Some(compiled)) => return Ok(compiled),
         Some(None) => {
             let refusal = COMPILED.with_borrow(|compiled| match compiled.get(&key) {
@@ -793,14 +809,27 @@ pub fn native_stops() -> u64 {
 
 /// Why compiled code stopped partway: the conversion that gave a type the code was not compiled
 /// for when that is why.
-unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>, exhausted: bool, tripped: bool) -> String {
+unsafe fn stop_reason(
+    guess: Option<(Sexp, SexpType)>,
+    exhausted: bool,
+    tripped: Option<Tripped>,
+) -> String {
     if exhausted {
         return "its native code ran out of stack or of R's nesting depth".to_owned();
     }
-    if tripped {
-        return "an R call it made changed a variable an argument is computed from before the \
-                function read that argument, so R forces the argument to the changed value"
-            .to_owned();
+    match tripped {
+        Some(Tripped::Watch) => {
+            return "an R call it made changed a variable an argument is computed from before \
+                    the function read that argument, so R forces the argument to the changed \
+                    value"
+                .to_owned();
+        }
+        Some(Tripped::Rebound) => {
+            return "an R call it made changed a lookup its native code relies on, which the \
+                    interpreter finds anew at each call"
+                .to_owned();
+        }
+        None => {}
     }
     match guess {
         Some((conversion, kind)) => format!(
@@ -836,9 +865,9 @@ unsafe fn current(compiled: &Compiled) -> bool {
 /// Whether every function `compiled` (the code for `key`) calls through a cell has current
 /// code of the result type the call assumed, or is being lowered with that guess. Its lookups
 /// are checked here because they are not among `compiled`'s own: the callee had none yet.
-unsafe fn cells_hold(key: &Key, compiled: &Compiled) -> bool {
+unsafe fn cells_hold(function: Sexp, params: &[Type], compiled: &Compiled) -> bool {
     compiled.cells.iter().all(|(callee, assumed)| {
-        if callee == key {
+        if callee.0 == function && callee.1[..] == *params {
             return true;
         }
         if let Some(guess) = COMPILING.with_borrow(|compiling| compiling.get(callee).copied()) {
@@ -2365,7 +2394,23 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
         && let Some(watching) = WATCHING.get().filter(|watching| watching.owns(site))
         && watch_tripped(watching)
     {
-        WATCH_TRIPPED.set(true);
+        TRIPPED.set(Some(Tripped::Watch));
+        return 1;
+    }
+    // The code was proved against the lookups when it was entered, and an R call can rebind
+    // any of them. The proof's epoch makes `still_resolves` a comparison unless the call bound
+    // a name, and `cells_hold` looks up only the cells a recursive group holds.
+    if acted
+        && made.is_some()
+        && let Some(running) = RUNNING.get()
+        && !(still_resolves(running.compiled)
+            && cells_hold(
+                running.function,
+                std::slice::from_raw_parts(running.params, running.param_count),
+                running.compiled,
+            ))
+    {
+        TRIPPED.set(Some(Tripped::Rebound));
         return 1;
     }
     // Compiled code holds a table as a bare word, which the collector does not see, so the table

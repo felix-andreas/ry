@@ -55,7 +55,6 @@ Most important first. Each line names the open item, and the detail is at its po
 **Typed ry**
 
 - Typed ry grows by steps that `just climb` scores on speed against Rust, friendliness cases and soundness fuzzing (`development/design/language-climb.md`, with open targets under "Open questions"). Taste questions go to the orchestrator in one batch.
-- Language gaps: literals, record and tag payloads and empty lists outside elaborated code (`ry load`, `source()`), f-strings and `..rest` patterns ("Open: the typed core").
 - Typed code that builds vectors runs at untyped speed ("Typed natives, the rest of the end shape", under "Open: the JIT").
 - `DataFrame` beats data.table on every db-benchmark question at 1e7 rows; what is open is the 1e8 memory margin, the reference counts some calls leave on a frame, and API gaps ("Open: DataFrame").
 - Records, tuples, tags and the standard library: "Open: findings from the records, library and frame round" and "Open: ry's standard library".

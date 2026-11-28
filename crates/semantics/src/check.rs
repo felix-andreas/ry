@@ -10568,7 +10568,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => resolved,
         };
-        if let TyKind::Family(FamilyResult::Arithmetic, _) = resolved.kind(self.db) {
+        if let TyKind::Family(FamilyResult::Arithmetic | FamilyResult::Difference, _) =
+            resolved.kind(self.db)
+        {
             return resolved;
         }
         let resolved = self.r_side_of_family(operand_range, resolved);
@@ -12483,12 +12485,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 continue;
             };
             let partner_ty = if index == 0 { right } else { left };
-            let computes_as_operand = result == FamilyResult::Arithmetic
+            let computes_as_operand = result != FamilyResult::Comparison
                 && (literal_operand(self.module, partner).is_some()
                     || partner_ty == operand
-                    || partner_ty == ty);
+                    || family_operand(partner_ty).is_some_and(|(partner_result, partner)| {
+                        partner_result != FamilyResult::Comparison && partner == operand
+                    }));
             operands[index] = if computes_as_operand {
-                promoted = Some(operand);
+                let result = promoted.map_or(result, |(known, _)| result.compose(known));
+                promoted = Some((result, operand));
                 operand
             } else {
                 let own_range = self.blame_range(own);
@@ -12497,10 +12502,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let [left, right] = operands;
         let computed = self.infer_binary_numeric_operands(range, operator, lhs, rhs, left, right);
-        match promoted {
-            Some(operand) if self.table.shallow_resolve(self.db, computed) == operand => self
-                .table
-                .family(self.db, FamilyResult::Arithmetic, operand),
+        let Some((result, operand)) = promoted else {
+            return computed;
+        };
+        // The computation on the family's operand gives the operand or a family over it, and
+        // the substituted family's head carries over (`(b - a) / 2` stays a difference).
+        let resolved = self.table.shallow_resolve(self.db, computed);
+        match resolved.kind(self.db) {
+            _ if resolved == operand => self.table.family(self.db, result, operand),
+            TyKind::Family(computed_result, computed_operand)
+                if *computed_operand == operand && *computed_result != FamilyResult::Comparison =>
+            {
+                self.table
+                    .family(self.db, computed_result.compose(result), operand)
+            }
             _ => computed,
         }
     }
@@ -12695,7 +12710,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 return scalar(self.db, Atomic::Double);
             }
             if promoted {
-                return self.table.family(self.db, FamilyResult::Arithmetic, ty);
+                let result = if tied_difference {
+                    FamilyResult::Difference
+                } else {
+                    FamilyResult::Arithmetic
+                };
+                return self.table.family(self.db, result, ty);
             }
         }
         // Combined with its existing atomic-element bound, an arithmetic `T[]` element
@@ -12965,7 +12985,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         // value but a function under `==`, and only numbers and strings in order.
         let open_operand = |ty: Ty<'db>| match ty.kind(self.db) {
             TyKind::Var(_) | TyKind::Rigid(_) => Some(ty),
-            TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
+            TyKind::Family(FamilyResult::Arithmetic | FamilyResult::Difference, operand) => {
+                Some(*operand)
+            }
             _ => None,
         };
         let equality = matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual);
@@ -24763,7 +24785,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Any
             | TyKind::Var(_)
             | TyKind::Rigid(_)
-            | TyKind::Family(FamilyResult::Arithmetic, _)
+            | TyKind::Family(FamilyResult::Arithmetic | FamilyResult::Difference, _)
             | TyKind::Named(..) => Ok(VectorIndexShape::ScalarLike),
             TyKind::Family(FamilyResult::Comparison, _) => Ok(VectorIndexShape::VectorLike),
             TyKind::Union(members) => {
