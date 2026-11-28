@@ -2937,16 +2937,34 @@ follows the left one alone, so `cmp(1L, 1:3)` is a `logical` rather than a `logi
 runtime compares them.
 
 A callback whose family result must have its operand's type, as a fold's accumulator must, takes
-a type the family keeps: R's outcome (`double` or `logical`) when it fits, else a ry number (or
-`Bool`). So `Reduce(function(acc, x) acc * 2, 1:3, 1L)` is a `double`, and so is a callback that
-returns the accumulator unchanged in one branch (`if (x > 1L) acc * 2 else acc`).
-`List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an `I64`. A fold's result is its
-init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. An
-init the callback's arithmetic promotes or keeps gives the fold its own type:
+a type the family keeps. A comparison settles the accumulator as R's `logical` when it fits, else as
+`Bool`. Arithmetic leaves it open, and the fold's call gives `Promoted<T>` of it, so
+`Reduce(function(acc, x) acc * 2, 1:3, 1L)` is the `double` R's arithmetic makes of the `integer`
+init, and so is a callback that returns the accumulator unchanged in one branch
+(`if (x > 1L) acc * 2 else acc`). `List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an
+`I64`, and an init of a vector or a class gives the fold its own type:
 `Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))` is a `double[]`, and
-`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. One gap remains: an accumulator
-that a function's parameter gives, and that admits both families, takes R's `double`, so
-`function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`.
+`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. A fold's result is its init or its
+callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. An init that a
+function's parameter gives stays generic:
+
+```r
+doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
+# doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
+```
+
+So `doubled([1i64], 1i64)` is an `I64`, `doubled([1i64], 1L)` a `double`, and
+`doubled([1i64], "a")` a type error. The parameter itself keeps its type, so a function that also
+returns `init` returns `U`. A call of any function with a callback parameter `fn(A, T) -> A` folds
+the same way, and its result reads each `A` as `Promoted<A>`: for
+`give <- function<A>(f: fn(A, integer) -> A, a: A) -> fn(A, integer) -> A f`,
+`give(function(acc, x) acc * 2, 1L)` is `fn(double, integer) -> double`, while a result that does
+not name `A` keeps its type. Only a callback that is itself a parameter of one signature folds
+open, and not through an overloaded function such as `purrr::reduce`. One inside a record, a list
+or a union settles its accumulator as `double`, as does a difference of two accumulators
+(`acc - acc`), so `function(ys, init) List.walk(ys, init, function(acc, y) acc - acc)` takes
+`init: double`. R's fold returns the init itself for an empty `xs`, which the type does not track:
+`Reduce(function(acc, x) acc * 2, integer(), 1L)` types as `double` and runs as `1L`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
