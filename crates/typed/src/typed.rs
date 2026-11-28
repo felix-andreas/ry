@@ -825,7 +825,7 @@ unsafe fn stop_reason(
                 .to_owned();
         }
         Some(Tripped::Rebound) => {
-            return "an R call it made rebound a function its native code calls, which the \
+            return "an R call it made changed a lookup its native code relies on, which the \
                     interpreter finds anew at each call"
                 .to_owned();
         }
@@ -2398,7 +2398,8 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
         return 1;
     }
     // The code was proved against the lookups when it was entered, and an R call can rebind
-    // any of them. The proof's epoch makes the check a comparison unless the call bound a name.
+    // any of them. The proof's epoch makes `still_resolves` a comparison unless the call bound
+    // a name, and `cells_hold` looks up only the cells a recursive group holds.
     if acted
         && made.is_some()
         && let Some(running) = RUNNING.get()

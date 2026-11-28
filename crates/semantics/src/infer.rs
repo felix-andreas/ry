@@ -62,10 +62,12 @@ pub enum Widening {
     /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
     /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
     /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
-    /// to what the fold returns from that init: a number vector promotes (`integer[]` gives
-    /// `double[]`), and a class with arithmetic (`Date`) or a ry number keeps its type.
+    /// to what the fold returns from that init under `result`: a number vector promotes
+    /// (`integer[]` gives `double[]`), a ry number keeps its type, and a class keeps its type
+    /// when the family does (`Date` under `Promoted`, not under `Subtracted`).
     Folded {
         constraint: Constraint,
+        result: FamilyResult,
     },
 }
 
@@ -1305,8 +1307,12 @@ impl<'db> InferenceTable<'db> {
         for &member in members {
             let member = self.shallow_resolve(db, member);
             let operand = match *member.kind(db) {
-                TyKind::Family(result, operand) if family.is_none_or(|known| known == result) => {
-                    family = Some(result);
+                TyKind::Family(result, operand)
+                    if family.is_none_or(|known: FamilyResult| {
+                        (known == FamilyResult::Comparison) == (result == FamilyResult::Comparison)
+                    }) =>
+                {
+                    family = Some(family.map_or(result, |known| known.compose(result)));
                     operand
                 }
                 _ => member,
@@ -1329,7 +1335,7 @@ impl<'db> InferenceTable<'db> {
                 let widening = match result {
                     FamilyResult::Comparison => Widening::Joined,
                     FamilyResult::Arithmetic | FamilyResult::Difference => {
-                        Widening::Folded { constraint }
+                        Widening::Folded { constraint, result }
                     }
                 };
                 self.set(
@@ -1541,7 +1547,7 @@ impl<'db> InferenceTable<'db> {
             Widening::Numeric => {
                 self.widen_numeric_binding(db, representative, bound, actual, widening)
             }
-            Widening::Folded { constraint } => {
+            Widening::Folded { constraint, result } => {
                 // The outcome is provisional until the first value meets it: one that fits
                 // settles it, and one that does not rebinds it once, so a value checked
                 // against the outcome never goes unchecked against what it rebinds to.
@@ -1556,7 +1562,9 @@ impl<'db> InferenceTable<'db> {
                 let folded = match numeric_join(db, [bound, actual]) {
                     _ if constraint_rejects(db, self, constraint, actual).is_some() => None,
                     Some(promoted) => Some(promoted),
-                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => Some(actual),
+                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => {
+                        Some(self.family(db, result, actual))
+                    }
                     None => None,
                 };
                 let Some(folded) = folded else {

@@ -839,6 +839,10 @@ for an `I64`, as `x * 2` on an `I64` does in ry, a `double` for an `integer`, as
 `Subtracted<T>` is the difference of two values of one type, so it gives a `double` for two dates,
 whose difference R makes a `difftime`. The three may be written in an annotation too.
 
+A class keeps its type under `Promoted<T>` when it declares any arithmetic method, whichever
+operator the method covers. This is a known gap: R refuses some of these operations (`x * 2` on a
+`Date`, `/` between two `difftime`s), and ry types them as the class instead of reporting them.
+
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call, and the message names the
 constraint: `middle("a")` under `<N: scalar numeric>` reports "expected a scalar numeric value
@@ -960,8 +964,8 @@ the declaration's arity:
 
 A type definition cannot take the name of a built-in type: an atomic or ry scalar name (`double`,
 `I64`, `Str`), `Any`, `Unknown`, `NULL`, a table type (`DataFrame`, `LazyFrame`, `GroupBy`,
-`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Subtracted`, `Compared`, or the standard library's `List`, `Dict`,
-`Set` and `Expr`. Annotations and checks read such a name as the built-in type, so a definition
+`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Subtracted`, `Compared`, or the standard
+library's `List`, `Dict`, `Set` and `Expr`. Annotations and checks read such a name as the built-in type, so a definition
 with it would conflict, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
 an alias, which a project's own definition of `Result` replaces.
 

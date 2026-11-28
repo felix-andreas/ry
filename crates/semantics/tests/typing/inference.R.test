@@ -596,7 +596,8 @@ t3: Unknown
 # A class's arithmetic methods give the class, so a generic function's arithmetic on a `Date` or a
 # `matrix` returns it, and a fold whose init binds the accumulator first takes the callback. A
 # difference of two values of one class keeps only a class closed under arithmetic: two dates
-# subtract to a `difftime`, two `difftime`s to a `difftime`.
+# subtract to a `difftime`, two `difftime`s to a `difftime`, and arithmetic on a difference stays
+# a difference. A fold whose callback subtracts two accumulators cannot keep a `Date` init.
 shift <- function(x) x - 0.5
 twice <- function(x) x * 2
 d <- shift(Sys.Date())
@@ -606,6 +607,11 @@ span <- function(from, to) to - from
 days <- span(Sys.Date(), Sys.Date())
 lag <- Sys.Date() - Sys.Date()
 lags <- span(lag, lag)
+half <- function(a, b) (b - a) / 2
+halved <- half(Sys.Date(), Sys.Date())
+mixed <- function(a, b) (a - b) - (a - 0.5)
+mixed_ry <- mixed(1.5f64, 2.5f64)
+gaps <- List.walk([1i64], Sys.Date(), function(acc, x) acc - acc)
 #++++
 shift: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 twice: <T: arithmetic or number> fn(x: T) -> Promoted<T>
@@ -616,6 +622,12 @@ span: <T: arithmetic or number> fn(from: T, to: T) -> Subtracted<T>
 days: double
 lag: difftime
 lags: difftime
+half: <T: arithmetic or F64> fn(a: T, b: T) -> Subtracted<T>
+halved: double
+mixed: <T: arithmetic or F64> fn(a: T, b: T) -> Subtracted<T>
+mixed_ry: F64
+gaps: Unknown
+966..992 error[type-mismatch] this function must return `Date`, but it returns `double`
 
 #---- a_comparison_refuses_an_environment
 # R compares only atomic values and lists: `globalenv() == 1` stops.

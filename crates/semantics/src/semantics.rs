@@ -601,7 +601,9 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
         };
         let (kind, name, name_range) = match top_level_definition(&node) {
             Some(definition) => {
-                // A jump to a definition lands on this range, so it is the name's own token.
+                // A jump to a definition lands on this range, so it is the name's own token. A
+                // quoted name may itself start or end with a quote character, so the check also
+                // strips exactly one pair.
                 debug_assert!(
                     node.text_range().contains_range(definition.name_range)
                         && file

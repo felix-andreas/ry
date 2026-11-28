@@ -12488,8 +12488,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             let computes_as_operand = result != FamilyResult::Comparison
                 && (literal_operand(self.module, partner).is_some()
                     || partner_ty == operand
-                    || partner_ty == ty);
+                    || family_operand(partner_ty).is_some_and(|(partner_result, partner)| {
+                        partner_result != FamilyResult::Comparison && partner == operand
+                    }));
             operands[index] = if computes_as_operand {
+                let result = promoted.map_or(result, |(known, _)| result.compose(known));
                 promoted = Some((result, operand));
                 operand
             } else {
@@ -12499,9 +12502,19 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let [left, right] = operands;
         let computed = self.infer_binary_numeric_operands(range, operator, lhs, rhs, left, right);
-        match promoted {
-            Some((result, operand)) if self.table.shallow_resolve(self.db, computed) == operand => {
-                self.table.family(self.db, result, operand)
+        let Some((result, operand)) = promoted else {
+            return computed;
+        };
+        // The computation on the family's operand gives the operand or a family over it, and
+        // the substituted family's head carries over (`(b - a) / 2` stays a difference).
+        let resolved = self.table.shallow_resolve(self.db, computed);
+        match resolved.kind(self.db) {
+            _ if resolved == operand => self.table.family(self.db, result, operand),
+            TyKind::Family(computed_result, computed_operand)
+                if *computed_operand == operand && *computed_result != FamilyResult::Comparison =>
+            {
+                self.table
+                    .family(self.db, computed_result.compose(result), operand)
             }
             _ => computed,
         }

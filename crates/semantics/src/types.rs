@@ -307,9 +307,10 @@ pub enum TyKind<'db> {
     /// A skolem from an explicit `<T>` binder: refuses to bind while its scope is
     /// checked, generalizes back out afterwards.
     Rigid(Name<'db>),
-    /// The result of an operator whose operand is still open: `Promoted<T>` is `T` for a ry
-    /// number and `double` for an R one, and `Compared<T>` is `Bool` for a ry value and
-    /// `logical` for an R one. The operand is a type variable or parameter, or a union holding
+    /// The result of an operator whose operand is still open: `Promoted<T>` and
+    /// `Subtracted<T>` are `T` for a ry number, a class for a class whose arithmetic keeps it
+    /// ([`FamilyResult`]), and `double` for another R value, and `Compared<T>` is `Bool` for a
+    /// ry value and `logical` for an R one. The operand is a type variable or parameter, or a union holding
     /// one, because `family_result` decides the outcome as soon as the operand is known.
     Family(FamilyResult, Ty<'db>),
 }
@@ -346,6 +347,19 @@ impl FamilyResult {
         }
     }
 
+    /// The family of arithmetic on a family's result: a difference anywhere in the chain decides
+    /// a class, because `(b - a) / 2` on two dates is a `difftime`, not a date. A comparison
+    /// does not compose with arithmetic, so the outer head stands.
+    pub fn compose(self, inner: FamilyResult) -> FamilyResult {
+        match (self, inner) {
+            (FamilyResult::Comparison, _) | (_, FamilyResult::Comparison) => self,
+            (FamilyResult::Difference, _) | (_, FamilyResult::Difference) => {
+                FamilyResult::Difference
+            }
+            _ => FamilyResult::Arithmetic,
+        }
+    }
+
     /// The outcome for an operand on ry's side.
     pub fn ry_outcome<'db>(self, db: &'db dyn Db, operand: Ty<'db>) -> Ty<'db> {
         match self {
@@ -372,7 +386,9 @@ impl FamilyResult {
 pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
     match operand.kind(db) {
         TyKind::Native(_) => result.ry_outcome(db, operand),
-        TyKind::Family(_, inner) => family_result(db, result, *inner),
+        TyKind::Family(inner_result, inner) => {
+            family_result(db, result.compose(*inner_result), *inner)
+        }
         // A nominal type may stand for a ry number, which only the definitions in scope tell.
         TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Named(..) => {
             Ty::new(db, TyKind::Family(result, operand))

@@ -63,7 +63,7 @@ expect stdout "[1]   10   10   10 1000"
 expect stdout "[1] 9\n[1] 9\n[1] 9\n[1] 6\n"
 expect stdout "rebinding k\n[1] 1010\nrebinding k\n[1] 1010\nrebinding k\n[1] 1010\n"
 expect stderr "typed: compiled for [Dbl] -> Dbl"
-expect stderr "typed: `relay` runs in the interpreter: an R call it made rebound a function its native code calls"
+expect stderr "typed: `relay` runs in the interpreter: an R call it made changed a lookup its native code relies on"
 
 run ry run --runtime ry --aot rebind.R
 expect exit 0
