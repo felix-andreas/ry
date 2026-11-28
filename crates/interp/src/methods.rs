@@ -2185,6 +2185,7 @@ fn slot_value<'s>(
 
 /// The value `symbol` has in the frame of `env` itself, its promise forced, or `None` when the
 /// frame does not bind it.
+#[inline]
 fn frame_forced<'s>(
     context: &mut Cx<'s>,
     env: Local<'_, Environment>,
@@ -2193,19 +2194,24 @@ fn frame_forced<'s>(
     let Some(binding) = handles::frame_binding(context, env, symbol) else {
         return Ok(None);
     };
-    if !binding.is_active() {
-        let content = binding.content();
-        let value = match content.downcast::<Promise>() {
-            _ if handles::is_unbound(content) => return Ok(None),
-            None => content,
-            Some(promise) if !handles::is_unbound(promise.result()) => promise.result(),
-            Some(_) => {
-                let promise = context.root(content);
-                return handles::force(context, promise).map(Some);
-            }
-        };
-        return Ok(Some(context.root(value)));
+    let content = binding.content();
+    if binding.is_active() || content.r_type() == SexpType::Promise {
+        return frame_content_forced(context, env, symbol);
     }
+    if handles::is_unbound(content) {
+        return Ok(None);
+    }
+    Ok(Some(context.root(content)))
+}
+
+/// [`frame_forced`] for an active binding or a promise.
+#[cold]
+#[inline(never)]
+fn frame_content_forced<'s>(
+    context: &mut Cx<'s>,
+    env: Local<'_, Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> R<Option<Local<'s>>> {
     match eval::frame_content(context, env, symbol)? {
         Some(value) if !handles::is_unbound(value) => handles::force(context, value).map(Some),
         _ => Ok(None),
