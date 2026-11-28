@@ -59,12 +59,12 @@ pub enum Widening {
     /// Settled as the outcome a callback keeps (`Compared<T> = T`), so another R type joins it
     /// as a union rather than rebinding it.
     Joined,
-    /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
-    /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
+    /// Settled as R's outcome of a difference a fold's callback takes on its accumulator
+    /// (`Subtracted<T> = T` binds `double`). The first value that meets it settles it: one that
     /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
     /// to what the fold returns from that init under `result`: a number vector promotes
     /// (`integer[]` gives `double[]`), a ry number keeps its type, and a class keeps its type
-    /// when the family does (`Date` under `Promoted`, not under `Subtracted`).
+    /// when the family does (a class closed under arithmetic, not a `Date`).
     Folded {
         constraint: Constraint,
         result: FamilyResult,
@@ -83,6 +83,7 @@ pub struct Snapshot {
     entries: usize,
     undo: usize,
     comparisons: usize,
+    folded: usize,
 }
 
 /// A comparison of two operands that stay separate types, waiting for the function that
@@ -107,6 +108,9 @@ pub struct InferenceTable<'db> {
     /// Owned by the table, like `literals`, so that a rollback drops the comparisons of the
     /// discarded inference together with the variables they name.
     pub comparisons: Vec<PendingComparison<'db>>,
+    /// The open accumulators a fold's arithmetic callback left generic, newest last: the call
+    /// that folds over one gives `Promoted<T>`, not `T` itself (the call arm of `Checker::infer`).
+    folded: Vec<InferenceVar>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
     pub definitions: Option<TypeDefinitions<'db>>,
@@ -218,6 +222,7 @@ impl<'db> InferenceTable<'db> {
             entries: self.entries.len(),
             undo: self.undo.len(),
             comparisons: self.comparisons.len(),
+            folded: self.folded.len(),
         }
     }
 
@@ -230,6 +235,7 @@ impl<'db> InferenceTable<'db> {
         }
         self.entries.truncate(snapshot.entries);
         self.comparisons.truncate(snapshot.comparisons);
+        self.folded.truncate(snapshot.folded);
         // Ids grow with creation, so the discarded literals are the newest.
         while self
             .literals
@@ -243,6 +249,25 @@ impl<'db> InferenceTable<'db> {
     fn set(&mut self, var: InferenceVar, entry: Entry<'db>) {
         let previous = mem::replace(&mut self.entries[var.0 as usize], entry);
         self.undo.push((var, previous));
+    }
+
+    /// Where the accumulators folded from here on start, for [`Self::take_folded`].
+    pub fn folded_mark(&self) -> usize {
+        self.folded.len()
+    }
+
+    /// Whether `ty` is an accumulator folded since `mark`, and forgets those accumulators.
+    pub fn take_folded(&mut self, db: &'db dyn Db, mark: usize, ty: Ty<'db>) -> bool {
+        if self.folded.len() <= mark {
+            return false;
+        }
+        // The call may hand back its accumulator already resolved, as the init settles it.
+        let resolved = self.resolve(db, ty);
+        let folded = self.folded[mark..]
+            .iter()
+            .any(|&accumulator| self.resolve(db, Ty::new(db, TyKind::Var(accumulator))) == resolved);
+        self.folded.truncate(mark);
+        folded
     }
 
     pub fn find(&self, var: InferenceVar) -> InferenceVar {
@@ -360,13 +385,6 @@ impl<'db> InferenceTable<'db> {
                 | Constraint::Str
                 | Constraint::ArrayItem,
             ) => result.ry_outcome(db, operand),
-            // An operand `promoted` admits is one arithmetic keeps the type of.
-            Some(constraint)
-                if result == FamilyResult::Arithmetic
-                    && constraint.r_side() == Constraint::Promoted =>
-            {
-                operand
-            }
             // An operand no ry value of the result's kind satisfies is an R value: a number for
             // arithmetic, and any ry value for a comparison (`x == "a"` admits a `Str`).
             Some(constraint)
@@ -551,7 +569,7 @@ impl<'db> InferenceTable<'db> {
         }
         if matches!(
             constraint.r_side(),
-            Constraint::Numeric | Constraint::Arithmetic | Constraint::Promoted
+            Constraint::Numeric | Constraint::Arithmetic
         ) && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
             && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
         {
@@ -574,18 +592,11 @@ impl<'db> InferenceTable<'db> {
                 );
             }
         }
-        // R's arithmetic gives a `double` for an `integer` or a `logical`, so a fold's init
-        // under `promoted` is the `double` the fold returns.
-        let ty = match constraint.r_side() {
-            Constraint::Promoted => promoted_number(db, ty),
-            _ => ty,
-        };
         self.adjust_levels(db, level, ty);
         let widening = match constraint.r_side() {
-            Constraint::Numeric
-            | Constraint::Arithmetic
-            | Constraint::Promoted
-            | Constraint::ScalarNumeric => Widening::Numeric,
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
+                Widening::Numeric
+            }
             Constraint::Comparable => Widening::Compared { equality: false },
             Constraint::Eq | Constraint::Equatable => Widening::Compared { equality: true },
             _ => Widening::Fixed,
@@ -1339,13 +1350,16 @@ impl<'db> InferenceTable<'db> {
             }
         }
         let result = family?;
-        // Arithmetic keeps the type of what `promoted` admits, so the accumulator stays open
-        // under it and the init decides it: `I64` stays `I64`, `1L` binds as `double`.
+        // An arithmetic callback over an open accumulator keeps it open, as `T * 2` keeps `T`:
+        // the fold's call gives `Promoted<T>`, which reduces once the init settles `T`.
         if result == FamilyResult::Arithmetic
-            && let Some(joined) = constraint.join(Constraint::PromotedOrNumber)
-            && joined.r_side() == Constraint::Promoted
+            && let Some(joined) = constraint.join(Constraint::ArithmeticOrNumber)
         {
-            return Some(self.constrain(db, var, joined));
+            let constrained = self.constrain(db, var, joined);
+            if constrained.is_ok() {
+                self.folded.push(var);
+            }
+            return Some(constrained);
         }
         let snapshot = self.snapshot();
         let r_outcome = result.r_outcome(db);
@@ -1676,9 +1690,6 @@ impl<'db> InferenceTable<'db> {
                             | Constraint::ArithmeticOrNumber
                             | Constraint::ArithmeticOrF64
                             | Constraint::NumericOrF64
-                            | Constraint::Promoted
-                            | Constraint::PromotedOrNumber
-                            | Constraint::PromotedOrF64
                     )
                 ),
                 _ => false,
@@ -2909,26 +2920,6 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
     Some(members[1 - null_at])
 }
 
-/// An `integer` or `logical` scalar or vector as the `double` one R's arithmetic makes of it.
-fn promoted_number<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
-    let narrow = |element: Ty<'db>| {
-        matches!(
-            element.kind(db),
-            TyKind::Scalar(Atomic::Logical | Atomic::Integer)
-        )
-    };
-    match *ty.kind(db) {
-        TyKind::Scalar(_) if narrow(ty) => scalar(db, Atomic::Double),
-        TyKind::Vector(element) if narrow(element) => {
-            Ty::new(db, TyKind::Vector(scalar(db, Atomic::Double)))
-        }
-        TyKind::NamedVector(element) if narrow(element) => {
-            Ty::new(db, TyKind::NamedVector(scalar(db, Atomic::Double)))
-        }
-        _ => ty,
-    }
-}
-
 /// Beyond atoms: a class whose arithmetic takes two of it is numeric (`a + b` is legal R for
 /// it), a class declaring any arithmetic method satisfies `arithmetic` (`Date + 1`), and a
 /// rigid binder is admitted when its declared bound is at least as strong (self-recursive
@@ -3022,8 +3013,6 @@ pub(crate) fn constraint_rejects<'db>(
         | Constraint::ArithmeticOrNumber
         | Constraint::ArithmeticOrF64
         | Constraint::NumericOrF64
-        | Constraint::PromotedOrNumber
-        | Constraint::PromotedOrF64
         | Constraint::ComparableOrNumber
         | Constraint::ComparableOrOrdered
         | Constraint::ComparableOrStr
@@ -3036,9 +3025,8 @@ pub(crate) fn constraint_rejects<'db>(
             }
             (_, None) => false,
         },
-        // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers, and
-        // `promoted` admits what `arithmetic` does: `bind` promotes an `integer` to `double`.
-        Constraint::Numeric | Constraint::Arithmetic | Constraint::Promoted => match ty.kind(db) {
+        // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
+        Constraint::Numeric | Constraint::Arithmetic => match ty.kind(db) {
             TyKind::Scalar(
                 Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
             )
@@ -3059,9 +3047,7 @@ pub(crate) fn constraint_rejects<'db>(
                 TyKind::Rigid(name) => binder_implies(name),
                 _ => false,
             },
-            TyKind::Named(name, _)
-                if matches!(constraint, Constraint::Arithmetic | Constraint::Promoted) =>
-            {
+            TyKind::Named(name, _) if constraint == Constraint::Arithmetic => {
                 declares_arithmetic(name)
             }
             TyKind::Named(name, _) => arithmetic_classes
@@ -3069,7 +3055,7 @@ pub(crate) fn constraint_rejects<'db>(
             // A frame with known columns carries its class like a nominal one does.
             TyKind::Frame(kind, _, _) => kind.class().is_some_and(|class| {
                 arithmetic_classes.is_some_and(|classes| match constraint {
-                    Constraint::Arithmetic | Constraint::Promoted => classes.contains(class),
+                    Constraint::Arithmetic => classes.contains(class),
                     _ => classes.closed_under_arithmetic(class),
                 })
             }),

@@ -849,15 +849,6 @@ pub enum Constraint {
     ArithmeticOrF64,
     /// What `numeric` admits and `F64`: what `a / b` asks of two values of one type.
     NumericOrF64,
-    /// A value arithmetic keeps the type of: a `double`, a `complex` or a class with arithmetic,
-    /// in any vector shape, and an `integer` or `logical` value, which binds as `double`. It is
-    /// what a fold asks of an init its callback computes on (`Promoted<T> = T`), so
-    /// `function(xs, init) Reduce(\(acc, x) acc * 2, xs, init)` returns `double` for `1L`.
-    Promoted,
-    /// What `promoted` admits and the ry numbers: a fold's init for `acc * 2`.
-    PromotedOrNumber,
-    /// What `promoted` admits and `F64`: a fold's init for `acc * 0.5`.
-    PromotedOrF64,
     AtomicElement,
     /// A dictionary key or set element: a `logical`, `integer`, `double` or `character` scalar.
     /// `complex` and `raw` are left out because they have no total order or hash that the
@@ -919,16 +910,13 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 23] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 20] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
         ("arithmetic or number", Constraint::ArithmeticOrNumber),
         ("arithmetic or F64", Constraint::ArithmeticOrF64),
         ("numeric or F64", Constraint::NumericOrF64),
-        ("promoted", Constraint::Promoted),
-        ("promoted or number", Constraint::PromotedOrNumber),
-        ("promoted or F64", Constraint::PromotedOrF64),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
@@ -968,8 +956,6 @@ impl Constraint {
             ArithmeticOrNumber => (Arithmetic, Number),
             ArithmeticOrF64 => (Arithmetic, Frac),
             NumericOrF64 => (Numeric, Frac),
-            PromotedOrNumber => (Promoted, Number),
-            PromotedOrF64 => (Promoted, Frac),
             ComparableOrNumber => (Comparable, Number),
             ComparableOrOrdered => (Comparable, Ordered),
             ComparableOrStr => (Comparable, Str),
@@ -987,8 +973,6 @@ impl Constraint {
             (Some(Arithmetic), Some(Number)) => Some(ArithmeticOrNumber),
             (Some(Arithmetic), Some(Frac)) => Some(ArithmeticOrF64),
             (Some(Numeric), Some(Frac)) => Some(NumericOrF64),
-            (Some(Promoted), Some(Number)) => Some(PromotedOrNumber),
-            (Some(Promoted), Some(Frac)) => Some(PromotedOrF64),
             (Some(Comparable), Some(Number)) => Some(ComparableOrNumber),
             (Some(Comparable), Some(Ordered)) => Some(ComparableOrOrdered),
             (Some(Comparable), Some(Str)) => Some(ComparableOrStr),
@@ -1038,16 +1022,6 @@ impl Constraint {
                 };
             }
             (None, None) => {}
-        }
-        // `promoted` keeps its promotion beside every R constraint that admits a `double`, so a
-        // fold's init used elsewhere (`init > 0`) still binds `1L` as `double`; the meet admits
-        // a little more than both do (a `complex` init compared), never less.
-        if self == Promoted || other == Promoted {
-            let single = if self == Promoted { other } else { self };
-            return match single {
-                Number | Int | Frac | Str | Ordered | ArrayItem | StrLiteral => None,
-                _ => Some(Promoted),
-            };
         }
         // `arithmetic` meets everything as `numeric` does, and only `numeric` itself or a
         // stronger constraint makes the result closed.

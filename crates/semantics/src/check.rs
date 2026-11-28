@@ -1884,9 +1884,6 @@ fn erase_residual_vars_at<'db>(
             | Constraint::ArithmeticOrNumber
             | Constraint::ArithmeticOrF64
             | Constraint::NumericOrF64
-            | Constraint::Promoted
-            | Constraint::PromotedOrNumber
-            | Constraint::PromotedOrF64
             | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
@@ -4888,7 +4885,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }),
                     arena,
                 );
+                let folded = self.table.folded_mark();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
+                let ty = if self.table.take_folded(self.db, folded, ty) {
+                    self.table.family(self.db, FamilyResult::Arithmetic, ty)
+                } else {
+                    ty
+                };
                 for &value in &literal_arguments {
                     self.literal_reads.remove(value);
                     let argument = self.recorded_type(value);
@@ -12381,12 +12384,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(
-                    Constraint::Numeric
-                        | Constraint::Arithmetic
-                        | Constraint::Promoted
-                        | Constraint::ScalarNumeric
-                )
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             ),
             TyKind::Rigid(name) => {
                 self.table
@@ -22214,12 +22212,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.table
                     .open_constraint(self.db, ty)
                     .map(Constraint::r_side),
-                Some(
-                    Constraint::Numeric
-                        | Constraint::Arithmetic
-                        | Constraint::Promoted
-                        | Constraint::ScalarNumeric
-                )
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {

@@ -3878,9 +3878,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 constraint @ (Constraint::ArithmeticOrNumber
                 | Constraint::ArithmeticOrF64
                 | Constraint::NumericOrF64
-                | Constraint::Promoted
-                | Constraint::PromotedOrNumber
-                | Constraint::PromotedOrF64
                 | Constraint::ComparableOrNumber
                 | Constraint::ComparableOrOrdered
                 | Constraint::ComparableOrStr
@@ -4917,15 +4914,6 @@ fn constraint_description(constraint: Constraint) -> &'static str {
             "a numeric value (`integer` or `double`), a class with arithmetic, or an `F64`"
         }
         Constraint::NumericOrF64 => "a numeric value (`integer` or `double`) or an `F64`",
-        Constraint::Promoted => {
-            "a numeric value (`integer` or `double`) or a class with arithmetic"
-        }
-        Constraint::PromotedOrNumber => {
-            "a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic"
-        }
-        Constraint::PromotedOrF64 => {
-            "a numeric value (`integer` or `double`), a class with arithmetic, or an `F64`"
-        }
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }

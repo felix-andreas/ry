@@ -561,11 +561,11 @@ w1: I64
 w2: double
 c1: logical
 c2: logical | integer
-walker: <T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U
+walker: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 
 #---- a_fold_accumulator_takes_the_type_its_init_gives_under_arithmetic
-# The callback settles the accumulator as `double`, and an init that arithmetic promotes or keeps
-# rebinds it: a vector promotes to `double[]`, a `Date` stays a `Date`, as R's fold returns.
+# The fold gives what arithmetic makes of its init: a vector promotes to `double[]`, and a `Date`
+# or a `matrix` stays itself, as R's fold returns.
 v <- Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))
 b <- Reduce(function(acc, x) acc * 2, 1:3, c(TRUE, FALSE))
 d <- Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())
@@ -577,8 +577,8 @@ d: Date
 m: matrix
 
 #---- a_fold_accumulator_settles_at_the_first_value_that_meets_it
-# A value checked against the callback's `double` settles it, so a later one of another type is
-# checked against `double` too, and one rebind settles the variable for the values after it.
+# The first value settles the accumulator the callback left open, so a later one of another type
+# is checked against it.
 fold3 <- function<A>(f: fn(A, integer) -> A, a: A, b: A) -> A f(a, 1L)
 t1 <- fold3(function(acc, x) acc * 2, 1.5, Sys.Date())
 t2 <- fold3(function(acc, x) acc * 2, 1i64, Sys.Date())
@@ -590,7 +590,7 @@ t2: Unknown
 t3: Unknown
 303..313 error[type-mismatch] expected `double`, found `Date`
 359..369 error[type-mismatch] expected `I64`, found `Date`
-420..424 error[type-mismatch] expected `double[]`, found `I64`
+420..424 error[type-mismatch] expected `integer[]`, found `I64`
 
 #---- arithmetic_on_an_open_operand_keeps_a_class_with_arithmetic
 # A class's arithmetic methods give the class, so a generic function's arithmetic on a `Date` or a
@@ -644,9 +644,10 @@ r2: Unknown
 165..174 error[type-mismatch] expected a value `==` can test against a number (an atomic value, a class, `I64` or `F64`), found `environment`
 
 #---- a_fold_over_an_open_init_stays_generic
-# A fold whose callback computes on its accumulator keeps the init's type when arithmetic keeps
-# it (`promoted`): a ry number, a `double` or a class such as `matrix`. An `integer` or `logical` init binds as
-# the `double` R's arithmetic makes of it, and a `character` one is rejected.
+# A fold whose callback computes on its accumulator gives `Promoted<U>` of its init's type `U`:
+# a ry number, a `double` or a class such as `matrix` comes back as itself, an `integer` init
+# as the `double` R's arithmetic makes of it, and a `character` one is rejected. The init itself
+# keeps its own type, so a function that also returns or computes on it sees `U`.
 doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 a <- doubled([1i64], 1i64)
 b <- doubled([1i64], 1L)
@@ -661,21 +662,41 @@ checked <- function(xs, init) {
   if (init > 0) total + 1 else total
 }
 h <- checked(1:3, 1L)
-#: <U: promoted> fn(init: U) -> U
-declared <- function(init) init
-i <- declared(TRUE)
+keep <- function(xs, init) {
+  total <- Reduce(function(acc, x) acc * 2, xs, init)
+  init
+}
+i <- keep(c(1, 2), 1L)
+twice <- function(xs, init) {
+  total <- Reduce(function(acc, x) acc * 2, xs, init)
+  init + init
+}
+j <- twice(1:3, Sys.Date())
+scaled <- function(x) {
+  total <- Reduce(function(acc, z) acc * 2, 1:3, x)
+  x * 2L
+}
+k <- scaled(1L)
 #++++
-doubled: <T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U
+doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
 b: double
 c: double
 d: matrix
-summed: <T, U: promoted or F64> fn(xs: list[T] | T[], init: U) -> U
+summed: <T, U: arithmetic or F64> fn(xs: list[T] | T[], init: U) -> Promoted<U>
 e: double
 f: double[]
 g: Unknown
-checked: <T, U: promoted or number> fn(xs: list[T] | T[], init: U) -> U
+checked: <T, U: arithmetic or number> fn(xs: list[T] | T[], init: U) -> Promoted<U>
 h: double
-declared: <U: promoted> fn(init: U) -> U
-i: double
-630..633 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
+keep: <T, U: arithmetic or number> fn(xs: list[T] | T[], init: U) -> U
+i: integer
+twice: <T, U: num> fn(xs: list[T] | T[], init: U) -> U
+j: Unknown
+scaled: <T: arithmetic or number> fn(x: T) -> T
+k: integer
+713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
+896..901 warning[unused] `total` is assigned but never used
+1012..1017 warning[unused] `total` is assigned but never used
+1096..1106 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
+1134..1139 warning[unused] `total` is assigned but never used
