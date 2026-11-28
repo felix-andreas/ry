@@ -1524,17 +1524,22 @@ pub(crate) fn cached_class_definition<'s>(
     };
     let package_symbol = handles::symbol(|symbols| symbols.package);
     let package = handles::get_attribute(context, class, package_symbol);
-    let defined = handles::get_attribute(context, value, package_symbol);
-    let elsewhere = match (package.standard::<Str>(), defined.standard::<Str>()) {
-        (Some(package), Some(defined)) => {
-            !package.is_empty()
-                && defined.len() == 1
-                && defined.get(0).bytes() != package.get(0).bytes()
+    let elsewhere = match package.standard::<Str>() {
+        Some(package) if package.is_empty() => false,
+        Some(package) => {
+            let defined = handles::get_attribute(context, value, package_symbol);
+            match defined.standard::<Str>() {
+                Some(defined) => {
+                    defined.len() == 1 && defined.get(0).bytes() != package.get(0).bytes()
+                }
+                None if defined.r_type() == SexpType::String => {
+                    defined_elsewhere(context, class, value)?
+                }
+                None => false,
+            }
         }
-        _ if package.r_type() == SexpType::String && defined.r_type() == SexpType::String => {
-            defined_elsewhere(context, class, value)?
-        }
-        _ => false,
+        None if package.r_type() == SexpType::String => defined_elsewhere(context, class, value)?,
+        None => false,
     };
     Ok(if elsewhere { handles::null() } else { value })
 }

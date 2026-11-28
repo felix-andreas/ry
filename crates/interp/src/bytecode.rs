@@ -10132,12 +10132,17 @@ unsafe fn standard_generic_in_place(state: &mut Activation<'_, '_>, at: usize) -
     let name = pool_constant(state, *code.add(at + 3) as usize).cdr().car();
     let references = interp.references_used;
     let position = interp.slot_owner as usize;
-    let selected = match handles::with(|context| {
+    // The instruction's own release ends the scope, as for a builtin's fast path, so the
+    // selection opens none of its own.
+    let selected = handles::in_caller_scope(|context| {
         let name = handles::held(context, name);
         crate::methods::select_in_slots(context, name, position)
-    }) {
+    });
+    release(state);
+    let selected = match selected {
         Ok(selected) => selected?,
         Err(unwind) => {
+            unwind.root();
             count();
             return Some(failed::<false>(
                 state,
