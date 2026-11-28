@@ -1727,6 +1727,15 @@ impl<'s> Args<'_, 's> {
         self.call.frame_index()
     }
 
+    /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
+    /// that has no environment and a `...` formal; `None` otherwise, and then `...` in the
+    /// caller's environment answers.
+    pub fn slot_dots<'c>(&self, context: &'c Cx<'s>) -> Option<Gc<'c>> {
+        self.call
+            .slot_frame()
+            .and_then(|frame| crate::eval::frame_dots(context, frame))
+    }
+
     /// `nargs()` for the call: the number of arguments the closure it was made from was
     /// called with, or `NA` outside any closure.
     pub fn frame_argument_count(&self, _context: &Cx<'s>) -> i32 {
@@ -4702,6 +4711,36 @@ pub fn rebound_closure<'s>(
     }
 }
 
+/// A closure of `formals` with a `NULL` body over `environment`, with no attributes, as `args`
+/// answers.
+pub fn formals_closure<'s>(
+    context: &mut Cx<'s>,
+    formals: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and the closure allocates, which `&mut Cx` permits, and is rooted
+    // at once.
+    unsafe {
+        let closure = values::triple(
+            SexpType::Closure,
+            formals.raw(),
+            values::nil(),
+            environment.raw(),
+        )?;
+        Ok(rooted(context, closure))
+    }
+}
+
+/// The binding count of each bucket of `environment`'s hash table and the table's chain
+/// counter, as `env.profile` reports them, or `None` when its frame is not hashed.
+pub fn frame_hash_profile(
+    _context: &Cx<'_>,
+    environment: Local<'_, Environment>,
+) -> Option<(Vec<usize>, usize)> {
+    // SAFETY: the environment is rooted, and the profile only reads its frame.
+    unsafe { crate::heap().frame_hash_profile(environment.raw()) }
+}
+
 /// Whether `x` and `y` are `identical()` with the default flags.
 pub fn identical(_context: &mut Cx<'_>, x: Local<'_>, y: Local<'_>) -> bool {
     // SAFETY: both are rooted, and comparing may expand an ALTREP object, which `&mut Cx`
@@ -5826,6 +5865,20 @@ pub fn call_native_tier<'s>(
                 None
             }
         }
+    }
+}
+
+/// `function`'s body compiled to byte code, compiling it now if it has not run often enough
+/// to compile yet, or the body itself when it stays an expression (`bytecode::compiled_body`).
+pub fn compiled_body<'s>(context: &mut Cx<'s>, function: Local<'_, Closure>) -> R<Local<'s>> {
+    // SAFETY: the closure is rooted, compiling allocates, which `&mut Cx` permits, and the code
+    // is rooted before anything else allocates.
+    unsafe {
+        let body = match crate::bytecode::compiled_body(function.raw())? {
+            Ok(code) => code,
+            Err(_) => function.raw().cdr(),
+        };
+        Ok(rooted(context, body))
     }
 }
 

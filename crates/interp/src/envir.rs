@@ -4,20 +4,18 @@
 use {
     crate::{
         apply_results::VapplyResults,
-        builtins::{Arg, BuiltinDef, BuiltinFn, Call, Generic, builtin, internal, present},
+        builtins::{BuiltinDef, BuiltinFn, Call, Generic, builtin, internal},
         bytecode,
-        eval::{self, Reify, Site, define, find_var, find_var_in_frame, value_of},
+        eval::{self, Reify, Site, define},
         handles::{
-            self, Args, Binding, Bytecode, Cells, Chars, Closure, Cx, Environment, Gc, Integer,
-            List, Local, Logical, Owned, Pairlist, Str, StringFill, Symbol, Tagged, safe,
+            self, Args, Binding, Bytecode, Cells, Chars, Closure, Cx, Elements, Environment,
+            Expression, Gc, Integer, Language, List, Local, Logical, Owned, Pairlist, Promise, Str,
+            StringFill, Symbol, Tagged, Value, safe,
         },
         interp,
         sort::collation_order,
         unwind::{ArgumentReader, R, error, missing_argument},
-        values::{
-            self, alloc, base_namespace, char_str, empty_env, global_env, length, missing_arg, nil,
-            scalar_integer, string_vector, symbol_name, symbols, unbound,
-        },
+        values::{self, alloc, base_namespace, empty_env, global_env, length, nil, symbols},
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
     smallvec::SmallVec,
@@ -91,31 +89,26 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLocalS4Generics", 3, safe!(do_local_s4_generics)),
     internal("ryRegisterS3Methods", 5, safe!(do_register_s3_methods)),
     internal("isNamespaceEnv", 1, safe!(do_is_namespace_environment)),
-    internal("do.call", 3, do_do_call).keep_visibility(),
+    internal("do.call", 3, safe!(do_do_call)).keep_visibility(),
     internal("lapply", 2, do_lapply),
     internal("vapply", 4, do_vapply),
-    internal("mapply", 3, do_mapply),
-    internal("rapply", 5, do_rapply),
+    internal("mapply", 3, safe!(do_mapply)),
+    internal("rapply", 5, safe!(do_rapply)),
     internal("eapply", 4, safe!(do_eapply)),
     internal("Filter", -1, safe!(do_nothing)),
-    internal("env.profile", 1, do_env_profile),
+    internal("env.profile", 1, safe!(do_env_profile)),
     internal("emptyenv", 0, safe!(do_empty_environment)),
-    builtin("...length", 0, do_dots_length),
-    builtin("...elt", 1, do_dots_elt).keep_visibility(),
-    builtin("...names", 0, do_dots_names),
-    crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
-    crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
-    internal("getNamespaceValue", 3, |call| unsafe {
-        values::require_str(call.arg(1), "name")?;
-        let symbol = values::install_charsxp(call.arg(1).element(0))?;
-        let exported = values::as_logical_scalar(call.arg(2)) == 1;
-        namespace_lookup(call.arg(0), symbol, exported)
-    }),
-    internal("formals", 1, do_formals),
-    internal("body", 1, do_body),
-    internal("args", 1, do_args),
-    internal("bodyCode", 1, do_body_code),
-    internal("match.call", 4, do_match_call),
+    builtin("...length", 0, safe!(do_dots_length)),
+    builtin("...elt", 1, safe!(do_dots_elt)).keep_visibility(),
+    builtin("...names", 0, safe!(do_dots_names)),
+    crate::builtins::special("::", 2, safe!(do_exported_value)),
+    crate::builtins::special(":::", 2, safe!(do_internal_value)),
+    internal("getNamespaceValue", 3, safe!(do_get_namespace_value)),
+    internal("formals", 1, safe!(do_formals)),
+    internal("body", 1, safe!(do_body)),
+    internal("args", 1, safe!(do_args)),
+    internal("bodyCode", 1, safe!(do_body_code)),
+    internal("match.call", 4, safe!(do_match_call)),
     internal("sys.source", -1, safe!(do_nothing)),
 ];
 
@@ -2423,48 +2416,61 @@ fn register_method<'s>(
 // Calling functions.
 
 /// `do.call(what, args, envir)`.
-unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
-    let what = call.arg(0);
-    let arguments = call.arg(1);
-    let env = call.arg(2);
-    let function_expression = match what.kind() {
-        SexpType::String if length(what) == 1 => values::install_charsxp(what.element(0))?,
+fn do_do_call<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let what = arguments.value(0);
+    let function = match what.r_type() {
+        SexpType::String if handles::length(context, what) == 1 => {
+            let what = handles::character_vector(context, what)?;
+            handles::install_element(context, what, 0)?.value()
+        }
         SexpType::Closure | SexpType::Builtin | SexpType::Special => what,
         _ => return Err(error("'what' must be a function or character string")),
     };
-    if arguments.kind() != SexpType::List && arguments != nil() {
-        return Err(error("'args' must be a list"));
+    let list = match arguments.value(1) {
+        list if list.r_type() == SexpType::Nil => None,
+        list if list.r_type() == SexpType::List => handles::dense::<List>(context, list)?,
+        _ => return Err(error("'args' must be a list")),
+    };
+    let environment = arguments
+        .value(2)
+        .downcast::<Environment>()
+        .ok_or_else(|| error("'envir' must be an environment"))?;
+    let mut items: SmallVec<[Tagged<'s>; 8]> = SmallVec::new();
+    if let Some(list) = list {
+        let names_symbol = handles::symbol(|symbols| symbols.names);
+        let names = context.root(handles::get_attribute(context, list, names_symbol));
+        let names = handles::dense::<Str>(context, names)?;
+        for index in 0..list.len() {
+            let tag = match names {
+                Some(names) => {
+                    let (empty, na) = {
+                        let name = names.get(context, index);
+                        (name.bytes().is_empty(), handles::is_na(name))
+                    };
+                    // An NA name tags its argument `NA`, as GNU R's `install` of the NA string
+                    // does.
+                    let symbol = if empty {
+                        None
+                    } else if na {
+                        Some(handles::install_bytes(context, b"NA")?)
+                    } else {
+                        Some(handles::install_name_at(context, names, index)?)
+                    };
+                    symbol.map_or_else(handles::null, |symbol| {
+                        handles::root_unless_permanent(context, symbol.value())
+                    })
+                }
+                None => handles::null(),
+            };
+            // A symbol or call among the arguments is evaluated in `envir`, as in GNU R; the R
+            // code quotes them first when `quote = TRUE`.
+            let value = handles::root_unless_permanent(context, list.get(context, index));
+            items.push(Tagged { tag, value });
+        }
     }
-    if env.kind() != SexpType::Environment {
-        return Err(error("'envir' must be an environment"));
-    }
-    let names = values::names(arguments);
-    let mut new_call = values::PairlistBuilder::new(SexpType::Language);
-    new_call.push(nil(), function_expression)?;
-    for index in 0..length(arguments) {
-        let tag = if names != nil() {
-            let name = names.element(index);
-            // An NA name tags its argument `NA`, as GNU R's `install` of the NA string does.
-            if name.bytes().is_empty() {
-                nil()
-            } else if name == values::na_string() {
-                values::install("NA")?
-            } else {
-                values::install_charsxp(name)?
-            }
-        } else {
-            nil()
-        };
-        // A symbol or call among the arguments is evaluated in `envir`, as in GNU R; the R
-        // code quotes them first when `quote = TRUE`.
-        new_call.push(tag, arguments.element(index))?;
-    }
-    eval::eval(new_call.finish(), env)
-}
-
-/// The function an apply-family builtin calls, with the call it reports.
-unsafe fn call_function(function: Sexp, args: &[Arg], env: Sexp, call_expression: Sexp) -> R<Sexp> {
-    eval::apply(call_expression, function, args, env)
+    let rest = handles::chain(context, &items, handles::null())?;
+    let call = handles::language(context, function, rest)?;
+    handles::evaluate(context, call.value(), environment)
 }
 
 /// `lapply(X, FUN)`: GNU R evaluates `FUN(X[[i]], ...)` in the closure's frame, so the call
@@ -2704,161 +2710,281 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     results.finish(list)
 }
 
-unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
-    let function = call.arg(0);
-    let dots = call.arg(1);
-    let more = call.arg(2);
-    let lists: SmallVec<[Sexp; 4]> = (0..length(dots)).map(|index| dots.element(index)).collect();
-    let names = values::names(dots);
+fn do_mapply<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let function = arguments.value(0);
+    let Some(dots) = handles::dense::<List>(context, arguments.value(1))? else {
+        return Err(arguments.error("argument 'dots' is not a list"));
+    };
+    let more = handles::dense::<List>(context, arguments.value(2))?;
+    let caller = arguments.environment(context)?;
+    let lists: SmallVec<[Local<'s>; 4]> = (0..dots.len())
+        .map(|index| context.root(dots.get(context, index)))
+        .collect();
     // A classed argument may define its own `length` and `[[` methods, which mapply honours.
-    let lengths: SmallVec<[usize; 4]> = lists
-        .iter()
-        .map(|&list| crate::subset::dispatch_length(list, call.env()?))
-        .collect::<R<_>>()?;
-    let subset2 = crate::builtins::primitive("[[").ok_or_else(|| call.error("no [[ primitive"))?;
+    let mut lengths: SmallVec<[usize; 4]> = SmallVec::new();
+    for &list in &lists {
+        lengths.push(crate::subset::length_dispatched(context, list, caller)?);
+    }
+    let subset2 = handles::primitive("[[").ok_or_else(|| arguments.error("no [[ primitive"))?;
+    let subset2 = context.root(subset2);
+    let names = string_names(context, dots.value())?;
+    let more_names = match more {
+        Some(more) => string_names(context, more.value())?,
+        None => None,
+    };
     let longest = if lengths.contains(&0) {
         0
     } else {
         lengths.iter().copied().max().unwrap_or(0)
     };
-    let result = alloc(SexpType::List, longest)?;
-    let more_names = values::names(more);
+    let mut result = context.alloc::<List>(longest)?;
     for index in 0..longest {
-        let value = crate::scope(|| {
-            let mut args = eval::Args::new();
+        let value = context.scope_enclosed(|context, outer| {
+            let caller = outer.pass(caller);
+            let mut items: SmallVec<[Tagged<'_>; 4]> = SmallVec::new();
             for (position, &list) in lists.iter().enumerate() {
-                let element = if list.is_object() {
-                    let position_value =
-                        values::scalar_integer((index % lengths[position]) as i32 + 1)?;
-                    eval::apply(
-                        nil(),
-                        subset2,
-                        &eval::value_args(&[list, position_value]),
-                        call.env()?,
-                    )?
+                let list = outer.pass(list);
+                let at = index % lengths[position];
+                let value = if handles::is_object(list) {
+                    let at = handles::integer(context, at as i32 + 1)?;
+                    let subset_arguments = [
+                        Tagged {
+                            tag: handles::null(),
+                            value: list,
+                        },
+                        Tagged {
+                            tag: handles::null(),
+                            value: at,
+                        },
+                    ];
+                    let subset2 = outer.pass(subset2);
+                    handles::apply(context, handles::null(), subset2, &subset_arguments, caller)?
                 } else {
-                    crate::subset::list_or_vector_element(list, index % lengths[position])?
+                    list_element(context, list, at)?
                 };
-                let tag = if names != nil() && !names.element(position).bytes().is_empty() {
-                    crate::heap().install_char(names.element(position))?
-                } else {
-                    nil()
+                let tag = match names {
+                    Some(names) if !names.get(context, position).bytes().is_empty() => {
+                        let name = context.root(names.get(context, position));
+                        let symbol = handles::install_interned(context, name)?;
+                        handles::root_unless_permanent(context, symbol.value())
+                    }
+                    _ => handles::null(),
                 };
-                args.push(Arg {
-                    tag,
-                    value: element,
-                });
+                items.push(Tagged { tag, value });
             }
-            if more.kind() == SexpType::List {
-                for position in 0..length(more) {
-                    let tag = if more_names != nil() {
-                        crate::heap().install_char(more_names.element(position))?
-                    } else {
-                        nil()
+            if let Some(more) = more {
+                let more = outer.pass(more);
+                for position in 0..more.len() {
+                    let tag = match more_names {
+                        Some(names) => {
+                            let name = context.root(names.get(context, position));
+                            let symbol = handles::install_interned(context, name)?;
+                            handles::root_unless_permanent(context, symbol.value())
+                        }
+                        None => handles::null(),
                     };
-                    args.push(Arg {
-                        tag,
-                        value: more.element(position),
-                    });
+                    let value =
+                        handles::root_unless_permanent(context, more.get(context, position));
+                    items.push(Tagged { tag, value });
                 }
             }
-            call_function(function, &args, call.env()?, nil())
+            handles::apply(
+                context,
+                handles::null(),
+                outer.pass(function),
+                &items,
+                caller,
+            )
         })?;
-        values::set_elt(result, index, value);
+        result.set(context, index, value);
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
-        return Err(call.error("'object' must be a list or expression"));
-    }
-    let function = call.arg(1);
-    if !values::is_function(function) {
-        return Err(call.error("invalid 'f' argument"));
-    }
-    let classes = call.arg(2);
-    if classes.kind() != SexpType::String {
-        return Err(call.error("invalid 'classes' argument"));
-    }
-    let deflt = call.arg(3);
-    if call.arg(4).kind() != SexpType::String {
-        return Err(call.error("invalid 'how' argument"));
-    }
-    let replace = values::require_str(call.arg(4), "how")? == "replace";
-    rapply_list(object, function, classes, deflt, replace, call.env()?)
+/// The names of `object` as a character vector, or `None` when it has none.
+fn string_names<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s, Str>>> {
+    let names = handles::get_attribute(context, object, handles::symbol(|symbols| symbols.names));
+    let names = context.root(names);
+    handles::dense::<Str>(context, names)
 }
 
-/// Applies `rapply` to each element of a list or expression vector. As in GNU R, replace mode keeps the container's type and attributes, and the other modes
-/// give a list that keeps only the names.
-unsafe fn rapply_list(
-    object: Sexp,
-    function: Sexp,
-    classes: Sexp,
-    deflt: Sexp,
-    replace: bool,
-    env: Sexp,
-) -> R<Sexp> {
-    if object == nil() && replace {
-        return Ok(nil());
+/// Element `index` of a vector, or the element at that position of a pairlist.
+fn list_element<'s>(context: &mut Cx<'s>, list: Local<'s>, index: usize) -> R<Local<'s>> {
+    if !matches!(
+        list.r_type(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
+        return crate::subset::element(context, list, index);
     }
-    let count = length(object);
-    let result = if replace {
-        values::shallow_duplicate(object)?
-    } else {
-        let result = alloc(SexpType::List, count)?;
-        let names = values::names(object);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
+    let mut cell = list.read(context);
+    for _ in 0..index {
+        match handles::cell_fields(cell) {
+            Some((_, _, rest)) => cell = rest,
+            None => break,
         }
-        result
-    };
-    for index in 0..count {
-        let element = object.element(index);
-        let value = if element == nil()
-            || matches!(element.kind(), SexpType::List | SexpType::Expression)
-        {
-            rapply_list(element, function, classes, deflt, replace, env)?
-        } else {
-            rapply_leaf(element, function, classes, deflt, replace, env)?
-        };
-        values::set_elt(result, index, value);
     }
-    Ok(result)
+    let value = handles::cell_fields(cell).map_or(cell, |(value, _, _)| value);
+    Ok(context.root(value))
 }
 
-unsafe fn rapply_leaf(
-    object: Sexp,
-    function: Sexp,
-    classes: Sexp,
-    deflt: Sexp,
+/// What every element `rapply` reaches reads: the function, the classes it applies to, the
+/// value for the others, whether it replaces them, and the frame it calls the function from.
+#[derive(Clone, Copy)]
+struct Rapply<'s> {
+    function: Local<'s>,
+    classes: Local<'s, Str>,
+    default: Local<'s>,
     replace: bool,
-    env: Sexp,
-) -> R<Sexp> {
-    let count = length(classes);
-    let matches = if count > 0 && classes.element(0).bytes() == b"ANY" {
+    environment: Local<'s, Environment>,
+}
+
+impl<'s> Rapply<'s> {
+    fn pass<'inner>(self, outer: heap::handle::Enclosing<'s, 'inner>) -> Rapply<'inner> {
+        Rapply {
+            function: outer.pass(self.function),
+            classes: outer.pass(self.classes),
+            default: outer.pass(self.default),
+            replace: self.replace,
+            environment: outer.pass(self.environment),
+        }
+    }
+}
+
+fn do_rapply<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    if !matches!(object.r_type(), SexpType::List | SexpType::Expression) {
+        return Err(arguments.error("'object' must be a list or expression"));
+    }
+    let function = arguments.value(1);
+    if !values::is_function_type(function.r_type()) {
+        return Err(arguments.error("invalid 'f' argument"));
+    }
+    let Some(classes) = handles::dense::<Str>(context, arguments.value(2))? else {
+        return Err(arguments.error("invalid 'classes' argument"));
+    };
+    let how = arguments.value(4);
+    if how.r_type() != SexpType::String {
+        return Err(arguments.error("invalid 'how' argument"));
+    }
+    let rapply = Rapply {
+        function,
+        classes,
+        default: arguments.value(3),
+        replace: required_text(context, how, "how")? == "replace",
+        environment: arguments.environment(context)?,
+    };
+    rapply_list(context, rapply, object)
+}
+
+/// Applies `rapply` to each element of a list or expression vector. As in GNU R, replace mode
+/// keeps the container's type and attributes, and the other modes give a list that keeps only
+/// the names.
+fn rapply_list<'s>(context: &mut Cx<'s>, rapply: Rapply<'s>, object: Local<'s>) -> R<Local<'s>> {
+    if object.r_type() == SexpType::Expression {
+        return match handles::dense::<Expression>(context, object)? {
+            Some(object) => rapply_elements(context, rapply, object),
+            None => Err(error(
+                "internal error: an expression vector is not standard",
+            )),
+        };
+    }
+    match handles::dense::<List>(context, object)? {
+        Some(object) => rapply_elements(context, rapply, object),
+        None if rapply.replace => Ok(handles::null()),
+        None => Ok(context.alloc::<List>(0)?.finish().value()),
+    }
+}
+
+fn rapply_elements<'s, T: Elements<Element = Value>>(
+    context: &mut Cx<'s>,
+    rapply: Rapply<'s>,
+    object: Local<'s, T>,
+) -> R<Local<'s>> {
+    let count = object.len();
+    let mut results: SmallVec<[Local<'s>; 8]> = SmallVec::with_capacity(count);
+    for index in 0..count {
+        let element = context.root(object.get(context, index));
+        let value = if matches!(
+            element.r_type(),
+            SexpType::Nil | SexpType::List | SexpType::Expression
+        ) {
+            context.scope_enclosed(|context, outer| {
+                let element = outer.pass(element);
+                rapply_list(context, rapply.pass(outer), element)
+            })?
+        } else {
+            context.scope_enclosed(|context, outer| {
+                let element = outer.pass(element);
+                rapply_leaf(context, rapply.pass(outer), element)
+            })?
+        };
+        results.push(value);
+    }
+    if rapply.replace {
+        let mut copy = handles::shallow_duplicate(context, object)?;
+        for (index, &value) in results.iter().enumerate() {
+            copy.set(context, index, value);
+        }
+        return Ok(copy.finish().value());
+    }
+    let mut list = context.alloc::<List>(count)?;
+    for (index, &value) in results.iter().enumerate() {
+        list.set(context, index, value);
+    }
+    let mut list = list.owned();
+    if let Some(names) = string_names(context, object.value())? {
+        handles::set_attribute(
+            context,
+            &mut list,
+            handles::symbol(|symbols| symbols.names),
+            names.value(),
+        )?;
+    }
+    Ok(list.finish().value())
+}
+
+fn rapply_leaf<'s>(context: &mut Cx<'s>, rapply: Rapply<'s>, object: Local<'s>) -> R<Local<'s>> {
+    let classes = rapply.classes;
+    let matches = if !classes.is_empty() && classes.get(context, 0).bytes() == b"ANY" {
         true
     } else {
-        let class = crate::dispatch::class_of_raw(object)?;
-        (0..count).any(|index| {
-            let wanted = classes.element(index).bytes();
-            (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
-        })
+        let class = crate::dispatch::class_of(context, object)?;
+        match handles::dense::<Str>(context, class)? {
+            Some(class) => (0..classes.len()).any(|index| {
+                let wanted = classes.get(context, index).bytes();
+                (0..class.len()).any(|at| class.get(context, at).bytes() == wanted)
+            }),
+            None => false,
+        }
     };
-    if matches {
-        // GNU R binds the element to `X` in the `rapply` closure's frame and evaluates
-        // `FUN(X, ...)` there, so the extra arguments reach `FUN`.
-        let x_symbol = values::install("X")?;
-        define(x_symbol, object, env)?;
-        let fun_call = values::call(function, &[x_symbol, symbols().dots])?;
-        crate::heap().root(fun_call);
-        eval::force_and_call(fun_call, 1, env)
-    } else if replace {
-        Ok(object)
-    } else {
-        Ok(deflt)
+    if !matches {
+        return Ok(if rapply.replace {
+            object
+        } else {
+            rapply.default
+        });
     }
+    // GNU R binds the element to `X` in the `rapply` closure's frame and evaluates `FUN(X, ...)`
+    // there, so the extra arguments reach `FUN`.
+    let x = handles::install_bytes(context, b"X")?;
+    let x = context.root(x);
+    eval::define_variable(context, x, object, rapply.environment)?;
+    let rest = handles::chain(
+        context,
+        &[
+            Tagged {
+                tag: handles::null(),
+                value: x.value(),
+            },
+            Tagged {
+                tag: handles::null(),
+                value: handles::permanent_symbol(|symbols| symbols.dots).value(),
+            },
+        ],
+        handles::null(),
+    )?;
+    let call = handles::language(context, rapply.function, rest)?;
+    handles::force_and_call(context, call, 1, rapply.environment)
 }
 
 fn do_eapply<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -2913,31 +3039,33 @@ fn do_eapply<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
     Ok(result.finish().value())
 }
 
-unsafe fn dots_of(env: Sexp) -> R<Sexp> {
-    let value = find_var(symbols().dots, env)?;
-    if value == unbound() {
-        return Err(error(
-            "incorrect context: the current call has no '...' to look in",
-        ));
+/// The `...` a dots builtin reads: the calling slot frame's `...` slot, or `...` in the calling
+/// environment, which must bind it.
+fn dots_of<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    if let Some(dots) = arguments.slot_dots(context) {
+        return Ok(context.root(dots));
     }
-    Ok(value)
+    let environment = arguments.environment(context)?;
+    let dots = handles::permanent_symbol(|symbols| symbols.dots);
+    eval::variable(context, dots, environment)?
+        .ok_or_else(|| error("incorrect context: the current call has no '...' to look in"))
 }
 
-unsafe fn do_dots_length(call: &Call<'_>) -> R<Sexp> {
-    let dots = match call.slot_dots() {
-        Some(dots) => dots,
-        None => dots_of(call.env()?)?,
-    };
-    let count = if dots.kind() == SexpType::Dots {
-        values::pairlist_length(dots)
-    } else {
-        0
-    };
-    scalar_integer(count as i32)
+fn do_dots_length<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let dots = dots_of(context, arguments)?;
+    let mut count = 0;
+    if dots.r_type() == SexpType::Dots {
+        let mut cell = dots.read(context);
+        while let Some((_, _, rest)) = handles::cell_fields(cell) {
+            count += 1;
+            cell = rest;
+        }
+    }
+    handles::integer(context, count)
 }
 
-unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
-    let index = values::as_integer_scalar(call.arg(0));
+fn do_dots_elt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let index = handles::integer_scalar(context, arguments.value(0));
     if index < 1 {
         return Err(error(format!(
             "indexing '...' with non-positive index {index}"
@@ -2945,264 +3073,311 @@ unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
     }
     // Forcing the element's promise decides the visibility, as evaluating `..n` would.
     interp().visible = true;
-    let slot_dots = call.slot_dots();
-    let mut item = match slot_dots {
+    let slot_dots = arguments.slot_dots(context).map(|dots| context.root(dots));
+    let dots = match slot_dots {
         Some(dots) => dots,
-        None => find_var(symbols().dots, call.env()?)?,
-    };
-    let holds_element = |item: Sexp| matches!(item.kind(), SexpType::Dots | SexpType::Pairlist);
-    for _ in 1..index {
-        if !holds_element(item) {
-            break;
+        None => {
+            let environment = arguments.environment(context)?;
+            let dots = handles::permanent_symbol(|symbols| symbols.dots);
+            eval::variable(context, dots, environment)?.unwrap_or_else(handles::unbound)
         }
-        item = item.cdr();
-    }
-    if holds_element(item) {
+    };
+    let element = {
+        let mut cell = dots.read(context);
+        for _ in 1..index {
+            match handles::cell_fields(cell) {
+                Some((_, _, rest)) => cell = rest,
+                None => break,
+            }
+        }
+        handles::cell_fields(cell).map(|(value, _, _)| context.root(value))
+    };
+    if let Some(element) = element {
         // GNU R evaluates the element itself, so an empty one is a missing argument with no
         // name.
-        if item.car() == missing_arg() {
-            return Err(missing_argument(
-                eval::lexical_call(call.env()?),
-                "",
-                ArgumentReader::Eval,
-            ));
+        if handles::is_missing_argument(element) {
+            let environment = arguments.environment(context)?;
+            let call = handles::lexical_call(context, environment);
+            return Err(missing_argument(call.raw(), "", ArgumentReader::Eval));
         }
         if slot_dots.is_some() {
-            return eval::value_of(item.car());
+            return handles::force(context, element);
         }
     }
     // Evaluating `..n` reports an absent element.
-    let symbol = values::install(&format!("..{index}"))?;
-    eval::eval_symbol(symbol, call.env()?)
+    let symbol = handles::install_bytes(context, format!("..{index}").as_bytes())?;
+    let symbol = context.root(symbol);
+    let environment = arguments.environment(context)?;
+    eval::symbol_value(context, symbol, environment)
 }
 
-unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {
-    let dots = match call.slot_dots() {
-        Some(dots) => dots,
-        None => dots_of(call.env()?)?,
-    };
-    if dots.kind() != SexpType::Dots {
-        return Ok(nil());
+fn do_dots_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let dots = dots_of(context, arguments)?;
+    if dots.r_type() != SexpType::Dots {
+        return Ok(handles::null());
     }
-    let items = values::pairlist_items(dots);
-    if items.iter().all(|(tag, _)| *tag == nil()) {
-        return Ok(nil());
-    }
-    let names: Vec<String> = items
-        .iter()
-        .map(|(tag, _)| {
-            if *tag == nil() {
-                String::new()
-            } else {
-                symbol_name(*tag).into_owned()
-            }
-        })
-        .collect();
-    string_vector(&names)
-}
-
-unsafe fn do_env_profile(call: &Call<'_>) -> R<Sexp> {
-    let env = call.arg(0);
-    if env.kind() != SexpType::Environment {
-        return Err(call.error("argument must be a hashed environment"));
-    }
-    let Some((counts, chains)) = crate::heap().frame_hash_profile(env) else {
-        return Ok(nil());
-    };
-    let counts: Vec<i32> = counts.iter().map(|&count| count as i32).collect();
-    let fields = [
-        ("size", values::scalar_integer(counts.len() as i32)?),
-        ("nchains", values::scalar_integer(chains as i32)?),
-        ("counts", values::integer_vector(&counts)?),
-    ];
-    values::named_list(&fields)
-}
-
-unsafe fn do_formals(call: &Call<'_>) -> R<Sexp> {
-    let function = call.arg(0);
-    if function.kind() == SexpType::Closure {
-        Ok(function.car())
-    } else {
-        if !values::is_function(function) {
-            crate::conditions::warning_call(call.call, "argument is not a function")?;
+    let names: Vec<Option<String>> = {
+        let mut names = Vec::new();
+        let mut cell = dots.read(context);
+        while let Some((_, tag, rest)) = handles::cell_fields(cell) {
+            names.push(
+                tag.downcast::<Symbol>()
+                    .map(|tag| handles::text(tag.name()).into_owned()),
+            );
+            cell = rest;
         }
-        Ok(nil())
+        names
+    };
+    if names.iter().all(Option::is_none) {
+        return Ok(handles::null());
     }
+    let names: Vec<String> = names.into_iter().map(Option::unwrap_or_default).collect();
+    strings(context, &names)
 }
 
-unsafe fn do_body(call: &Call<'_>) -> R<Sexp> {
-    let function = call.arg(0);
-    if function.kind() == SexpType::Closure {
-        Ok(crate::bytecode::closure_body(function))
-    } else {
-        if !values::is_function(function) {
-            crate::conditions::warning_call(call.call, "argument is not a function")?;
-        }
-        Ok(nil())
+fn do_env_profile<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(environment) = arguments.value(0).downcast::<Environment>() else {
+        return Err(arguments.error("argument must be a hashed environment"));
+    };
+    let Some((counts, chains)) = handles::frame_hash_profile(context, environment) else {
+        return Ok(handles::null());
+    };
+    let mut profile = context.alloc::<List>(3)?;
+    let size = handles::integer(context, counts.len() as i32)?;
+    profile.set(context, 0, size);
+    let chains = handles::integer(context, chains as i32)?;
+    profile.set(context, 1, chains);
+    let mut bucket_counts = context.alloc::<Integer>(counts.len())?;
+    for (slot, &count) in bucket_counts.as_mut_slice().iter_mut().zip(&counts) {
+        *slot = count as i32;
     }
+    let bucket_counts = bucket_counts.finish();
+    profile.set(context, 2, bucket_counts.value());
+    let mut profile = profile.owned();
+    let names = strings(context, &["size", "nchains", "counts"])?;
+    handles::set_attribute(
+        context,
+        &mut profile,
+        handles::symbol(|symbols| symbols.names),
+        names,
+    )?;
+    Ok(profile.finish().value())
+}
+
+fn do_formals<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let function = arguments.value(0);
+    if let Some(closure) = function.downcast::<Closure>() {
+        return Ok(context.root(closure.read(context).formals()));
+    }
+    if !values::is_function_type(function.r_type()) {
+        arguments.warning(context, "argument is not a function")?;
+    }
+    Ok(handles::null())
+}
+
+fn do_body<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let function = arguments.value(0);
+    if let Some(closure) = function.downcast::<Closure>() {
+        return Ok(context.root(body_source(closure.read(context).body())));
+    }
+    if !values::is_function_type(function.r_type()) {
+        arguments.warning(context, "argument is not a function")?;
+    }
+    Ok(handles::null())
 }
 
 /// A closure's body as GNU R stores it, which is byte code for every function GNU R ships. ry
 /// compiles a closure on demand here so that code inspecting the body sees the same type.
-unsafe fn do_body_code(call: &Call<'_>) -> R<Sexp> {
-    let function = call.arg(0);
-    if function.kind() != SexpType::Closure {
-        return Ok(nil());
+fn do_body_code<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    match arguments.value(0).downcast::<Closure>() {
+        Some(closure) => handles::compiled_body(context, closure),
+        None => Ok(handles::null()),
     }
-    Ok(crate::bytecode::compiled_body(function)?.unwrap_or(function.cdr()))
 }
 
-unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {
-    let mut function = call.arg(0);
-    if function.kind() == SexpType::String && length(function) == 1 {
-        let symbol = values::install_charsxp(function.element(0))?;
-        function = eval::find_fun(symbol, call.env()?)?;
+fn do_args<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut function = arguments.value(0);
+    if function.r_type() == SexpType::String
+        && handles::length(context, function) == 1
+        && let Some(name) = handles::dense::<Str>(context, function)?
+    {
+        let symbol = handles::install_element(context, name, 0)?;
+        let environment = arguments.environment(context)?;
+        function = eval::function_value(context, symbol, environment, None)?;
     }
-    match function.kind() {
-        SexpType::Closure => {
-            let copy = values::triple(SexpType::Closure, function.car(), nil(), global_env())?;
-            Ok(copy)
-        }
-        SexpType::Builtin | SexpType::Special => {
-            // The formals of a primitive live in `.ArgsEnv` and `.GenericArgsEnv`.
-            let name = values::primitive_name(function).to_owned();
-            for env_name in [".ArgsEnv", ".GenericArgsEnv"] {
-                let symbol = values::install(env_name)?;
-                let env = value_of(find_var_in_frame(symbol, base_namespace())?)?;
-                if env.kind() == SexpType::Environment {
-                    let value = find_var_in_frame(values::install(&name)?, env)?;
-                    if value != unbound() {
-                        let value = value_of(value)?;
-                        if value.kind() == SexpType::Closure {
-                            return values::triple(
-                                SexpType::Closure,
-                                value.car(),
-                                nil(),
-                                global_env(),
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(nil())
-        }
-        _ => Ok(nil()),
+    if let Some(closure) = function.downcast::<Closure>() {
+        let formals = context.root(closure.read(context).formals());
+        return handles::formals_closure(context, formals, handles::global_environment());
     }
+    if !matches!(function.r_type(), SexpType::Builtin | SexpType::Special) {
+        return Ok(handles::null());
+    }
+    // The formals of a primitive live in `.ArgsEnv` and `.GenericArgsEnv`.
+    let name =
+        handles::builtin_definition(function).map_or("<unknown>", |definition| definition.name);
+    for table in [".ArgsEnv", ".GenericArgsEnv"] {
+        let table = handles::install_bytes(context, table.as_bytes())?;
+        let base = handles::base_namespace().value();
+        let Some(table) = handles::frame_symbol_value(context, base, table)? else {
+            continue;
+        };
+        let symbol = handles::install_bytes(context, name.as_bytes())?;
+        if let Some(value) = handles::frame_symbol_value(context, table, symbol)?
+            && let Some(closure) = value.downcast::<Closure>()
+        {
+            let formals = context.root(closure.read(context).formals());
+            return handles::formals_closure(context, formals, handles::global_environment());
+        }
+    }
+    Ok(handles::null())
 }
 
 /// `match.call(definition, call, expand.dots, envir)`.
-unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
-    let mut definition = call.arg(0);
-    let target = call.arg(1);
-    let expand_dots = values::as_logical_scalar(call.arg(2)) != 0;
-    let dots_env = call.arg(3);
-    if target.kind() != SexpType::Language {
-        return Err(call.error("invalid 'call' argument"));
+fn do_match_call<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(target) = arguments.value(1).downcast::<Language>() else {
+        return Err(arguments.error("invalid 'call' argument"));
+    };
+    let expand_dots = handles::logical_scalar(context, arguments.value(2)) != 0;
+    let dots_environment = arguments.value(3).downcast::<Environment>();
+    let head = context.root(target.read(context).head());
+    let mut definition = arguments.value(0);
+    if definition.r_type() == SexpType::Nil
+        && let Some(head) = head.downcast::<Symbol>()
+    {
+        let environment = arguments.environment(context)?;
+        definition = eval::function_value(context, head, environment, None)?;
     }
-    if definition == nil() {
-        let head = target.car();
-        if head.kind() == SexpType::Symbol {
-            definition = eval::find_fun(head, call.env()?)?;
-        }
-    }
-    if definition.kind() != SexpType::Closure {
-        return Err(call.error("invalid 'definition' argument"));
-    }
+    let Some(definition) = definition.downcast::<Closure>() else {
+        return Err(arguments.error("invalid 'definition' argument"));
+    };
+    let written = cell_items(context, context.root(target.read(context).rest()));
+    let dots = handles::symbol(|symbols| symbols.dots);
     // Expand `...` in the call from the environment that supplies it.
-    let mut supplied: Vec<Arg> = Vec::new();
-    for (tag, value) in values::pairlist_items(target.cdr()) {
-        if value == symbols().dots {
-            if dots_env.kind() == SexpType::Environment {
-                let dots = find_var(symbols().dots, dots_env)?;
-                if dots.kind() == SexpType::Dots {
-                    // GNU R's `subDots` names a symbol or call by its position, `..1`, so the
-                    // call still evaluates in the frame that holds the dots (`write.csv`
-                    // forwards its call with `eval.parent`). A constant stays as it is.
-                    for (index, (dot_tag, dot_value)) in
-                        values::pairlist_items(dots).into_iter().enumerate()
-                    {
-                        let mut code = dot_value;
-                        while code.kind() == SexpType::Promise {
-                            code = crate::bytecode::source_of_body(code.cdr());
-                        }
-                        let value = match code.kind() {
-                            SexpType::Symbol | SexpType::Language => {
-                                values::install_bytes(format!("..{}", index + 1).as_bytes())?
-                            }
-                            _ => code,
-                        };
-                        supplied.push(Arg {
-                            tag: dot_tag,
-                            value,
-                        });
-                    }
-                }
-            }
+    let mut supplied: SmallVec<[Tagged<'s>; 8]> = SmallVec::new();
+    for item in written {
+        if item.value.raw() != dots.raw() {
+            supplied.push(item);
             continue;
         }
-        supplied.push(Arg { tag, value });
-    }
-    let formals = definition.car();
-    // The `...` lists matching builds stay rooted in the caller's handle scope until the call
-    // is built.
-    let matched: SmallVec<[Sexp; 8]> = handles::in_caller_scope(|context| {
-        let formals = handles::held(context, formals);
-        let target = handles::held(context, target);
-        let supplied = handles::tagged(context, &supplied);
-        let matched = eval::match_args(context, formals, supplied, target)?;
-        Ok(matched.iter().map(|value| value.raw()).collect())
-    })?;
-    let formal_symbols: Vec<Sexp> = values::pairlist_items(formals)
-        .into_iter()
-        .map(|(tag, _)| tag)
-        .collect();
-    let mut items = vec![(nil(), target.car())];
-    // Matched arguments come out in formal order; `...` contributes its contents.
-    for (formal, value) in formal_symbols.iter().zip(matched.iter()) {
-        if *value == missing_arg() {
+        let Some(dots_environment) = dots_environment else {
+            continue;
+        };
+        let Some(found) = eval::variable(context, context.root(dots), dots_environment)? else {
+            continue;
+        };
+        if found.r_type() != SexpType::Dots {
             continue;
         }
-        if *formal == symbols().dots {
-            let dot_items = values::pairlist_items(*value);
-            if expand_dots {
-                for (tag, item) in dot_items {
-                    items.push((tag, item));
+        // GNU R's `subDots` names a symbol or call by its position, `..1`, so the call still
+        // evaluates in the frame that holds the dots (`write.csv` forwards its call with
+        // `eval.parent`). A constant stays as it is.
+        for (index, item) in cell_items(context, found).into_iter().enumerate() {
+            let code = {
+                let mut code = item.value.read(context);
+                while let Some(promise) = code.downcast::<Promise>() {
+                    code = body_source(promise.code());
                 }
+                context.root(code)
+            };
+            let value = if matches!(code.r_type(), SexpType::Symbol | SexpType::Language) {
+                let symbol =
+                    handles::install_bytes(context, format!("..{}", index + 1).as_bytes())?;
+                handles::root_unless_permanent(context, symbol.value())
             } else {
-                let list = values::pairlist(&dot_items, SexpType::Pairlist)?;
-                items.push((*formal, list));
-            }
-        } else {
-            items.push((*formal, *value));
+                code
+            };
+            supplied.push(Tagged {
+                tag: item.tag,
+                value,
+            });
         }
     }
-    let result = values::pairlist(&items, SexpType::Language)?;
-    Ok(result)
+    let formals = context.root(definition.read(context).formals());
+    let matched = eval::match_args(context, formals, &supplied, target.value())?;
+    let formal_symbols = cell_items(context, formals);
+    let mut items: SmallVec<[Tagged<'s>; 8]> = SmallVec::new();
+    // Matched arguments come out in formal order; `...` contributes its contents.
+    for (formal, &value) in formal_symbols.iter().zip(matched.iter()) {
+        if handles::is_missing_argument(value) {
+            continue;
+        }
+        if formal.tag.raw() != dots.raw() {
+            items.push(Tagged {
+                tag: formal.tag,
+                value,
+            });
+            continue;
+        }
+        let dot_items = cell_items(context, value);
+        if expand_dots {
+            items.extend(dot_items);
+        } else {
+            let list = handles::chain(context, &dot_items, handles::null())?;
+            items.push(Tagged {
+                tag: formal.tag,
+                value: list,
+            });
+        }
+    }
+    let rest = handles::chain(context, &items, handles::null())?;
+    Ok(handles::language(context, head, rest)?.value())
 }
 
-pub unsafe fn char_name(charsxp: Sexp) -> String {
-    char_str(charsxp).into_owned()
+/// The tag and value of each cell of a pairlist, call or `...`.
+fn cell_items<'s>(context: &Cx<'s>, list: Local<'s>) -> SmallVec<[Tagged<'s>; 8]> {
+    let mut items = SmallVec::new();
+    let mut cell = list.read(context);
+    while let Some((value, tag, rest)) = handles::cell_fields(cell) {
+        items.push(Tagged {
+            tag: handles::root_unless_permanent(context, tag),
+            value: handles::root_unless_permanent(context, value),
+        });
+        cell = rest;
+    }
+    items
 }
 
-pub unsafe fn present_or_nil(value: Option<Sexp>) -> Sexp {
-    present(value).unwrap_or(nil())
-}
-
-/// The package or variable name of `pkg::name`: a symbol or a string.
 /// The symbol a side of `::` names: a symbol as written, or a one-element string.
-unsafe fn colon_symbol(value: Sexp) -> R<Sexp> {
-    match value.kind() {
-        SexpType::Symbol => Ok(value),
-        SexpType::String if length(value) == 1 => values::install_charsxp(value.element(0)),
+fn colon_symbol<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Symbol>> {
+    if let Some(symbol) = value.downcast::<Symbol>() {
+        return Ok(symbol);
+    }
+    match handles::dense::<Str>(context, value)? {
+        Some(name) if name.len() == 1 => handles::install_element(context, name, 0),
         _ => Err(error("bad namespace name")),
     }
 }
 
+/// `pkg::name`.
+fn do_exported_value<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    namespace_value(context, arguments, true)
+}
+
+/// `pkg:::name`.
+fn do_internal_value<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    namespace_value(context, arguments, false)
+}
+
 /// `pkg::name` (exported only) and `pkg:::name`.
-unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
-    let package = colon_symbol(call.arg(0))?;
-    let symbol = colon_symbol(call.arg(1))?;
-    namespace_lookup(package, symbol, exported)
+fn namespace_value<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    exported: bool,
+) -> R<Local<'s>> {
+    let package = colon_symbol(context, arguments.value(0))?;
+    let symbol = colon_symbol(context, arguments.value(1))?;
+    namespace_lookup(context, package.value(), symbol, exported)
+}
+
+/// `getNamespaceValue(ns, name, exported)`.
+fn do_get_namespace_value<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let name = match handles::dense::<Str>(context, arguments.value(1))? {
+        Some(name) if name.len() == 1 => name,
+        _ => return Err(error("invalid 'name' argument")),
+    };
+    let symbol = handles::install_element(context, name, 0)?;
+    let exported = handles::logical_scalar(context, arguments.value(2)) == 1;
+    namespace_lookup(context, arguments.value(0), symbol, exported)
 }
 
 /// `package::symbol` (or `:::` when not `exported`) for a package named by a symbol, with the
@@ -3217,7 +3392,13 @@ pub unsafe fn namespace_binding(
     symbol: Sexp,
     exported: bool,
 ) -> R<(Sexp, Option<Sexp>)> {
-    let value = namespace_lookup(package, symbol, exported)?;
+    let value = handles::with_result(|context| {
+        let package_name = handles::held(context, package);
+        let symbol = handles::held(context, symbol)
+            .downcast::<Symbol>()
+            .ok_or_else(|| error("internal error: a namespace lookup names no symbol"))?;
+        Ok(namespace_lookup(context, package_name, symbol, exported)?.raw())
+    })?;
     Ok((value, namespace_cell(package, symbol, exported)))
 }
 
@@ -3278,95 +3459,128 @@ unsafe fn namespace_cell(package: Sexp, symbol: Sexp, exported: bool) -> Option<
 /// namespace's export table, which maps it to the internal name, from the namespace outward,
 /// because a package may export a function it imports, as graphics does with base's `plot`; lazy
 /// data comes last. An internal name (`:::`) must be bound in the namespace itself.
-unsafe fn namespace_lookup(package: Sexp, symbol: Sexp, exported: bool) -> R<Sexp> {
-    let symbols = symbols();
-    let namespace = if package.kind() == SexpType::Environment {
-        package
-    } else {
-        let package_symbol = package_symbol(package)?;
-        if package_symbol == Some(symbols.base) {
-            base_namespace()
-        } else if let Some(loaded) = match package_symbol {
-            Some(symbol) => loaded_namespace(symbol)?,
-            None => None,
-        } {
-            loaded
-        } else {
-            // GNU R evaluates `loadNamespace(x)` with `x` bound to the name, so an error from a
-            // missing package names that call.
-            let name = match package_symbol {
-                Some(symbol) if package.kind() == SexpType::Symbol => {
-                    let name = values::alloc(SexpType::String, 1)?;
-                    values::set_elt(name, 0, symbol.car());
-                    name
-                }
-                _ => package,
-            };
-            let frame = values::new_env(base_namespace())?;
-            eval::define(symbols.x, name, frame)?;
-            eval::eval(values::call(symbols.load_namespace, &[symbols.x])?, frame)?
-        }
+fn namespace_lookup<'s>(
+    context: &mut Cx<'s>,
+    package: Local<'s>,
+    symbol: Local<'s, Symbol>,
+    exported: bool,
+) -> R<Local<'s>> {
+    let base = handles::base_namespace();
+    let namespace = match package.downcast::<Environment>() {
+        Some(namespace) => namespace,
+        None => match package_symbol(context, package)? {
+            Some(name) if name.is(handles::symbol(|symbols| symbols.base)) => base,
+            Some(name) => match loaded_namespace(context, name)? {
+                Some(namespace) => namespace,
+                None => load_namespace(context, package, Some(name))?,
+            },
+            None => load_namespace(context, package, None)?,
+        },
     };
-    let not_found = || error(format!("object '{}' not found", symbol_name(symbol)));
-    if namespace == base_namespace() || !exported {
-        let value = find_var_in_frame(symbol, namespace)?;
-        if value == unbound() {
-            return Err(not_found());
-        }
-        return value_of(value);
+    let not_found = |context: &Cx<'_>| {
+        error(format!(
+            "object '{}' not found",
+            symbol_text(context, symbol)
+        ))
+    };
+    if namespace.is(base) || !exported {
+        return match eval::frame_content(context, namespace, symbol)? {
+            Some(value) => handles::force(context, value),
+            None => Err(not_found(context)),
+        };
     }
-    let info = find_var_in_frame(symbols.dot_namespace, namespace)?;
-    let table = |field: Sexp| -> R<Sexp> {
-        if info.kind() != SexpType::Environment {
-            return Ok(unbound());
-        }
-        let table = find_var_in_frame(field, info)?;
-        if table.kind() != SexpType::Environment {
-            return Ok(unbound());
-        }
-        find_var_in_frame(symbol, table)
-    };
-    let internal_name = table(symbols.exports)?;
-    if internal_name != unbound() {
-        let internal_symbol = match internal_name.kind() {
-            SexpType::String if length(internal_name) > 0 => {
-                values::install_charsxp(internal_name.element(0))?
-            }
+    let info = eval::frame_content(
+        context,
+        namespace,
+        handles::symbol(|symbols| symbols.dot_namespace),
+    )?
+    .and_then(|info| info.downcast::<Environment>());
+    let exports = handles::symbol(|symbols| symbols.exports);
+    if let Some(internal) = namespace_table(context, info, exports, symbol)? {
+        let internal_symbol = match handles::dense::<Str>(context, internal)? {
+            Some(name) if !name.is_empty() => handles::install_element(context, name, 0)?,
             _ => symbol,
         };
-        let value = eval::find_var(internal_symbol, namespace)?;
-        if value == unbound() {
-            return Err(not_found());
+        return match eval::variable(context, internal_symbol, namespace)? {
+            Some(value) => handles::force(context, value),
+            None => Err(not_found(context)),
+        };
+    }
+    let lazydata = handles::symbol(|symbols| symbols.lazydata);
+    if let Some(data) = namespace_table(context, info, lazydata, symbol)? {
+        return handles::force(context, data);
+    }
+    let package_name = match info {
+        Some(info) => {
+            let spec = handles::symbol(|symbols| symbols.spec);
+            match eval::frame_content(context, info, spec)? {
+                Some(spec) => handles::first_string(context, spec)
+                    .map(Cow::into_owned)
+                    .unwrap_or_default(),
+                None => String::new(),
+            }
         }
-        return value_of(value);
-    }
-    let data = table(symbols.lazydata)?;
-    if data != unbound() {
-        return value_of(data);
-    }
-    let package_name = if info.kind() == SexpType::Environment {
-        let spec = find_var_in_frame(symbols.spec, info)?;
-        values::first_string(spec)
-            .map(|text| text.into_owned())
-            .unwrap_or_default()
-    } else {
-        package_symbol(package)?
-            .map(|package| symbol_name(package).into_owned())
-            .unwrap_or_default()
+        None => package_symbol(context, package)?
+            .map(|package| symbol_text(context, package))
+            .unwrap_or_default(),
     };
     Err(error(format!(
         "'{}' is not an exported object from 'namespace:{package_name}'",
-        symbol_name(symbol)
+        symbol_text(context, symbol)
     )))
 }
 
-/// The symbol of a package named by a symbol or by the first element of a string vector.
-unsafe fn package_symbol(package: Sexp) -> R<Option<Sexp>> {
-    match package.kind() {
-        SexpType::Symbol => Ok(Some(package)),
-        SexpType::String if length(package) > 0 => {
-            values::install_charsxp(package.element(0)).map(Some)
+/// The entry for `symbol` in the table `field` (`exports` or `lazydata`) of a namespace's
+/// information environment, unforced.
+fn namespace_table<'s>(
+    context: &mut Cx<'s>,
+    info: Option<Local<'s, Environment>>,
+    field: Gc<'static, Symbol>,
+    symbol: Local<'s, Symbol>,
+) -> R<Option<Local<'s>>> {
+    let Some(info) = info else {
+        return Ok(None);
+    };
+    let table = eval::frame_content(context, info, field)?;
+    match table.and_then(|table| table.downcast::<Environment>()) {
+        Some(table) => eval::frame_content(context, table, symbol),
+        None => Ok(None),
+    }
+}
+
+/// The namespace `loadNamespace` loads for `package`. GNU R evaluates `loadNamespace(x)` with
+/// `x` bound to the name, so an error from a missing package names that call.
+fn load_namespace<'s>(
+    context: &mut Cx<'s>,
+    package: Local<'s>,
+    name: Option<Local<'s, Symbol>>,
+) -> R<Local<'s, Environment>> {
+    let name = match name {
+        Some(name) if package.r_type() == SexpType::Symbol => {
+            let mut text = context.alloc::<Str>(1)?;
+            text.set(context, 0, name.read(context).name());
+            text.finish().value()
         }
+        _ => package,
+    };
+    let frame = handles::new_environment(context, handles::base_namespace())?;
+    let x = handles::permanent_symbol(|symbols| symbols.x);
+    eval::define_variable(context, x, name, frame)?;
+    let load = handles::permanent_symbol(|symbols| symbols.load_namespace);
+    let rest = handles::cons(context, handles::null(), x.value(), handles::null())?;
+    let call = handles::language(context, load.value(), rest)?;
+    handles::evaluate(context, call.value(), frame)?
+        .downcast::<Environment>()
+        .ok_or_else(|| error("internal error: loadNamespace() gave no environment"))
+}
+
+/// The symbol of a package named by a symbol or by the first element of a string vector.
+fn package_symbol<'s>(context: &mut Cx<'s>, package: Local<'s>) -> R<Option<Local<'s, Symbol>>> {
+    if let Some(symbol) = package.downcast::<Symbol>() {
+        return Ok(Some(symbol));
+    }
+    match handles::dense::<Str>(context, package)? {
+        Some(name) if !name.is_empty() => handles::install_element(context, name, 0).map(Some),
         _ => Ok(None),
     }
 }
@@ -3374,8 +3588,13 @@ unsafe fn package_symbol(package: Sexp) -> R<Option<Sexp>> {
 /// The namespace registered for the package named by the symbol `package`, without calling
 /// `asNamespace`, which costs several microseconds per `pkg::name` and would dominate a hot loop
 /// that uses one.
-unsafe fn loaded_namespace(package: Sexp) -> R<Option<Sexp>> {
-    let registry = crate::heap().known().namespace_registry;
-    let namespace = value_of(find_var_in_frame(package, registry)?)?;
-    Ok((namespace.kind() == SexpType::Environment).then_some(namespace))
+fn loaded_namespace<'s>(
+    context: &mut Cx<'s>,
+    package: Local<'s, Symbol>,
+) -> R<Option<Local<'s, Environment>>> {
+    let registry = handles::namespace_registry();
+    let Some(namespace) = eval::frame_content(context, registry, package)? else {
+        return Ok(None);
+    };
+    Ok(handles::force(context, namespace)?.downcast::<Environment>())
 }
