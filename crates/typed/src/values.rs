@@ -2449,7 +2449,8 @@ pub unsafe extern "C" fn ry_str_encode(lo: u64, hi: u64, encoding: u64) -> *mut 
         ),
         Encoding::Utf32 => units_list(
             text.chars().count(),
-            text.chars().map(|character| i64::from(u32::from(character))),
+            text.chars()
+                .map(|character| i64::from(u32::from(character))),
         ),
     }
 }

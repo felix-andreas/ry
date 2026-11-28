@@ -25,8 +25,8 @@ use {
         records::{Fields, Layout},
     },
     interp::{
-        eval::in_tail_position, numbers::Observed, records::rest_name,
-        standard_library::Encoding, values as rvalues,
+        eval::in_tail_position, numbers::Observed, records::rest_name, standard_library::Encoding,
+        values as rvalues,
     },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -6278,8 +6278,8 @@ impl Lowering<'_> {
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
         let backwards = name.starts_with("List.walk_backwards");
-        let with_index = name.starts_with("List.walk_with_index")
-            || name == "Str.walk_utf8_with_index";
+        let with_index =
+            name.starts_with("List.walk_with_index") || name == "Str.walk_utf8_with_index";
         let bytes = name.starts_with("Str.walk_utf8");
         let from = name.starts_with("List.walk_from");
         let over_dict = name.starts_with("Dict.") || name.starts_with("Set.");

@@ -3051,7 +3051,10 @@ pub enum Decoded {
     /// The unit at a 0-based position cannot be a code unit of the encoding at all, which is an
     /// error in both decodings: a UTF-8 unit outside 0 to 255 or a UTF-16 unit outside 0 to
     /// 65535. Every number is a possible UTF-32 unit, valid or not.
-    OutOfRange { position: usize, unit: i64 },
+    OutOfRange {
+        position: usize,
+        unit: i64,
+    },
 }
 
 /// Decodes code units, the one definition of `Str.from_utf8`, `Str.from_utf16` and
@@ -3135,7 +3138,11 @@ unsafe fn from_units(call: &Call<'_>, encoding: Encoding, lossy: bool) -> R<Sexp
         Decoded::Text(text) => ok(scalar_string(&text)?),
         Decoded::Invalid => err(reason),
         Decoded::OutOfRange { position, unit } => {
-            let largest = if encoding == Encoding::Utf8 { 255 } else { 65535 };
+            let largest = if encoding == Encoding::Utf8 {
+                255
+            } else {
+                65535
+            };
             Err(call.error(format!(
                 "`{parameter}` must hold numbers from 0 to {largest}, but item {} is {unit}",
                 position + 1
