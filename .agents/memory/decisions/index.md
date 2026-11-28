@@ -633,6 +633,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Counts that share a list share one kernel pass (built, with exceptions)
 - An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
 - `Num.sqrt(NaN)` is an error, as every library function's `NaN` is (settled)
+- Interpreted List functions build results from packed runs (settled)
 
 ## Typed native compilation
 

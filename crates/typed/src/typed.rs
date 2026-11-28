@@ -641,7 +641,7 @@ pub unsafe fn call(
 
 /// The value R code changes when it assigns into an element of a variable bound to `bound`: the
 /// value itself, or a forced promise's value.
-unsafe fn held_value(bound: Sexp) -> Option<Sexp> {
+pub unsafe fn held_value(bound: Sexp) -> Option<Sexp> {
     if bound.kind() != SexpType::Promise {
         return Some(bound);
     }

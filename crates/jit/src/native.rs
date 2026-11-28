@@ -2935,12 +2935,30 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
         Gathered::Values(arguments, ahead) => (arguments, ahead),
         Gathered::Declined => return None,
         Gathered::Unread(unread) => {
-            if let Err(unwind) = force_read_first(typed, &unread)? {
+            // Forcing runs R code, which must copy a watched value it assigns into rather than
+            // change it in place, so that `resume` sees the change as a new binding.
+            let held: SmallVec<[Sexp; 4]> = unread
+                .ahead
+                .watches
+                .iter()
+                .filter_map(|watch| typed::held_value(watch.bound))
+                .collect();
+            for value in &held {
+                value.increment_refcount();
+            }
+            let forcing = force_read_first(typed, &unread);
+            for value in &held {
+                value.decrement_refcount();
+            }
+            if let Err(unwind) = forcing? {
                 return Some(Err(unwind));
             }
-            match gather(function, typed.args) {
-                Gathered::Values(arguments, ahead) => (arguments, ahead),
-                _ => return None,
+            match resume(unread)? {
+                Some(values) => values,
+                None => match gather(function, typed.args) {
+                    Gathered::Values(arguments, ahead) => (arguments, ahead),
+                    _ => return None,
+                },
             }
         }
     };
@@ -2983,8 +3001,59 @@ pub(crate) enum Gathered {
 pub(crate) struct Unread {
     /// The formals' positions whose argument is a promise of code that only forcing computes.
     positions: SmallVec<[u32; 2]>,
+    /// Each argument that is a promise, with its formal's position and where `arguments` holds
+    /// its value, or the promise itself for one of `positions`.
+    promised: SmallVec<[(u32, u32, Sexp); 4]>,
     /// For each formal, the argument matched to it, if the call passes one.
     matched: SmallVec<[Option<usize>; 4]>,
+    /// The values [`gather`] read, with the promises at `positions` in place of theirs.
+    arguments: SmallVec<[Sexp; 4]>,
+    /// What reading the other arguments ahead read.
+    ahead: ReadAhead,
+}
+
+/// The values of a call's arguments once [`force_read_first`] has forced the promises `unread`
+/// holds. Each argument promise forced by then, in the order the body reads them, gives its value,
+/// and every other argument keeps the value [`gather`] read ahead, which is what gathering them
+/// again would give unless forcing rebound a variable one was read from or forced a promise one
+/// read to another value. `Some(None)` asks for that new gather, and `None` declines the call, as
+/// when forcing stopped before one of the promises.
+unsafe fn resume(mut unread: Unread) -> Option<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>> {
+    let mut forced = 0u64;
+    for &(position, index, promise) in &unread.promised {
+        let value = promise.car();
+        if value == values::unbound() {
+            if unread.positions.contains(&position) {
+                return None;
+            }
+            continue;
+        }
+        if position >= 64 {
+            return Some(None);
+        }
+        forced |= 1 << position;
+        *unread.arguments.get_mut(index as usize)? = value;
+    }
+    let ahead = &mut unread.ahead;
+    ahead
+        .promises
+        .retain(|&mut (_, _, position)| position >= 64 || forced & 1 << position == 0);
+    ahead
+        .watches
+        .retain(|watch| watch.param >= 64 || forced & 1 << watch.param == 0);
+    // A left-out default was computed before forcing, from variables no watch covers.
+    let stale = ahead.fixed != 0
+        || ahead.watches.iter().any(|watch| {
+            let now = match watch.variable {
+                Watched::Variable { symbol, env } => peek_variable(symbol, env),
+                Watched::Reference(reference) => reference_variable(reference),
+            };
+            now != Some(watch.bound)
+        })
+        || ahead.promises.iter().any(|&(promise, value, _)| {
+            promise.car() != values::unbound() && promise.car() != value
+        });
+    Some((!stale).then_some((unread.arguments, unread.ahead)))
 }
 
 /// The arguments a native call passes, as values with no promise left, unless an argument does
@@ -2999,14 +3068,14 @@ pub(crate) unsafe fn gather(function: Sexp, args: &[interp::builtins::Arg]) -> G
     match gather_values(function, args) {
         Ok(Some((arguments, ahead))) => Gathered::Values(arguments, ahead),
         Ok(None) => Gathered::Declined,
-        Err(unread) => Gathered::Unread(unread),
+        Err(unread) => Gathered::Unread(*unread),
     }
 }
 
 unsafe fn gather_values(
     function: Sexp,
     args: &[interp::builtins::Arg],
-) -> Result<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>, Unread> {
+) -> Result<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>, Box<Unread>> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         annotations::decline(|| String::from("it is being debugged or traced"));
         return Ok(None);
@@ -3060,6 +3129,7 @@ unsafe fn gather_values(
     let mut ahead = ReadAhead::default();
     // The positions of promises only forcing computes, which `arguments` holds as the promise.
     let mut unread: SmallVec<[u32; 2]> = SmallVec::new();
+    let mut promised: SmallVec<[(u32, u32, Sexp); 4]> = SmallVec::new();
     // The formals, with their positions, left out since the last value `arguments` holds, whose
     // defaults the typed core computes in the function's own code.
     let mut left_out: SmallVec<[(usize, Sexp); 4]> = SmallVec::new();
@@ -3085,10 +3155,12 @@ unsafe fn gather_values(
                             return Ok(None);
                         }
                         unread.push(position as u32);
+                        promised.push((position as u32, arguments.len() as u32, arg.value));
                         arguments.push(arg.value);
                         formal = formal.cdr();
                         continue;
                     };
+                    promised.push((position as u32, arguments.len() as u32, arg.value));
                     value
                 } else if arg.value == values::missing_arg() {
                     annotations::decline(|| format!("argument {} is empty", item + 1));
@@ -3163,10 +3235,13 @@ unsafe fn gather_values(
     if unread.is_empty() {
         Ok(Some((arguments, ahead)))
     } else {
-        Err(Unread {
+        Err(Box::new(Unread {
             positions: unread,
+            promised,
             matched,
-        })
+            arguments,
+            ahead,
+        }))
     }
 }
 
@@ -3639,7 +3714,8 @@ const MAX_PURE_DEPTH: usize = 8;
 /// The value `expression` has in `env` when evaluating it can run no R code, signal no
 /// condition and change nothing: a constant, a variable bound to a value or a forced promise,
 /// `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, `c()` of such
-/// numbers, `+`, `-` and `*` of `I64`s, and a list, record, tuple or tag literal of such values,
+/// numbers, `as.double`, `as.numeric` and `as.integer` of one such number, `+`, `-` and `*` of
+/// `I64`s, and a list, record, tuple or tag literal of such values,
 /// each named by its base function. A typed closure's call is not read ahead,
 /// although its native code changes nothing, because it may not finish, and an argument the
 /// callee never forces must not run. Evaluating such an argument before the call
@@ -3803,6 +3879,22 @@ unsafe fn pure_value(
             }
             .ok()?
         }
+        ("as.double" | "as.numeric", &[operand]) if operand.length() == 1 => {
+            match number_of(operand) {
+                Number::Double(_) => return Some(operand),
+                number => values::scalar_real(number.double()).ok()?,
+            }
+        }
+        // R converts a double out of the integer range to `NA` with a warning, which tier 0 gives.
+        ("as.integer", &[operand]) if operand.length() == 1 => match number_of(operand) {
+            Number::Integer(_) if operand.kind() == SexpType::Integer => return Some(operand),
+            Number::Integer(x) => values::scalar_integer(x).ok()?,
+            Number::Double(x) if x.is_nan() => values::scalar_integer(NA_INTEGER).ok()?,
+            Number::Double(x) if x > -2_147_483_648.0 && x < 2_147_483_648.0 => {
+                values::scalar_integer(x as i32).ok()?
+            }
+            Number::Double(_) => return None,
+        },
         ("+" | "-" | "*" | "/", &[left, right]) if left.length() == 1 && right.length() == 1 => {
             match (number_of(left), number_of(right)) {
                 (Number::Integer(x), Number::Integer(y)) if name != "/" => {
