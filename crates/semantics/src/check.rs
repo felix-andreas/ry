@@ -15122,8 +15122,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let errors_before = self.errors.len();
         let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
         self.call_first_var = enclosing_call_first_var;
-        self.table.fold_targets = enclosing_fold_targets;
         let result = self.promote_folded(fold_mark, result);
+        self.table.fold_targets = enclosing_fold_targets;
         // A call its callee refuses can leave the callee's result variables unbound, and
         // printing one would show a bare `T`. A result the declaration fixes is kept.
         if self.errors.len() > errors_before {

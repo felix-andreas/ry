@@ -1464,12 +1464,21 @@ impl<'db> InferenceTable<'db> {
 
     /// Settles a folded target the call bound to a concrete type as what the fold returns from
     /// it (`integer` gives `double`), so the callback reads its accumulator as the later
-    /// iterations see it. A generic or class type keeps its binding.
+    /// iterations see it. A generic or class type keeps its binding, and so does a target
+    /// that shares its binding with another variable of the callee, which never folded.
     pub fn settle_folded(&mut self, db: &'db dyn Db, target: InferenceVar) {
         let var = self.find(target);
         let Entry::Bound { ty, widening } = *self.entry(var) else {
             return;
         };
+        if self
+            .fold_targets
+            .others
+            .iter()
+            .any(|&other| self.find(other) == var)
+        {
+            return;
+        }
         let bound = self.resolve(db, ty);
         if contains_inference_var(db, bound) {
             return;

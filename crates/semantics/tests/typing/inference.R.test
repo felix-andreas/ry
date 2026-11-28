@@ -715,6 +715,8 @@ both <- function<A, B>(a: A, b: B, k: fn(A) -> integer, f: fn(A, integer) -> A, 
 z <- function(init) both(init, init, function(v) 1L, function(acc, x) acc * 2, function(acc, x) acc)
 named <- function<A>(f: fn(acc: A, x: integer) -> A, a: A) -> A f(a, 1L)
 zz <- function(init) named(function(acc, x) acc * 2, init)
+later <- function<A, B>(f: fn(A, integer) -> A, a: A, b: B, c: B) -> B b
+zzz <- function(init) later(function(acc, x) acc * 2, init, init, 1L)
 #++++
 doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
@@ -766,6 +768,8 @@ both: <A, B> fn(a: A, b: B, k: fn(A) -> integer, f: fn(A, integer) -> A, g: fn(B
 z: fn(init: double) -> double
 named: <A> fn(f: fn(acc: A, x: integer) -> A, a: A) -> A
 zz: <T: arithmetic or number> fn(init: T) -> Promoted<T>
+later: <A, B> fn(f: fn(A, integer) -> A, a: A, b: B, c: B) -> B
+zzz: fn(init: integer) -> integer
 713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 896..901 warning[unused] `total` is assigned but never used
 1012..1017 warning[unused] `total` is assigned but never used
