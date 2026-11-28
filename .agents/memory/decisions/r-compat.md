@@ -283,7 +283,7 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
   `crates/interp/src/conditions.rs`).
 - **Compiled closure calls pass constant arguments as values**, not promises (GNU R's
   `PUSHCONSTARG`); rlang's `env_dot_type` tells them apart. `compiler::cmpfun` compiles at once
-  (`bcClose`, `eval::compiled_args_into`).
+  (`bcClose`, `eval::collect_arguments::<COMPILED>`).
 - **`dyn.load` refuses GNU R's `tcltk.so`**: GNU R's base package objects read `SEXPREC` fields
   directly and crash on ry's heap; the others are built into libR (`builtin_libraries.rs`).
   The refusal says "Tcl/Tk support is not available on this system", which sessioninfo's

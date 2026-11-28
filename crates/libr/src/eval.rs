@@ -263,7 +263,8 @@ impl Evaluator for Interpreter {
         } else {
             interp::eval::eval(function, env)?
         };
-        let args = interp::eval::promise_args(call.cdr(), env)?;
+        let mut args = interp::eval::Args::new();
+        interp::eval::promise_args_into(call.cdr(), env, &mut args)?;
         for arg in args.iter().take(count.max(0) as usize) {
             if arg.value.kind() == SexpType::Promise {
                 interp::eval::force_promise(arg.value)?;

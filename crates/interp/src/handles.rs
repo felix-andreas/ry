@@ -3456,35 +3456,6 @@ pub fn evaluate_arguments<'s>(
     Ok(())
 }
 
-/// The argument cells `cells` of a closure call from `environment` as the closure receives
-/// them, with `...` expanded: a promise of each expression, or with `eager`, the value of each
-/// constant and variable, which only a callee that cannot tell the two apart may receive.
-pub fn closure_arguments<'s>(
-    context: &mut Cx<'s>,
-    cells: Local<'s>,
-    environment: Local<'s, Environment>,
-    eager: bool,
-) -> R<SmallVec<[Tagged<'s>; 8]>> {
-    // SAFETY: the cells and the environment are rooted, a promise allocates and a variable's
-    // read may force one, which `&mut Cx` permits, and the evaluator roots each argument it
-    // adds before the next allocation.
-    unsafe {
-        let mut raw = crate::eval::Args::new();
-        if eager {
-            crate::eval::eager_args_into(cells.raw(), environment.raw(), &mut raw)?;
-        } else {
-            crate::eval::promise_args_into(cells.raw(), environment.raw(), &mut raw)?;
-        }
-        Ok(raw
-            .iter()
-            .map(|argument| Tagged {
-                tag: Local::adopt(argument.tag),
-                value: rooted(context, argument.value),
-            })
-            .collect())
-    }
-}
-
 /// Whether calling the closure `function` can have no effect a caller could observe before
 /// its arguments are forced ([`crate::effects::effect_free`]).
 pub fn effect_free(_context: &mut Cx<'_>, function: Local<'_>) -> R<bool> {
@@ -4958,6 +4929,74 @@ pub fn promise<'s>(
     }
 }
 
+/// A promise of the expression that the rooted argument cell `cell` holds, to evaluate in
+/// `environment`, or for compiled code to run in it ([`crate::eval::compiled_promise`]). The cell
+/// keeps the expression alive, so the caller roots none of its own.
+pub fn head_promise<'s>(
+    _context: &mut Cx<'s>,
+    cell: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: the rooted cell holds the expression while the promise allocates, which `&mut Cx`
+    // permits and which rewrites no cell, and the allocation roots the promise in the context's
+    // scope.
+    unsafe {
+        let code = cell.raw().car();
+        let promise = if code.kind() == SexpType::Bytecode {
+            crate::eval::compiled_promise(code, environment.raw())?
+        } else {
+            crate::eval::make_promise(code, environment.raw())?
+        };
+        Ok(Local::adopt(promise))
+    }
+}
+
+/// A promise of `code` over the environment that [`crate::eval::pending_environment`] gave the
+/// slot frame at `owner`, as [`crate::eval::slot_promise`] makes it. The interpreter frame keeps
+/// the environment alive, so the caller roots none.
+pub fn pending_promise<'s>(
+    context: &mut Cx<'s>,
+    owner: usize,
+    code: Local<'_>,
+) -> R<Local<'s, Promise>> {
+    let Some(environment) = live_frame(context, owner).pending() else {
+        panic!("a slot frame lost the environment it was given");
+    };
+    let env = environment.raw();
+    // SAFETY: the interpreter frame, which every collection marks, holds the environment and the
+    // caller roots the code while the promise allocates, which `&mut Cx` permits. The allocation
+    // roots the promise in the context's scope.
+    unsafe {
+        let promise = if code.r_type() == SexpType::Bytecode {
+            crate::eval::compiled_promise(code.raw(), env)?
+        } else {
+            crate::eval::make_promise(code.raw(), env)?
+        };
+        Ok(Local::adopt(promise))
+    }
+}
+
+/// `value` as a handle of the context's scope, rooted unless it is a symbol or `NULL`, which the
+/// heap keeps for its whole life.
+#[inline(always)]
+pub fn root_unless_permanent<'s>(context: &Cx<'s>, value: Gc<'_>) -> Local<'s> {
+    if matches!(value.r_type(), SexpType::Symbol | SexpType::Nil) {
+        // SAFETY: every symbol is interned (`Rf_allocSExp` refuses to make one) and the symbol
+        // table keeps it, and `NULL` is a permanent root.
+        return unsafe { Local::adopt(value.raw()) };
+    }
+    context.root(value)
+}
+
+/// The arguments `args` as raw arguments, for a raw entry that takes them while the handles
+/// keep them alive.
+#[inline(always)]
+pub fn raw_arguments<'a>(args: &'a [Tagged<'_>]) -> &'a [Arg] {
+    // SAFETY: `Tagged` has `Arg`'s layout, and a raw argument is only read, by code whose
+    // contract asks its caller to keep each one alive, as the handles do.
+    unsafe { std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len()) }
+}
+
 /// Appends the tag and the expression of each argument cell of `call` to `cells`, `false` when
 /// it is no call. C code may link the cells with `LCONS`, which GNU R evaluates the same. The
 /// caller owns the buffer, so a list of many cells is never moved on return.
@@ -5731,6 +5770,45 @@ pub fn run_slot_frame<'s>(
             method_vars,
         )?;
         Ok(rooted(context, value))
+    }
+}
+
+/// Calls the closure of `closure_call` in a slot frame for a call whose plan `sources`
+/// ([`crate::eval::direct_sources`], which `bytecode::CallPlans` keeps per site with the
+/// closure's `shape`) matched its arguments to the formals already: the arguments go straight
+/// into the slots, with no matching and none of [`crate::eval::apply_closure_in`]'s checks,
+/// which the plan settled for the closure's formals and body. What can change between calls (a
+/// debugger, a move) sends the call down the generic path.
+pub fn call_with_plan<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &crate::eval::ClosureCall<'_, 's>,
+    shape: crate::eval::CallShape,
+    sources: &[i32],
+) -> R<Local<'s>> {
+    let function = closure_call.function.raw();
+    // SAFETY: the caller's scope holds the call, the closure, the arguments and the caller's
+    // environment, the frame holds them once pushed, and the body runs any R code, which
+    // `&mut Cx` permits. The frame `bind_plan` pushes is left before this returns, and the
+    // value is rooted before anything else runs.
+    unsafe {
+        let entered = crate::eval::bind_plan(
+            closure_call.call.raw(),
+            function,
+            shape,
+            sources,
+            raw_arguments(closure_call.args),
+            closure_call.sys_parent.raw(),
+        )?;
+        if entered.header == crate::NO_SLOTS {
+            return Ok(rooted(context, entered.value));
+        }
+        let result = crate::eval::on_large_stack(|| {
+            crate::bytecode::run_slots(function, entered.header as usize, shape.slots as usize)
+        });
+        Ok(rooted(
+            context,
+            crate::eval::leave(entered.depth as usize, result)?,
+        ))
     }
 }
 

@@ -1039,6 +1039,10 @@ pub(crate) fn resolve_subscript<'s>(
                     None => positions.push(UNMATCHED),
                 }
             }
+            // Reading never appends, and an empty collect is an out-of-line call.
+            if appended.is_empty() {
+                return Ok((positions, Vec::new()));
+            }
             let new_names = appended
                 .into_iter()
                 .map(|name| context.root(name))

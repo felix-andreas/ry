@@ -27,7 +27,7 @@ use {
     },
     heap::{
         activity::{self, Counter},
-        handle::{Cx, Gc, Symbol},
+        handle::{Chars, Cx, Gc, Symbol},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
@@ -801,12 +801,13 @@ unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<
 ///
 /// From `compiled` code, the arguments of a closure GNU R's compiler inlines (see
 /// [`NATIVE_ENTRIES`]) are forced here, in order, whatever code that runs, because compiled GNU
-/// R forces them in the caller before the builtin runs.
+/// R forces them in the caller before the builtin runs. `lookup`'s second argument says
+/// whether such a forcing has run, since its R code can give a slot caller an environment.
 pub unsafe fn native_entry_by_value(
     function: Sexp,
     arguments: Sexp,
     compiled: bool,
-    lookup: impl Fn(Sexp) -> Option<Sexp>,
+    lookup: impl Fn(Sexp, bool) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
     // The boundary-call recorder sees closure calls only where their frames start.
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
@@ -833,11 +834,13 @@ pub unsafe fn native_entry_by_value(
     let entry = registered(function);
     let forcing = compiled && !tagged && matches!(entry, Some(Entry::Whole { inlined: true, .. }));
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
+    // How many of `args` a forcing has rooted.
+    let mut rooted = 0;
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
         let value = if expression.kind() == SexpType::Symbol {
-            match lookup(expression) {
+            match lookup(expression, rooted > 0) {
                 Some(value)
                     if forcing
                         && value.kind() == SexpType::Promise
@@ -847,7 +850,7 @@ pub unsafe fn native_entry_by_value(
                     // far more cheaply than an evaluation.
                     match eval::settled_without_code(value)? {
                         Some(value) => value,
-                        None => eval::force_promise(value)?,
+                        None => forced_keeping(&args[rooted..], value, &mut rooted)?,
                     }
                 }
                 // Otherwise the binding goes through as it is: each entry resolves only the
@@ -866,6 +869,26 @@ pub unsafe fn native_entry_by_value(
         cell = cell.cdr();
     }
     enter(function, entry, &args)
+}
+
+/// The value of `promise`, forced after rooting `gathered`, the arguments read before it that
+/// no forcing has rooted yet, and rooted itself. The R code a forcing runs can rebind the
+/// variables those values came from (and the promise's own), which would leave them reachable
+/// only from the argument list. Only tier 0 forces here, and the instruction releases the
+/// handle stack after the call.
+#[inline(never)]
+unsafe fn forced_keeping(gathered: &[Arg], promise: Sexp, rooted: &mut usize) -> R<Sexp> {
+    handles::in_caller_scope(|context| {
+        for arg in gathered {
+            let value: Gc<'_> = Gc::adopt(arg.value);
+            context.root(value);
+        }
+        *rooted += gathered.len() + 1;
+        let promise: Gc<'_> = Gc::adopt(promise);
+        let promise = context.root(promise);
+        let value: Gc<'_> = Gc::adopt(eval::force_promise(promise.raw())?);
+        Ok(context.root(value).raw())
+    })
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
@@ -1679,8 +1702,8 @@ unsafe fn is_plain_atomic(value: Sexp) -> bool {
         && values::get_attr(value, symbols().dim) == nil()
 }
 
-unsafe fn is_ascii(text: Sexp) -> bool {
-    text != values::na_string() && text.bytes().is_ascii()
+fn is_ascii(text: Gc<'_, Chars>) -> bool {
+    !handles::is_na(text) && text.bytes().is_ascii()
 }
 
 /// `match.arg(arg, choices, several.ok = FALSE)` for one string, or for `arg` left at the
@@ -1725,14 +1748,14 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     let target = arg.element(0);
-    if !is_ascii(target) || target.bytes().is_empty() {
+    if !is_ascii(Gc::adopt(target)) || target.bytes().is_empty() {
         return decline();
     }
     let count = length(choices);
     let mut found = None;
     for index in 0..count {
         let choice = choices.element(index);
-        if !is_ascii(choice) {
+        if !is_ascii(Gc::adopt(choice)) {
             return decline();
         }
         if choice.bytes() == target.bytes() {

@@ -21,9 +21,11 @@
 use {
     crate::{
         bytecode::{self, CacheSlot, SUMMARY},
-        eval, interp,
+        eval,
+        handles::{self, Cx, Environment, Gc, Promise, Symbol},
+        interp,
         unwind::R,
-        values::{self, missing_arg, nil, symbol_name, unbound},
+        values::{self, nil, symbol_name, unbound},
     },
     heap::object::{Sexp, SexpType, gp},
     rustc_hash::FxHashSet,
@@ -479,16 +481,28 @@ unsafe fn resolve(
 /// argument needs its promise after all: the symbol is unbound, missing or an active binding,
 /// whose errors and calls have to happen when the callee forces it.
 pub unsafe fn eager_argument(symbol: Sexp, env: Sexp) -> Option<Sexp> {
-    let cell = eval::find_cell(symbol, env)?;
-    if cell.has_gp(gp::ACTIVE_BINDING) {
+    handles::reading(|context| {
+        eager_value(context, Gc::adopt(symbol), Gc::adopt(env)).map(|value| value.raw())
+    })
+}
+
+/// [`eager_argument`] for code on the handle types.
+#[inline]
+pub fn eager_value<'a>(
+    context: &'a Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'_, Environment>,
+) -> Option<Gc<'a>> {
+    let binding = eval::visible_binding(context, symbol, environment)?;
+    if binding.is_active() {
         return None;
     }
-    let value = cell.cdr();
-    if value == missing_arg() || value == unbound() {
+    let value = binding.content();
+    if handles::is_missing_argument(value) || handles::is_unbound(value) {
         return None;
     }
-    if value.kind() == SexpType::Promise && value.car() != unbound() {
-        return Some(value.car());
+    match value.downcast::<Promise>() {
+        Some(promise) if !handles::is_unbound(promise.result()) => Some(promise.result()),
+        _ => Some(value),
     }
-    Some(value)
 }
