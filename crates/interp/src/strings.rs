@@ -800,8 +800,7 @@ fn do_sprintf<'s>(context: &mut Cx<'s>, call: &Args<'_, 's>) -> R<Local<'s>> {
         return Err(error("only 100 arguments are allowed"));
     }
     refuse_bytes(context, formats)?;
-    let mut arguments: SmallVec<[FormatArgument<'s>; 8]> =
-        SmallVec::with_capacity(call.len().saturating_sub(1));
+    let mut arguments: SmallVec<[FormatArgument<'s>; 8]> = SmallVec::new();
     for position in 1..call.len() {
         if let Some(text) = handles::dense::<Str>(context, call.value(position))? {
             refuse_bytes(context, text)?;
@@ -846,8 +845,8 @@ fn format_call<'s>(
     format_text: &mut String,
 ) -> R<Local<'s>> {
     let format_count = formats.len();
-    // One bit per argument, set once a conversion reads it.
-    let mut used: SmallVec<[u64; 2]> = smallvec![0; arguments.len().div_ceil(64)];
+    // One bit per argument, set once a conversion reads it: `do_sprintf` refuses more than 100.
+    let mut used = [0u64; 2];
     // An `NA` format is the text "NA", as in GNU R. The texts are copied out of the vector, one
     // after another, because the conversions below run R code, which a borrow of it could not
     // outlive; format `i` is `format_text[text_ends[i - 1]..text_ends[i]]`.
