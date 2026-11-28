@@ -3051,14 +3051,14 @@ pub(crate) unsafe fn gather(function: Sexp, args: &[interp::builtins::Arg]) -> G
     match gather_values(function, args) {
         Ok(Some((arguments, ahead))) => Gathered::Values(arguments, ahead),
         Ok(None) => Gathered::Declined,
-        Err(unread) => Gathered::Unread(unread),
+        Err(unread) => Gathered::Unread(*unread),
     }
 }
 
 unsafe fn gather_values(
     function: Sexp,
     args: &[interp::builtins::Arg],
-) -> Result<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>, Unread> {
+) -> Result<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>, Box<Unread>> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         annotations::decline(|| String::from("it is being debugged or traced"));
         return Ok(None);
@@ -3218,13 +3218,13 @@ unsafe fn gather_values(
     if unread.is_empty() {
         Ok(Some((arguments, ahead)))
     } else {
-        Err(Unread {
+        Err(Box::new(Unread {
             positions: unread,
             promised,
             matched,
             arguments,
             ahead,
-        })
+        }))
     }
 }
 
