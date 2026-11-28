@@ -648,7 +648,7 @@ r2: Unknown
 # a ry number, a `double` or a class such as `matrix` comes back as itself, an `integer` init
 # as the `double` R's arithmetic makes of it, and a `character` one is rejected. The init itself
 # keeps its own type, so a function that also returns or computes on it sees `U`. An init
-# passed before the callback folds the same way.
+# passed before the callback folds the same way when no other type parameter shares its type.
 doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 a <- doubled([1i64], 1i64)
 b <- doubled([1i64], 1L)
@@ -773,10 +773,10 @@ named: <A> fn(f: fn(acc: A, x: integer) -> A, a: A) -> A
 zz: <T: arithmetic or number> fn(init: T) -> Promoted<T>
 later: <A, B> fn(f: fn(A, integer) -> A, a: A, b: B, c: B) -> B
 zzz: fn(init: integer) -> integer
-770..773 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
-953..958 warning[unused] `total` is assigned but never used
-1069..1074 warning[unused] `total` is assigned but never used
-1153..1163 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
-1191..1196 warning[unused] `total` is assigned but never used
-1543..1567 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
-2908..2925 error[type-mismatch] expected `fn(U) -> U`, found `fn(v: T) -> Promoted<T>`
+815..818 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
+998..1003 warning[unused] `total` is assigned but never used
+1114..1119 warning[unused] `total` is assigned but never used
+1198..1208 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
+1236..1241 warning[unused] `total` is assigned but never used
+1588..1612 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
+2953..2970 error[type-mismatch] expected `fn(U) -> U`, found `fn(v: T) -> Promoted<T>`
