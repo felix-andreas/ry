@@ -192,6 +192,25 @@ pub struct Compiled {
     pub cells: SmallVec<[(Key, Type); 1]>,
     /// Whether R returns the value invisibly ([`lower::returns_invisibly`]).
     pub invisible: bool,
+    /// When [`still_resolves`] last proved `speculations`.
+    pub proof: Proof,
+}
+
+/// The binding epoch and the lookup stamps of the speculated symbols at which [`still_resolves`]
+/// last walked every speculation. Every change that could alter a lookup it walked moves the
+/// epoch and the symbol's stamp, once the symbol and the cell it found are watched.
+pub struct Proof {
+    epoch: Cell<Option<u64>>,
+    stamps: Box<[Cell<u64>]>,
+}
+
+impl Proof {
+    pub fn new(speculations: usize) -> Self {
+        Proof {
+            epoch: Cell::new(None),
+            stamps: (0..speculations).map(|_| Cell::new(0)).collect(),
+        }
+    }
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -859,24 +878,62 @@ fn cell(key: &Key, result: Type) -> &'static Cell<usize> {
 
 /// Whether every function lookup `compiled` assumes still finds the same function. A lookup
 /// that found a definition its script had not run yet assumed no binding, only the function
-/// ([`ahead::defined_later`]).
+/// ([`ahead::defined_later`]). Once a walk has proved them, an unchanged [`Proof`] proves them
+/// again without walking.
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
-    let functions = if ahead::compiling_ahead() {
+    let heap = interp::heap();
+    let epoch = heap.binding_epoch();
+    let proof = &compiled.proof;
+    let ahead = ahead::compiling_ahead();
+    if !ahead && let Some(proven) = proof.epoch.get() {
+        // The epoch moves on any binding outside a function frame, which a package load or a
+        // test suite makes all the time, so most moves concern names no speculation uses.
+        if proven == epoch
+            || compiled
+                .speculations
+                .iter()
+                .zip(&proof.stamps)
+                .all(|(assumed, stamp)| heap.lookup_stamp(assumed.symbol) == stamp.get())
+        {
+            proof.epoch.set(Some(epoch));
+            return true;
+        }
+    }
+    let functions = if ahead {
         lower::find_function
     } else {
         lower::resolve_function
     };
-    compiled.speculations.iter().all(|assumed| {
+    let mut found = SmallVec::<[Sexp; 8]>::new();
+    for assumed in &compiled.speculations {
         let resolve = if interp::values::is_function(assumed.function) {
             functions
         } else {
             lower::resolve_value
         };
-        resolve(assumed.symbol, assumed.env).is_some_and(|now| {
-            (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
-                && now.function == assumed.function
-        })
-    })
+        match resolve(assumed.symbol, assumed.env) {
+            Some(now)
+                if (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
+                    && now.function == assumed.function =>
+            {
+                found.push(now.cell)
+            }
+            _ => return false,
+        }
+    }
+    // The cells this walk found are what the stamps then vouch for, also for a speculation made
+    // ahead of time before its function was defined, which has no cell of its own.
+    if !ahead && found.iter().all(|&cell| cell != rvalues::nil()) {
+        for ((assumed, stamp), &cell) in compiled.speculations.iter().zip(&proof.stamps).zip(&found)
+        {
+            assumed.symbol.set_gp_bits(gp::WATCHED, true);
+            cell.set_gp_bits(gp::WATCHED, true);
+            heap.observe_environment(assumed.env);
+            stamp.set(heap.lookup_stamp(assumed.symbol));
+        }
+        proof.epoch.set(Some(heap.binding_epoch()));
+    }
+    true
 }
 
 /// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
@@ -1067,6 +1124,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         code,
         params: SmallVec::from_slice(params),
         result: ir.result,
+        proof: Proof::new(speculations.len()),
         speculations,
         epoch,
         calls_r,

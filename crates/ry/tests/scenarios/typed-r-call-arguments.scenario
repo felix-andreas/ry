@@ -5,6 +5,7 @@
 # forcing error names the call, as the interpreter's does. A body that only reads `x` returns with
 # the visibility forcing `x` left, so `ident(invisible(1))` stays invisible. Forcing `a` rebinds
 # `h`, which `relay` calls with `b`, so the interpreter finds the new `h` before it forces `b`.
+# A `match` runs its scrutinee first, so `size(build(3))` forces `build(3)` at the entry too.
 
 requires ry-runtime
 
@@ -39,6 +40,15 @@ file calls.R
 | seen <- character()
 | print(relay({h <- loud; 1}, say("b", 4)))
 | print(paste(seen, collapse = " "))
+| type Shape = :Dot | :Bar(I64)
+| build <- function(n: I64) -> Shape if (n > 0) :Bar(n) else :Dot
+| size <- function(shape: Shape) -> I64 {
+|   match (shape) {
+|     :Dot => 0
+|     :Bar(n) => n * 2
+|   }
+| }
+| print(size(build(3)))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry calls.R
@@ -53,3 +63,5 @@ expect stdout "[1] FALSE"
 expect stdout "[1] 401"
 expect stdout "[1] \"loud b\""
 expect stderr "typed: `relay` runs in the interpreter: computing an argument changed which function `h` names, so the interpreter runs the call"
+expect stdout "6i64"
+expect stderr lacks "`size` runs in the interpreter"

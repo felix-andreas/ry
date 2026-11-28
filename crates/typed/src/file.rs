@@ -17,7 +17,7 @@
 
 use {
     crate::{
-        COMPILED, Compiled, Key, Linker, Refusal, acts,
+        COMPILED, Compiled, Key, Linker, Proof, Refusal, acts,
         backend::{
             self, Callee, Code, Entry, Helper, Slot, Slots, declare, file_frees, helper_address,
             libcall_helper,
@@ -3010,6 +3010,7 @@ unsafe fn attach_inner(
         },
         params: mapped.params[index as usize].clone(),
         result: mapped.results[index as usize],
+        proof: Proof::new(speculations.len()),
         speculations,
         epoch,
         calls_r,

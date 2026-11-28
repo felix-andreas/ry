@@ -3356,12 +3356,14 @@ unsafe fn read_call(walk: &mut LeadingReads, call: Sexp, depth: usize) -> bool {
     if head == symbols.paren {
         return args.kind() == SexpType::Pairlist && read_expression(walk, args.car(), depth + 1);
     }
-    // Each of these runs its first operand and then does something the walk does not follow.
-    // `return(x)` returns with the visibility forcing `x` left, so a bare formal there is no
-    // read the entry may take over.
+    // Each of these runs its first operand and then does something the walk does not follow
+    // (`.ry_match` is a `match`, which runs its scrutinee before any arm). `return(x)` returns
+    // with the visibility forcing `x` left, so a bare formal there is no read the entry may take
+    // over.
     if [
         symbols.return_,
         symbols.if_,
+        symbols.ry_match,
         symbols.and2,
         symbols.or2,
         symbols.assign,
