@@ -533,6 +533,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The frame machinery takes handles, and an allocation that cannot collect runs under `&Cx`
 - A frame's exit and a heap frame's binding take handles; `enter` and `leave` stay `unsafe fn`
 - Closure application takes handles, and the raw entries share its prepare step
+- A closure call's arguments are collected in one walk on handles, chosen by a mode
 
 ## C API, R home and packages
 

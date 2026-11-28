@@ -19,7 +19,7 @@
 144 crates/interp/src/base_fast_paths.rs
 17 crates/interp/src/builtin_libraries.rs
 20 crates/interp/src/builtins.rs
-428 crates/interp/src/bytecode.rs
+427 crates/interp/src/bytecode.rs
 2 crates/interp/src/callgrind.rs
 25 crates/interp/src/capture.rs
 22 crates/interp/src/code_image.rs
@@ -36,12 +36,12 @@
 11 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
 127 crates/interp/src/envir.rs
-169 crates/interp/src/eval.rs
+162 crates/interp/src/eval.rs
 10 crates/interp/src/extensions.rs
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-281 crates/interp/src/handles.rs
+284 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 24 crates/interp/src/interp.rs

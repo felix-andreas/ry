@@ -630,7 +630,12 @@ one `reserve` with the `_uncollected` allocators); the forcing of a typed call's
 `pop_frame`); and closure application (`apply_closure_in`): the native entry and the native tier
 it tries first, the checks that choose a slot frame, and the general path that runs a heap frame
 or a frame that must be run whole (`run_heap_frame`, `run_general`, `run_closure_body`), whose raw
-names (`apply_closure`, `run_on_heap_frame`, `run_frame_general`) are thin entries. A dispatched
+names (`apply_closure`, `run_on_heap_frame`, `run_frame_general`) are thin entries; and the
+collection of a closure call's arguments (`eval::collect_arguments`, one walk over the argument
+cells whose mode chooses promises, eager values or argument references, and tier 0's
+`collect_slot_arguments` over a slot frame), with the closure arms of the evaluator's call,
+`forceAndCall`, `lapply`'s forced call and tier 0's generic call, whose planned calls run through
+`handles::call_with_plan`. A dispatched
 call's method variables cross into handles as `handles::MethodVariables`, a view over the
 dispatcher's pairs that every layer down to the frame push takes, so they are never copied.
 Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark

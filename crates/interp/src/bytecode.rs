@@ -53,9 +53,9 @@ use {
         envir::namespace_binding,
         eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
-            self, AssignmentCopy, Atomic, Binding, Chars, Cx, Environment, Gc, Held, Integer,
-            Language, List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol,
-            Vector, safe,
+            self, AssignmentCopy, Atomic, Binding, Bytecode, Chars, Closure, Cx, Environment, Gc,
+            Held, Integer, Language, List, Local, Logical, Names, Owned, Pairlist, Pointer,
+            Promise, Real, Str, Symbol, Tagged, Vector, safe,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -10795,7 +10795,6 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         {
             return Ok(Flow::Goto(next));
         }
-        let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,
         // `missing`), and no handler can run R code in between.
@@ -10837,105 +10836,142 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             );
         }
         let references = (*state.interp).references_used;
-        // From a slot frame, a call whose arguments need no promise over the frame leaves it
-        // without an environment, and the callee finds its caller as the frame below its own.
-        let sys_parent = if state.in_slots()
-            && slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?
-        {
-            nil()
-        } else {
-            args.clear();
-            let env = state.env(Reify::Site(Site::GenericCallArguments))?;
-            if eager {
-                eval::eager_args_into(arguments, env, &mut args)?;
-            } else if plan.is_some() {
-                eval::referenced_args_into(arguments, env, &mut args)?;
-            } else {
-                eval::compiled_args_into(arguments, env, &mut args)?;
-            }
-            env
-        };
-        // The sources are read from the table only once the arguments are collected, and
-        // binding them grows no table.
-        let planned = match plan {
-            Some(id) if per_call => {
-                spread_plan(state, instruction, id, function, call, arguments, &args)?
-            }
-            Some(id) => (*state.interp).bytecode.call_plans.current(
-                id,
-                generation,
-                state.constants,
-                instruction.at,
-                function,
-            ),
-            None => None,
-        };
-        let result = match plan {
-            Some(_) => match planned {
-                Some((shape, sources)) => {
-                    if in_place(state, function) {
-                        return Ok(Flow::Goto(
-                            match eval::bind_plan(call, function, shape, sources, &args, sys_parent)
-                            {
-                                Ok(entered) if entered.header == crate::NO_SLOTS => {
-                                    after_call(state, instruction, references, entered.value)
-                                }
-                                Ok(entered) => enter_in_place(
-                                    state,
-                                    instruction.at,
-                                    function,
-                                    entered,
-                                    shape.slots as usize,
-                                    references,
-                                ),
-                                Err(unwind) => {
-                                    if (*state.interp).references_used != references {
-                                        eval::release_references(references);
-                                    }
-                                    return Err(unwind);
-                                }
-                            },
-                        ));
-                    }
-                    eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
-                }
-                None if per_call => eval::call_matching(call, function, &args, sys_parent),
-                None => match eval::direct_sources(function, call)? {
-                    Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
-                        eval::call_with_plan(call, function, shape, &sources, &args, sys_parent)
-                    }
-                    _ => eval::call_matching(call, function, &args, sys_parent),
-                },
-            },
-            None if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) => {
-                return Ok(Flow::Goto(
-                    match eval::apply_closure_entering(call, function, &args, sys_parent, None) {
-                        Ok(entered) if entered.header == crate::NO_SLOTS => {
-                            after_call(state, instruction, references, entered.value)
-                        }
-                        Ok(entered) => enter_in_place(
-                            state,
-                            instruction.at,
-                            function,
-                            entered,
-                            slot_count(function.cdr()),
-                            references,
-                        ),
-                        Err(unwind) => {
-                            if (*state.interp).references_used != references {
-                                eval::release_references(references);
-                            }
-                            return Err(unwind);
-                        }
-                    },
+        // The frame holds the closure, the call and its compiled arguments for the instruction,
+        // and the instruction releases the handle stack after it.
+        return handles::in_caller_scope(|context| {
+            let (call_local, cells) = (
+                handles::held(context, call),
+                handles::held(context, arguments),
+            );
+            let Some(closure) = handles::held(context, function).downcast::<Closure>() else {
+                return Err(error(
+                    "internal error: a closure call's function is not a closure",
                 ));
+            };
+            let mut args = eval::CallArgs::new();
+            // From a slot frame, a call whose arguments need no promise over the frame leaves
+            // it without an environment, and the callee finds its caller as the frame below its
+            // own.
+            let sys_parent = if state.in_slots()
+                && collect_slot_arguments(
+                    context,
+                    RunningFrame { state: &*state },
+                    cells,
+                    eager,
+                    plan.is_some(),
+                    &mut args,
+                )? {
+                handles::null()
+            } else {
+                args.clear();
+                let env = state.env(Reify::Site(Site::GenericCallArguments))?;
+                // The frame's header register holds the environment from here on.
+                let environment = Local::<Environment>::adopt(env);
+                if eager {
+                    eval::collect_arguments::<{ eval::EAGER }>(
+                        context,
+                        cells,
+                        environment,
+                        &mut args,
+                    )?;
+                } else if plan.is_some() {
+                    eval::collect_arguments::<{ eval::REFERENCES }>(
+                        context,
+                        cells,
+                        environment,
+                        &mut args,
+                    )?;
+                } else {
+                    eval::collect_arguments::<{ eval::COMPILED }>(
+                        context,
+                        cells,
+                        environment,
+                        &mut args,
+                    )?;
+                }
+                environment.value()
+            };
+            let raw_args = handles::raw_arguments(&args);
+            // The sources are read from the table only once the arguments are collected, and
+            // binding them grows no table.
+            let planned = match plan {
+                Some(id) if per_call => {
+                    spread_plan(state, instruction, id, function, call, arguments, raw_args)?
+                }
+                Some(id) => (*state.interp).bytecode.call_plans.current(
+                    id,
+                    generation,
+                    state.constants,
+                    instruction.at,
+                    function,
+                ),
+                None => None,
+            };
+            let entered = match (plan, planned) {
+                (Some(_), Some((shape, sources))) if in_place(state, function) => Some((
+                    eval::bind_plan(call, function, shape, sources, raw_args, sys_parent.raw()),
+                    shape.slots as usize,
+                )),
+                (None, _)
+                    if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) =>
+                {
+                    Some((
+                        eval::apply_closure_entering(
+                            call,
+                            function,
+                            raw_args,
+                            sys_parent.raw(),
+                            None,
+                        ),
+                        slot_count(function.cdr()),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some((entered, slots)) = entered {
+                return Ok(Flow::Goto(match entered {
+                    Ok(entered) if entered.header == crate::NO_SLOTS => {
+                        after_call(state, instruction, references, entered.value)
+                    }
+                    Ok(entered) => {
+                        enter_in_place(state, instruction.at, function, entered, slots, references)
+                    }
+                    Err(unwind) => {
+                        if (*state.interp).references_used != references {
+                            eval::return_references(context, references);
+                        }
+                        return Err(unwind);
+                    }
+                }));
             }
-            None => eval::apply_closure(call, function, &args, sys_parent, None),
-        };
-        if (*state.interp).references_used != references {
-            eval::release_references(references);
-        }
-        result?
+            let closure_call = eval::ClosureCall {
+                call: call_local,
+                function: closure,
+                args: &args,
+                sys_parent,
+                supplied: None,
+            };
+            let result = match (plan, planned) {
+                (Some(_), Some((shape, sources))) => {
+                    handles::call_with_plan(context, &closure_call, shape, sources)
+                }
+                (Some(_), None) if per_call => eval::call_matching(context, &closure_call),
+                (Some(_), None) => match eval::call_plan(context, closure.value(), call_local)? {
+                    Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
+                        handles::call_with_plan(context, &closure_call, shape, &sources)
+                    }
+                    _ => eval::call_matching(context, &closure_call),
+                },
+                (None, _) => eval::apply_closure_in(context, &closure_call),
+            };
+            if (*state.interp).references_used != references {
+                eval::return_references(context, references);
+            }
+            let value = result?.raw();
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            Ok(Flow::Next)
+        });
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
     {
@@ -12312,13 +12348,19 @@ impl<'f> RunningFrame<'f, '_, '_> {
     }
 
     /// The slot of the variable `symbol`.
-    fn slot_named(self, symbol: Local<'_, Symbol>) -> Option<Slot<'f>> {
+    fn slot_named(self, symbol: impl Pointer<Symbol>) -> Option<Slot<'f>> {
         // SAFETY: as for `slot_at`.
         let register = unsafe { slot_named(self.state, symbol.raw()) }?;
         Some(Slot {
             register,
             frame: PhantomData,
         })
+    }
+
+    /// The position of the variable `symbol` in the frame's table of slot names.
+    fn slot_position(self, symbol: impl Pointer<Symbol>) -> Option<usize> {
+        // SAFETY: the activation's code holds its slot table.
+        unsafe { slot_index(self.state, symbol.raw()) }
     }
 
     /// What `slot` holds: a value, a promise of an argument, or nothing (`unbound`).
@@ -12669,73 +12711,96 @@ unsafe fn slot_builtin_args(
     Ok(())
 }
 
-/// The arguments of a closure call made from a slot frame that has no environment: a constant
-/// as itself, for an `eager` call (see [`eval::eager_args_into`]) a variable as its value, a
-/// name or compiled code as a promise over the frame's slots ([`eval::slot_promise`]), and
-/// `...` as what it collected. With `references`, for a callee that takes its arguments straight into slots,
-/// a name becomes an argument reference ([`eval::argument_reference`]) and compiled code a code
-/// reference ([`eval::code_reference`]) instead, which need no allocation and no environment.
-/// `false`, with `args` cleared, when an argument needs the frame's environment itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
-/// slot.
-unsafe fn slot_promises_into(
-    state: &Activation<'_, '_>,
-    arguments: Sexp,
+/// [`eval::collect_arguments`] for a call from the running slot `frame`, without giving the
+/// frame an environment: a variable passes as an argument reference to its slot with
+/// `references` and as a promise over the frame ([`eval::frame_promise`]) without, compiled
+/// code likewise, and `...` passes on what the frame's `...` slot holds. With `eager`, a
+/// variable passes its value as [`effects::eager_value`] allows. `false`, collecting nothing,
+/// when an argument needs the frame's environment, which is rare: the references made go back
+/// to the pool.
+fn collect_slot_arguments<'s>(
+    context: &mut Cx<'s>,
+    frame: RunningFrame<'_, '_, '_>,
+    arguments: Local<'s>,
     eager: bool,
     references: bool,
-    args: &mut eval::Args,
+    args: &mut eval::CallArgs<'s>,
 ) -> R<bool> {
     args.clear();
-    let owner = (*state.interp).slot_owner as usize;
-    let mark = (*state.interp).references_used;
-    let missing = missing_arg();
-    // One pass builds the arguments and gives up at the first one that needs the frame's
-    // environment, which is rare, undoing what it made: references go back to the pool.
-    let mut cell = arguments;
-    while cell.kind() == SexpType::Pairlist {
-        let expression = cell.car();
-        let value = match expression.kind() {
-            _ if expression == missing => Some(expression),
-            SexpType::Symbol if expression == symbols().dots => {
-                if slot_dots_into(state, references, args)? {
-                    cell = cell.cdr();
+    let owner = interp().slot_owner as usize;
+    let mark = interp().references_used;
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut cursor = arguments;
+    while cursor.r_type() == SexpType::Pairlist {
+        let Some((expression, tag, rest)) = handles::cell_fields(cursor.read(context)) else {
+            break;
+        };
+        let (expression, tag) = (
+            context.root(expression),
+            handles::argument_tag(context, tag),
+        );
+        let rest = context.root(rest);
+        let value = if handles::is_missing_argument(expression) {
+            Some(expression)
+        } else if let Some(symbol) = expression.downcast::<Symbol>() {
+            if symbol.read(context).is(dots) {
+                if collect_slot_dots(context, frame, references, args)? {
+                    cursor = rest;
                     continue;
                 }
                 None
+            } else if eval::dot_dot_position(symbol.read(context).name().bytes()).is_some() {
+                None
+            } else if let Some(value) = eager
+                .then(|| slot_eager_value(context, frame, symbol.read(context)))
+                .flatten()
+            {
+                Some(context.root(value))
+            } else if references {
+                let slot = frame
+                    .slot_position(symbol)
+                    .map_or(eval::NO_REFERENCE_SLOT, |position| position as u32);
+                let (context, reference) = eval::slot_reference(context, owner, slot, expression)?;
+                Some(context.root(reference).value())
+            } else {
+                Some(eval::frame_promise(context, owner, expression)?.value())
             }
-            SexpType::Symbol if eval::dot_dot_index(expression).is_some() => None,
-            SexpType::Symbol => Some(
-                match eager.then(|| slot_eager_argument(state, expression)) {
-                    Some(Some(value)) => value,
-                    _ if references => {
-                        let slot = slot_index(state, expression)
-                            .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
-                        eval::argument_reference(owner, slot, expression)?
-                    }
-                    _ => eval::slot_promise(owner, expression)?,
-                },
-            ),
-            SexpType::Bytecode if expression.cdr().element(SLOTS) == nil() => None,
-            SexpType::Bytecode if references => Some(eval::code_reference(owner, expression)?),
-            // Code the compiler rejected (it defines a function, say) runs uncompiled over the
-            // pending environment, so the frame gets one only if the callee forces it.
-            SexpType::Bytecode | SexpType::Language => Some(eval::slot_promise(owner, expression)?),
-            SexpType::Promise => None,
-            _ => Some(expression),
+        } else {
+            match expression.r_type() {
+                SexpType::Bytecode if !slot_compiled(expression.read(context)) => None,
+                SexpType::Bytecode if references => {
+                    let (context, reference) =
+                        eval::compiled_reference(context, owner, expression)?;
+                    Some(context.root(reference).value())
+                }
+                // Code the compiler rejected (it defines a function, say) runs uncompiled over
+                // the pending environment, so the frame gets one only if the callee forces it.
+                SexpType::Bytecode | SexpType::Language => {
+                    Some(eval::frame_promise(context, owner, expression)?.value())
+                }
+                SexpType::Promise => None,
+                _ => Some(expression),
+            }
         };
         let Some(value) = value else {
-            if (*state.interp).references_used != mark {
-                eval::release_references(mark);
+            if interp().references_used != mark {
+                eval::return_references(context, mark);
             }
             args.clear();
             return Ok(false);
         };
-        args.push(Arg {
-            tag: cell.tag(),
-            value,
-        });
-        cell = cell.cdr();
+        args.push(Tagged { tag, value });
+        cursor = rest;
     }
     Ok(true)
+}
+
+/// Whether the compiled argument `code` runs on its frame's slots: its code has a slot table.
+fn slot_compiled(code: Gc<'_>) -> bool {
+    code.downcast::<Bytecode>()
+        .and_then(handles::constants)
+        .and_then(|constants| constants.get(SLOTS).copied())
+        .is_some_and(|table| table.r_type() != SexpType::Nil)
 }
 
 /// Whether a `...` slot holding `value` passes on as it is: the arguments it collected, or
@@ -12745,55 +12810,59 @@ unsafe fn forwardable_dots(value: Sexp) -> bool {
     value.kind() == SexpType::Dots || value == missing_arg()
 }
 
-/// Appends the arguments the slot frame's `...` collected, which are its caller's promises and
+/// Appends the arguments the slot `frame`'s `...` collected, which are its caller's promises and
 /// values and pass on unchanged, so forwarding `...` never needs the frame's environment.
 /// Without `references`, for a callee that may keep its arguments past the call, an argument
 /// reference among them becomes the ordinary promise it stands for first
-/// ([`eval::detach_reference`]). `false`, appending nothing, when the frame has no `...` slot
-/// or it holds something else.
-unsafe fn slot_dots_into(
-    state: &Activation<'_, '_>,
+/// ([`eval::push_dots`]). `false`, appending nothing, when the frame has no `...` slot or it
+/// holds something else.
+fn collect_slot_dots<'s>(
+    context: &mut Cx<'s>,
+    frame: RunningFrame<'_, '_, '_>,
     references: bool,
-    args: &mut eval::Args,
+    args: &mut eval::CallArgs<'s>,
 ) -> R<bool> {
-    let Some(slot) = slot_named(state, symbols().dots) else {
+    let Some(slot) = frame.slot_named(handles::symbol(|symbols| symbols.dots)) else {
         return Ok(false);
     };
-    let mut item = *slot;
-    if !forwardable_dots(item) {
+    let dots = frame.read(context, slot);
+    if dots.r_type() != SexpType::Dots && !handles::is_missing_argument(dots) {
         return Ok(false);
     }
     activity::count(Counter::DotsCalls);
-    while item.kind() == SexpType::Dots {
-        let value = item.car();
-        if !references && eval::is_reference(value) {
-            eval::detach_reference(value)?;
-        }
-        args.push(Arg {
-            tag: item.tag(),
-            value,
-        });
-        item = item.cdr();
-    }
+    let dots = context.root(dots);
+    eval::push_dots(context, dots, !references, args)?;
     Ok(true)
 }
 
-/// [`effects::eager_argument`] in a slot frame: the slot's value when `symbol` has a bound
-/// slot, and otherwise the binding outside the frame.
+/// [`effects::eager_argument`] in a slot frame: the raw entry of [`slot_eager_value`].
 unsafe fn slot_eager_argument(state: &Activation<'_, '_>, symbol: Sexp) -> Option<Sexp> {
-    if let Some(slot) = slot_named(state, symbol) {
-        let value = *slot;
-        if value == missing_arg() {
+    handles::reading(|context| {
+        slot_eager_value(context, RunningFrame { state }, Gc::adopt(symbol))
+            .map(|value| value.raw())
+    })
+}
+
+/// [`effects::eager_value`] in the slot `frame`: the slot's value when `symbol` has a bound
+/// slot, and otherwise the binding outside the frame.
+fn slot_eager_value<'c>(
+    context: &'c Cx<'_>,
+    frame: RunningFrame<'_, '_, '_>,
+    symbol: Gc<'_, Symbol>,
+) -> Option<Gc<'c>> {
+    if let Some(slot) = frame.slot_named(symbol) {
+        let value = frame.read(context, slot);
+        if handles::is_missing_argument(value) {
             return None;
         }
-        if value != unbound() {
-            if value.kind() == SexpType::Promise && value.car() != unbound() {
-                return Some(value.car());
-            }
-            return Some(value);
+        if !handles::is_unbound(value) {
+            return Some(match value.downcast::<Promise>() {
+                Some(promise) if !handles::is_unbound(promise.result()) => promise.result(),
+                _ => value,
+            });
         }
     }
-    effects::eager_argument(symbol, state.machine.function.tag())
+    effects::eager_value(context, symbol, frame.enclosure(context).read(context))
 }
 
 #[inline(always)]
@@ -12968,12 +13037,18 @@ unsafe fn slot_call_moving(
     };
     moves::call_moving_from(call, function, target, value, caller, |args| {
         let arguments = closure_arguments(state, instruction, call)?;
-        let mut others = eval::Args::new();
-        if !slot_promises_into(state, arguments.cdr(), false, false, &mut others)? {
-            return Ok(false);
-        }
-        args.extend(others);
-        Ok(true)
+        // The site's constants hold its compiled arguments, and the caller releases the handle
+        // stack after the call, while its arguments hold what the collection roots.
+        handles::in_caller_scope(|context| {
+            let cells = context.root(Gc::adopt(arguments.cdr()));
+            let mut others = eval::CallArgs::new();
+            let frame = RunningFrame { state };
+            if !collect_slot_arguments(context, frame, cells, false, false, &mut others)? {
+                return Ok(false);
+            }
+            args.extend(handles::raw_arguments(&others).iter().copied());
+            Ok(true)
+        })
     })
 }
 

@@ -508,25 +508,33 @@ pub fn find_variable<'a>(
     Found::Unbound
 }
 
-/// What `...` holds in `env`, for a call that passes its arguments on or evaluates them. A
-/// live slot frame's `...` is read in its slot, which moves nothing, so the frame keeps
-/// running on its slots; the arguments it collected can be argument references. Any other
-/// environment's `...` is read by name.
+/// What `...` holds in `env`, for a call that passes its arguments on or evaluates them: the raw
+/// entry of [`dots_value`].
 unsafe fn dots_binding(env: Sexp) -> R<Sexp> {
-    let dots = symbols().dots;
-    if env.has_gp(gp::SLOT_FRAME) && crate::heap().may_bind(env, dots) {
-        let found = handles::reading(|context| {
-            let frame = handles::pending_frame(context, Gc::adopt(env));
-            if frame.role() == crate::FrameRole::Inlined {
-                return None;
-            }
-            slot_content(frame, Gc::adopt(dots)).map(|value| value.raw())
-        });
-        if let Some(value) = found {
-            return Ok(value);
+    // The caller holds the environment, and releases the handle stack after it.
+    handles::in_caller_scope(|context| {
+        let environment = Local::<Environment>::adopt(env);
+        Ok(dots_value(context, environment)?.raw())
+    })
+}
+
+/// What `...` holds in `environment`, the unbound marker when nothing binds it. A live slot
+/// frame's `...` is read in its slot, which moves nothing, so the frame keeps running on its
+/// slots; the arguments it collected can be argument references. Any other environment's `...`
+/// is read by name.
+fn dots_value<'s>(context: &mut Cx<'s>, environment: Local<'s, Environment>) -> R<Local<'s>> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let env = environment.read(context);
+    if env.has_flag(gp::SLOT_FRAME) && env.may_bind(dots) {
+        let frame = handles::pending_frame(context, env);
+        if frame.role() != crate::FrameRole::Inlined
+            && let Some(value) = slot_content(frame, dots)
+        {
+            return Ok(context.root(value));
         }
     }
-    find_var(dots, env)
+    let dots = handles::permanent_symbol(|symbols| symbols.dots);
+    Ok(variable(context, dots, environment)?.unwrap_or_else(handles::unbound))
 }
 
 /// What a read by name of `symbol` finds in the live slot frame that `env` stands for, when the
@@ -1242,6 +1250,24 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     }
 }
 
+/// [`slot_promise`] for code on the handle types.
+pub fn frame_promise<'s>(
+    context: &mut Cx<'s>,
+    owner: usize,
+    expression: Local<'_>,
+) -> R<Local<'s, Promise>> {
+    pending_environment(context, owner)?;
+    let Some(environment) = handles::live_frame(context, owner).pending() else {
+        panic!("a slot frame lost the environment it was given");
+    };
+    let environment = context.root(environment);
+    if expression.r_type() == SexpType::Bytecode {
+        handles::compiled_promise(context, expression, environment)
+    } else {
+        handles::promise(context, expression, environment)
+    }
+}
+
 /// A closure of `formals` and `body` defined in the slot frame whose header register is
 /// `header`, while the frame keeps every variable in its slot. The closure's environment is
 /// the frame's, so defining it leaves the frame in its slots: a call of the closure or
@@ -1589,51 +1615,80 @@ fn check_lifted(
 pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let symbol = handles::held(context, symbol);
-        Ok(slot_reference(context, owner, slot, symbol)?.raw())
+        Ok(slot_reference(context, owner, slot, symbol)?.1.raw())
     })
 }
 
 /// [`argument_reference`] for code on the handle types.
 #[inline]
-pub fn slot_reference<'a>(
-    context: &'a mut Cx<'_>,
+pub fn slot_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
     owner: usize,
     slot: u32,
     symbol: Local<'_>,
-) -> R<Gc<'a, Promise>> {
-    Ok(take_reference(context, symbol, Some((owner, slot)))?.1)
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    take_reference(context, symbol, Some((owner, slot)))
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
-/// caller that has the environment `env`, for a callee that takes its arguments straight into
-/// slots: it forces as a promise of the expression in `env` would, and like a slot frame's
-/// reference it allocates nothing and is released when the call returns. The reference keeps
-/// `env` in its environment field, where a slot frame's reference keeps nil.
+/// caller that has the environment `env`: the raw entry of [`environment_reference`].
 pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let (environment, expression) = (
-            handles::held(context, env),
+            Local::<Environment>::adopt(env),
             handles::held(context, expression),
         );
-        let (context, reference) = take_reference(context, expression, None)?;
-        context.set_promise_environment(reference, environment);
-        Ok(reference.raw())
+        Ok(environment_reference(context, environment, expression)?
+            .1
+            .raw())
+    })
+}
+
+/// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
+/// caller that has the environment `environment`, for a callee that takes its arguments
+/// straight into slots: it forces as a promise of the expression in the environment would,
+/// and like a slot frame's reference it allocates nothing and is released when the call
+/// returns. The reference keeps the environment in its environment field, where a slot frame's
+/// reference keeps nil.
+pub fn environment_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
+    environment: Local<'_, Environment>,
+    expression: Local<'_>,
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    let (context, reference) = take_reference(context, expression, None)?;
+    context.set_promise_environment(reference, environment.value());
+    Ok((context, reference))
+}
+
+/// An argument reference to the compiled argument `code` of a caller that has the environment
+/// `env`: the raw entry of [`code_environment_reference`].
+pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
+    handles::in_caller_scope(|context| {
+        let (environment, code) = (
+            Local::<Environment>::adopt(env),
+            handles::held(context, code),
+        );
+        Ok(code_environment_reference(context, environment, code)?
+            .1
+            .raw())
     })
 }
 
 /// An argument reference to the compiled argument `code` of a caller that has the environment
-/// `env`: [`env_reference`] of the code's source, which keeps the code as its attribute in
-/// place of its frame target and runs it when forced, as a compiled promise would.
-pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let (environment, code) = (handles::held(context, env), handles::held(context, code));
-        // The code holds its constant pool, and the caller holds the code.
-        let source = handles::held(context, source_of(code.read(context)).raw());
-        let (context, reference) = take_reference(context, source, None)?;
-        context.set_promise_environment(reference, environment);
-        context.set_promise_compiled(reference, code);
-        Ok(reference.raw())
-    })
+/// `environment`: [`environment_reference`] of the code's source, which keeps the code as its
+/// attribute in place of its frame target and runs it when forced, as a compiled promise would.
+pub fn code_environment_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
+    environment: Local<'_, Environment>,
+    code: Local<'_>,
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    ready_references(context, 1)?;
+    let context = &*context;
+    // The code holds its constant pool, and the caller holds the code.
+    let reference = place_reference(context, source_of(code.read(context)), None);
+    context.set_promise_environment(reference, environment.value());
+    context.set_promise_compiled(reference, code);
+    Ok((context, reference))
 }
 
 /// An argument reference to the compiled argument `code` of the slot frame at `owner`, for a
@@ -1649,7 +1704,7 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
 }
 
 /// [`code_reference`] for code on the handle types.
-fn compiled_reference<'c, 's>(
+pub fn compiled_reference<'c, 's>(
     context: &'c mut Cx<'s>,
     owner: usize,
     code: Local<'_>,
@@ -2333,29 +2388,80 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             {
                 return Ok(value);
             }
-            let mut args = Args::new();
-            // Matching here replaces the matching the generic call would do, so a call the
-            // plan covers costs no more, and its arguments become references, not promises.
-            if arguments == call.cdr()
-                && let Some((shape, sources)) = direct_sources(function, call)?
-            {
-                let references = interp().references_used;
-                closure_args_into::<EVALUATOR_REFERENCES>(arguments, env, &mut args)?;
-                let result = if sources[..] == [MATCH_PER_CALL] {
-                    call_matching(call, function, &args, env)
-                } else {
-                    call_with_plan(call, function, shape, &sources, &args, env)
+            // The caller holds the call, the closure, the cells and the environment, and
+            // releases the handle stack after it.
+            handles::in_caller_scope(|context| {
+                let Some(environment) = handles::held(context, env).downcast::<Environment>()
+                else {
+                    return Err(error(
+                        "internal error: a closure called outside an environment",
+                    ));
                 };
-                if interp().references_used != references {
-                    release_references(references);
-                }
-                return result;
-            }
-            promise_args_into(arguments, env, &mut args)?;
-            apply_closure(call, function, &args, env, None)
+                let (call, function, arguments) = (
+                    handles::held(context, call),
+                    handles::held(context, function),
+                    handles::held(context, arguments),
+                );
+                Ok(apply_closure_cells(context, call, function, arguments, environment)?.raw())
+            })
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
+}
+
+/// The closure `function` applied by `call` to the argument cells `arguments` from
+/// `environment`, as [`apply_call`] applies one that no native entry answered.
+fn apply_closure_cells<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    function: Local<'s>,
+    arguments: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    let Some(closure) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    let mut args = CallArgs::new();
+    // Matching here replaces the matching the generic call would do, so a call the plan
+    // covers costs no more, and its arguments become references, not promises.
+    let own_cells = call
+        .read(context)
+        .downcast::<Language>()
+        .is_some_and(|call| call.rest().is(arguments));
+    if own_cells && let Some((shape, sources)) = call_plan(context, function, call)? {
+        let mark = interp().references_used;
+        let collected =
+            collect_arguments::<EVALUATOR_REFERENCES>(context, arguments, environment, &mut args);
+        let result = collected.and_then(|()| {
+            let closure_call = ClosureCall {
+                call,
+                function: closure,
+                args: &args,
+                sys_parent: environment.value(),
+                supplied: None,
+            };
+            if sources[..] == [MATCH_PER_CALL] {
+                call_matching(context, &closure_call)
+            } else {
+                handles::call_with_plan(context, &closure_call, shape, &sources)
+            }
+        });
+        if interp().references_used != mark {
+            return_references(context, mark);
+        }
+        return result;
+    }
+    collect_arguments::<PROMISES>(context, arguments, environment, &mut args)?;
+    let closure_call = ClosureCall {
+        call,
+        function: closure,
+        args: &args,
+        sys_parent: environment.value(),
+        supplied: None,
+    };
+    apply_closure_in(context, &closure_call)
 }
 
 /// The argument of a builtin call that only the call holds, which the builtin may then write
@@ -3040,134 +3146,163 @@ unsafe fn counted_push(args: &[Arg]) {
     }
 }
 
-/// Wraps a closure's arguments in promises, expanding `...` into the promises it holds.
+/// A closure call's arguments on the handle types ([`Args`]).
+pub type CallArgs<'s> = SmallVec<[Tagged<'s>; 10]>;
+
+/// Wraps a closure's arguments in promises, expanding `...` into the promises it holds: the
+/// raw entry of [`collect_arguments`] for dispatch and the C API.
 pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
-    let mut args = Args::new();
-    promise_args_into(arguments, env, &mut args)?;
-    Ok(args)
+    // The caller holds the cells and the environment, and releases the handle stack after it.
+    handles::in_caller_scope(|context| {
+        let arguments = handles::held(context, arguments);
+        let environment = handles::held(context, env)
+            .downcast::<Environment>()
+            .ok_or_else(|| error("internal error: arguments promised outside an environment"))?;
+        let mut collected = CallArgs::new();
+        collect_arguments::<PROMISES>(context, arguments, environment, &mut collected)?;
+        Ok(handles::raw_arguments(&collected).iter().copied().collect())
+    })
 }
 
-/// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
-/// moving a returned argument vector through every frame.
-pub unsafe fn promise_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into::<PROMISES>(arguments, env, args)
-}
-
-/// The arguments of a closure call that compiled code makes. GNU R's byte code passes a
-/// constant argument as its value instead of a promise (`PUSHCONSTARG`), and native code can
-/// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
-pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into::<COMPILED>(arguments, env, args)
-}
-
-/// [`compiled_args_into`] for a callee that takes its arguments straight into slots
-/// ([`call_with_plan`]): a variable is passed as an argument reference to it in `env`, which
-/// the calling instruction releases when the call returns.
-pub unsafe fn referenced_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into::<REFERENCES>(arguments, env, args)
-}
-
-/// [`compiled_args_into`] for a call of an effect-free closure (see [`crate::effects`]) whose
-/// other arguments cannot assign a variable, made while no calling handler is established: a
-/// variable argument is bound to its value, or to the caller's own promise for it, instead of a
-/// new promise.
-pub unsafe fn eager_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into::<EAGER>(arguments, env, args)
-}
-
-/// How [`closure_args_into`] passes an argument: every one as a promise, as GNU R's AST
+/// How [`collect_arguments`] passes an argument: every one as a promise, as GNU R's AST
 /// evaluator does.
-const PROMISES: u8 = 0;
-/// A constant as its own value, as GNU R's byte code does.
-const COMPILED: u8 = 1;
-/// A constant or a variable as its value.
-const EAGER: u8 = 2;
-/// A constant as its own value and a variable as an argument reference ([`env_reference`]).
-const REFERENCES: u8 = 3;
+pub const PROMISES: u8 = 0;
+/// A constant as its own value, as GNU R's byte code does (`PUSHCONSTARG`). Native code can
+/// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
+pub const COMPILED: u8 = 1;
+/// [`COMPILED`] for a call of an effect-free closure (see [`crate::effects`]) whose other
+/// arguments cannot assign a variable, made while no calling handler is established: a
+/// variable argument is bound to its value, or to the caller's own promise for it, instead of
+/// a new promise.
+pub const EAGER: u8 = 2;
+/// [`COMPILED`] for a callee that takes its arguments straight into slots
+/// ([`call_with_plan`]): a variable is passed as an argument reference
+/// ([`environment_reference`]), which the calling instruction releases when the call returns.
+pub const REFERENCES: u8 = 3;
 /// [`REFERENCES`] for the AST evaluator, which also passes a constant as a reference, so that
 /// the callee sees a promise for it as it does from GNU R's AST evaluator.
-const EVALUATOR_REFERENCES: u8 = 4;
+pub const EVALUATOR_REFERENCES: u8 = 4;
 /// [`PROMISES`] for a callee that takes argument references ([`call_seeded`]): one that a slot
 /// frame's `...` holds passes on as it is. The modes below [`REFERENCES`] turn it into the
 /// promise it stands for, since their callees may keep an argument past the call.
-const PROMISES_PASSING_REFERENCES: u8 = 5;
+pub const PROMISES_PASSING_REFERENCES: u8 = 5;
 
-unsafe fn closure_args_into<const MODE: u8>(
-    mut arguments: Sexp,
-    env: Sexp,
-    args: &mut Args,
+/// Appends the arguments of a closure call from `environment` with the argument cells
+/// `arguments` to `args`, as `MODE` passes them, with `...` expanded into what it holds. The
+/// caller owns the buffer, so a call of many arguments never moves it on return.
+pub fn collect_arguments<'s, const MODE: u8>(
+    context: &mut Cx<'s>,
+    arguments: Local<'s>,
+    environment: Local<'s, Environment>,
+    args: &mut CallArgs<'s>,
 ) -> R<()> {
-    let dots = symbols().dots;
-    while arguments.kind() == SexpType::Pairlist {
-        let expression = arguments.car();
-        if expression == dots {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut cursor = arguments;
+    while cursor.r_type() == SexpType::Pairlist {
+        let Some((expression, tag, rest)) = handles::cell_fields(cursor.read(context)) else {
+            break;
+        };
+        // R code may rewrite a call it holds alone in place, so the rest is rooted itself.
+        let (tag, rest) = (handles::argument_tag(context, tag), context.root(rest));
+        if expression.is(dots) {
             activity::count(Counter::DotsCalls);
-            let value = dots_binding(env)?;
-            if value.kind() == SexpType::Dots {
-                let mut cell = value;
-                while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
-                    let item = cell.car();
-                    // Converted in place, the reference stays one promise for every call the
-                    // `...` is passed to.
-                    if MODE < REFERENCES && is_reference(item) {
-                        detach_reference(item)?;
-                    }
-                    args.push(Arg {
-                        tag: cell.tag(),
-                        value: item,
-                    });
-                    cell = cell.cdr();
-                }
-            } else if value != missing_arg() && value != nil() {
-                return Err(error("'...' used in an incorrect context"));
-            }
-        } else {
-            // A constant gets a promise too, as in GNU R's AST evaluator: native code such as
-            // lazyeval reads a promise's environment to tell whether it was forced.
-            let constant = !matches!(
-                expression.kind(),
-                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
-            );
-            let eager = if MODE == EAGER
-                && expression.kind() == SexpType::Symbol
-                && expression != missing_arg()
-            {
-                crate::effects::eager_argument(expression, env)
-            } else {
-                None
-            };
-            let value = if let Some(value) = eager {
-                value
-            } else if expression == missing_arg()
-                || (MODE != PROMISES
-                    && MODE != EVALUATOR_REFERENCES
-                    && MODE != PROMISES_PASSING_REFERENCES
-                    && constant)
-            {
-                expression
-            } else if (MODE == REFERENCES || MODE == EVALUATOR_REFERENCES)
-                && match expression.kind() {
-                    SexpType::Symbol => dot_dot_index(expression).is_none(),
-                    SexpType::Promise => false,
-                    _ => true,
-                }
-            {
-                if expression.kind() == SexpType::Bytecode {
-                    env_code_reference(env, expression)?
-                } else {
-                    env_reference(env, expression)?
-                }
-            } else if expression.kind() == SexpType::Bytecode {
-                compiled_promise(expression, env)?
-            } else {
-                make_promise(expression, env)?
-            };
-            args.push(Arg {
-                tag: arguments.tag(),
-                value,
-            });
+            collect_dots::<MODE>(context, environment, args)?;
+            cursor = rest;
+            continue;
         }
-        arguments = arguments.cdr();
+        // A constant gets a promise too, as in GNU R's AST evaluator: native code such as
+        // lazyeval reads a promise's environment to tell whether it was forced.
+        let kind = expression.r_type();
+        let constant = !matches!(
+            kind,
+            SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+        );
+        let missing = handles::is_missing_argument(expression);
+        let eager = match expression.downcast::<Symbol>() {
+            Some(symbol) if MODE == EAGER && !missing => {
+                crate::effects::eager_value(context, symbol, environment.read(context))
+            }
+            _ => None,
+        };
+        let value = if let Some(value) = eager {
+            context.root(value)
+        } else if missing
+            || (MODE != PROMISES
+                && MODE != EVALUATOR_REFERENCES
+                && MODE != PROMISES_PASSING_REFERENCES
+                && constant)
+        {
+            context.root(expression)
+        } else if (MODE == REFERENCES || MODE == EVALUATOR_REFERENCES)
+            && match expression.downcast::<Symbol>() {
+                Some(symbol) => dot_dot_position(symbol.name().bytes()).is_none(),
+                None => kind != SexpType::Promise,
+            }
+        {
+            let expression = context.root(expression);
+            let (context, reference) = if kind == SexpType::Bytecode {
+                code_environment_reference(context, environment, expression)?
+            } else {
+                environment_reference(context, environment, expression)?
+            };
+            context.root(reference).value()
+        } else if kind == SexpType::Bytecode {
+            let expression = context.root(expression);
+            handles::compiled_promise(context, expression, environment)?.value()
+        } else {
+            let expression = context.root(expression);
+            handles::promise(context, expression, environment)?.value()
+        };
+        args.push(Tagged { tag, value });
+        cursor = rest;
+    }
+    Ok(())
+}
+
+/// The items of `...` in `environment` as [`collect_arguments`] passes them on.
+fn collect_dots<'s, const MODE: u8>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    args: &mut CallArgs<'s>,
+) -> R<()> {
+    let value = dots_value(context, environment)?;
+    if value.r_type() != SexpType::Dots {
+        if !handles::is_missing_argument(value) && value.r_type() != SexpType::Nil {
+            return Err(error("'...' used in an incorrect context"));
+        }
+        return Ok(());
+    }
+    push_dots(context, value, MODE < REFERENCES, args)
+}
+
+/// Appends the items of the `...` list `dots` to `args`. With `detach_references`, for a callee
+/// that may keep its arguments past the call, an argument reference among them becomes the
+/// ordinary promise it stands for first ([`detach`]).
+pub fn push_dots<'s>(
+    context: &mut Cx<'s>,
+    dots: Local<'s>,
+    detach_references: bool,
+    args: &mut CallArgs<'s>,
+) -> R<()> {
+    let start = args.len();
+    let mut cell = dots.read(context);
+    while let Some((item, tag, rest)) = handles::cell_fields(cell) {
+        args.push(Tagged {
+            tag: handles::argument_tag(context, tag),
+            value: context.root(item),
+        });
+        cell = rest;
+    }
+    if detach_references {
+        for index in start..args.len() {
+            // Converted in place, the reference stays one promise for every call the `...` is
+            // passed to.
+            if let Some(reference) = args[index].value.downcast::<Promise>()
+                && reference.read(context).has_flag(gp::ARGUMENT_REFERENCE)
+            {
+                detach(context, reference)?;
+            }
+        }
     }
     Ok(())
 }
@@ -4392,13 +4527,25 @@ fn plan_sources(
     }
 }
 
-/// Calls `function` for a call whose site plans per call ([`MATCH_PER_CALL`]): in a slot frame
-/// when `args` match its formals, and down the generic path, which reports the mismatch,
-/// otherwise.
-pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
-    match matched_sources(function, args, call)? {
-        Some((shape, sources)) => call_with_plan(call, function, shape, &sources, args, sys_parent),
-        None => apply_closure(call, function, args, sys_parent, None),
+/// Calls the closure of `closure_call` for a call whose site plans per call
+/// ([`MATCH_PER_CALL`]): in a slot frame when its arguments match the formals, and down the
+/// generic path, which reports the mismatch, otherwise.
+pub fn call_matching<'s>(context: &mut Cx<'s>, closure_call: &ClosureCall<'_, 's>) -> R<Local<'s>> {
+    let function = closure_call.function;
+    let plan = match plannable(function.read(context)) {
+        Some((shape, dots_index)) => plan_sources(
+            context,
+            function,
+            shape,
+            dots_index,
+            closure_call.args,
+            closure_call.call,
+        )?,
+        None => None,
+    };
+    match plan {
+        Some((shape, sources)) => handles::call_with_plan(context, closure_call, shape, &sources),
+        None => apply_closure_in(context, closure_call),
     }
 }
 
@@ -4414,30 +4561,7 @@ pub struct CallShape {
     pub registers: u16,
 }
 
-/// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
-/// `bytecode::CallPlans` keeps per site with the closure's `shape`) matched `args` to its
-/// formals already: the arguments go straight into the slots, with no matching and none of
-/// [`apply_closure`]'s checks, which the plan settled for the closure's formals and body. What
-/// can change between calls (a debugger, a move) sends the call down the generic path.
-pub unsafe fn call_with_plan(
-    call: Sexp,
-    function: Sexp,
-    shape: CallShape,
-    sources: &[i32],
-    args: &[Arg],
-    sys_parent: Sexp,
-) -> R<Sexp> {
-    let entered = bind_plan(call, function, shape, sources, args, sys_parent)?;
-    if entered.header == crate::NO_SLOTS {
-        return Ok(entered.value);
-    }
-    let result = on_large_stack(|| {
-        bytecode::run_slots(function, entered.header as usize, shape.slots as usize)
-    });
-    leave(entered.depth as usize, result)
-}
-
-/// The first half of [`call_with_plan`]: binds the arguments into a new slot frame and pushes
+/// The first half of [`handles::call_with_plan`]: binds the arguments into a new slot frame and pushes
 /// the call's frame ([`enter`]), leaving the body to the caller, which runs the code
 /// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic
 /// path runs whole here.
@@ -7902,7 +8026,12 @@ fn do_force_and_call<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>
     let eager = no_calls(context, rest)
         && !crate::effects::calling_handler_established()
         && handles::effect_free(context, function)?;
-    let values = handles::closure_arguments(context, rest, environment, eager)?;
+    let mut values = CallArgs::new();
+    if eager {
+        collect_arguments::<EAGER>(context, rest, environment, &mut values)?;
+    } else {
+        collect_arguments::<PROMISES>(context, rest, environment, &mut values)?;
+    }
     for argument in values.iter().take(count) {
         if argument.value.r_type() == SexpType::Promise {
             handles::force(context, argument.value)?;
@@ -8163,28 +8292,67 @@ pub unsafe fn force_and_call_with(
         }
         return apply_call(call, function, arguments, env);
     }
-    let mut args = Args::new();
-    let arguments = call.cdr();
     // The known first value, as `lapply` reads `X[[i]]`, binds as a forced argument reference to
     // its expression: a forced promise of it once anything keeps it, and no allocation until.
     let mark = interp().references_used;
-    let seeded = if let Some(value) = first
-        && arguments.kind() == SexpType::Pairlist
-        && arguments.car().kind() == SexpType::Language
-    {
-        let reference = env_reference(env, arguments.car())?;
-        crate::heap().set_car(reference, value);
-        args.push(Arg {
-            tag: arguments.tag(),
-            value: reference,
+    // The caller holds the call, the closure, the environment and the first value, and
+    // releases the handle stack after it.
+    let result = handles::in_caller_scope(|context| {
+        let Some(environment) = handles::held(context, env).downcast::<Environment>() else {
+            return Err(error(
+                "internal error: a call forced outside an environment",
+            ));
+        };
+        let arguments = context.root(Gc::adopt(call.cdr()));
+        let mut args = CallArgs::new();
+        let first_cell = first.and_then(|value| {
+            let (expression, tag, rest) = handles::cell_fields(arguments.read(context))
+                .filter(|_| arguments.r_type() == SexpType::Pairlist)?;
+            (expression.r_type() == SexpType::Language).then(|| {
+                (
+                    handles::held(context, value),
+                    context.root(expression),
+                    handles::argument_tag(context, tag),
+                    context.root(rest),
+                )
+            })
         });
-        closure_args_into::<PROMISES_PASSING_REFERENCES>(arguments.cdr(), env, &mut args)?;
-        true
-    } else {
-        closure_args_into::<PROMISES_PASSING_REFERENCES>(arguments, env, &mut args)?;
-        false
-    };
-    let result = call_seeded(call, function, env, &mut args, count, seeded, known);
+        let seeded = if let Some((value, expression, tag, rest)) = first_cell {
+            let reference = {
+                let (context, reference) = environment_reference(context, environment, expression)?;
+                context.set_promise_value(reference, value);
+                context.root(reference).value()
+            };
+            args.push(Tagged {
+                tag,
+                value: reference,
+            });
+            collect_arguments::<PROMISES_PASSING_REFERENCES>(
+                context,
+                rest,
+                environment,
+                &mut args,
+            )?;
+            true
+        } else {
+            collect_arguments::<PROMISES_PASSING_REFERENCES>(
+                context,
+                arguments,
+                environment,
+                &mut args,
+            )?;
+            false
+        };
+        call_seeded(
+            call,
+            function,
+            env,
+            handles::raw_arguments(&args),
+            count,
+            seeded,
+            known,
+        )
+    });
     release_references(mark);
     result
 }
@@ -8219,7 +8387,7 @@ pub unsafe fn force_and_call_from_slots(
             cell = cell.cdr();
         }
     }
-    let result = call_seeded(call, function, nil(), &mut args, 1, true, known);
+    let result = call_seeded(call, function, nil(), &args, 1, true, known);
     release_references(mark);
     result
 }
@@ -8293,7 +8461,7 @@ unsafe fn call_seeded(
     call: Sexp,
     function: Sexp,
     env: Sexp,
-    args: &mut Args,
+    args: &[Arg],
     count: usize,
     seeded: bool,
     known: Option<&mut KnownFirst>,

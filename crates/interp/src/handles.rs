@@ -3371,35 +3371,6 @@ pub fn evaluate_arguments<'s>(
     Ok(())
 }
 
-/// The argument cells `cells` of a closure call from `environment` as the closure receives
-/// them, with `...` expanded: a promise of each expression, or with `eager`, the value of each
-/// constant and variable, which only a callee that cannot tell the two apart may receive.
-pub fn closure_arguments<'s>(
-    context: &mut Cx<'s>,
-    cells: Local<'s>,
-    environment: Local<'s, Environment>,
-    eager: bool,
-) -> R<SmallVec<[Tagged<'s>; 8]>> {
-    // SAFETY: the cells and the environment are rooted, a promise allocates and a variable's
-    // read may force one, which `&mut Cx` permits, and the evaluator roots each argument it
-    // adds before the next allocation.
-    unsafe {
-        let mut raw = crate::eval::Args::new();
-        if eager {
-            crate::eval::eager_args_into(cells.raw(), environment.raw(), &mut raw)?;
-        } else {
-            crate::eval::promise_args_into(cells.raw(), environment.raw(), &mut raw)?;
-        }
-        Ok(raw
-            .iter()
-            .map(|argument| Tagged {
-                tag: Local::adopt(argument.tag),
-                value: rooted(context, argument.value),
-            })
-            .collect())
-    }
-}
-
 /// Whether calling the closure `function` can have no effect a caller could observe before
 /// its arguments are forced ([`crate::effects::effect_free`]).
 pub fn effect_free(_context: &mut Cx<'_>, function: Local<'_>) -> R<bool> {
@@ -4873,6 +4844,41 @@ pub fn promise<'s>(
     }
 }
 
+/// A promise to run the compiled argument `code` in `environment`, the frame of the code it
+/// was compiled with ([`crate::eval::compiled_promise`]).
+pub fn compiled_promise<'s>(
+    _context: &mut Cx<'s>,
+    code: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: the code and the environment are rooted while the promise allocates, which
+    // `&mut Cx` permits, and the allocation roots it in the context's scope.
+    unsafe {
+        let promise = crate::eval::compiled_promise(code.raw(), environment.raw())?;
+        Ok(Local::adopt(promise))
+    }
+}
+
+/// An argument cell's tag as a handle of the context's scope: a symbol or `NULL`, which the
+/// heap keeps for its whole life, needs no root of its own.
+#[inline(always)]
+pub fn argument_tag<'s>(context: &Cx<'s>, tag: Gc<'_>) -> Local<'s> {
+    if matches!(tag.r_type(), SexpType::Symbol | SexpType::Nil) {
+        // SAFETY: the symbol table keeps every symbol, and `NULL` is a permanent root.
+        return unsafe { Local::adopt(tag.raw()) };
+    }
+    context.root(tag)
+}
+
+/// The arguments `args` as raw arguments, for a raw entry that takes them while the handles
+/// keep them alive.
+#[inline(always)]
+pub fn raw_arguments<'a>(args: &'a [Tagged<'_>]) -> &'a [Arg] {
+    // SAFETY: `Tagged` has `Arg`'s layout, and a raw argument is only read, by code whose
+    // contract asks its caller to keep each one alive, as the handles do.
+    unsafe { std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len()) }
+}
+
 /// Appends the tag and the expression of each argument cell of `call` to `cells`, `false` when
 /// it is no call. C code may link the cells with `LCONS`, which GNU R evaluates the same. The
 /// caller owns the buffer, so a list of many cells is never moved on return.
@@ -5646,6 +5652,45 @@ pub fn run_slot_frame<'s>(
             method_vars,
         )?;
         Ok(rooted(context, value))
+    }
+}
+
+/// Calls the closure of `closure_call` in a slot frame for a call whose plan `sources`
+/// ([`crate::eval::direct_sources`], which `bytecode::CallPlans` keeps per site with the
+/// closure's `shape`) matched its arguments to the formals already: the arguments go straight
+/// into the slots, with no matching and none of [`crate::eval::apply_closure_in`]'s checks,
+/// which the plan settled for the closure's formals and body. What can change between calls (a
+/// debugger, a move) sends the call down the generic path.
+pub fn call_with_plan<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &crate::eval::ClosureCall<'_, 's>,
+    shape: crate::eval::CallShape,
+    sources: &[i32],
+) -> R<Local<'s>> {
+    let function = closure_call.function.raw();
+    // SAFETY: the caller's scope holds the call, the closure, the arguments and the caller's
+    // environment, the frame holds them once pushed, and the body runs any R code, which
+    // `&mut Cx` permits. The frame `bind_plan` pushes is left before this returns, and the
+    // value is rooted before anything else runs.
+    unsafe {
+        let entered = crate::eval::bind_plan(
+            closure_call.call.raw(),
+            function,
+            shape,
+            sources,
+            raw_arguments(closure_call.args),
+            closure_call.sys_parent.raw(),
+        )?;
+        if entered.header == crate::NO_SLOTS {
+            return Ok(rooted(context, entered.value));
+        }
+        let result = crate::eval::on_large_stack(|| {
+            crate::bytecode::run_slots(function, entered.header as usize, shape.slots as usize)
+        });
+        Ok(rooted(
+            context,
+            crate::eval::leave(entered.depth as usize, result)?,
+        ))
     }
 }
 
