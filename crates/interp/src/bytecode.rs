@@ -10774,7 +10774,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     function,
                     arguments,
                     true,
-                    |symbol| {
+                    |symbol, forced| {
+                        // R code a promise the entry forced ran can give the frame an
+                        // environment.
+                        if forced && !state.in_slots() {
+                            return None;
+                        }
                         handles::reading(|context| {
                             slot_eager_value(context, RunningFrame { state }, Gc::adopt(symbol))
                                 .map(|value| value.raw())
@@ -10787,7 +10792,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     function,
                     arguments,
                     true,
-                    |symbol| effects::eager_argument(symbol, env),
+                    |symbol, _| effects::eager_argument(symbol, env),
                 )?
             }
         {
@@ -12930,17 +12935,13 @@ fn collect_slot_dots<'s>(
 }
 
 /// [`effects::eager_value`] in the slot `frame`: the slot's value when `symbol` has a bound
-/// slot, and otherwise the binding outside the frame.
+/// slot, and otherwise the binding outside the frame. The frame has no environment, which
+/// would hold its variables instead of the slots.
 fn slot_eager_value<'c>(
     context: &'c Cx<'_>,
     frame: RunningFrame<'_, '_, '_>,
     symbol: Gc<'_, Symbol>,
 ) -> Option<Gc<'c>> {
-    // A native entry forces promises between its lookups, and R code they run can give the
-    // frame an environment, which then holds its variables instead of the slots.
-    if frame.has_environment() {
-        return None;
-    }
     if let Some(slot) = frame.slot_named(symbol) {
         let value = frame.read(context, slot);
         if handles::is_missing_argument(value) {

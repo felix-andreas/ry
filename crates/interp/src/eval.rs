@@ -2386,7 +2386,7 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
                     function,
                     arguments,
                     false,
-                    |symbol| crate::effects::eager_argument(symbol, env),
+                    |symbol, _| crate::effects::eager_argument(symbol, env),
                 )?
             {
                 return Ok(value);

@@ -801,12 +801,13 @@ unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<
 ///
 /// From `compiled` code, the arguments of a closure GNU R's compiler inlines (see
 /// [`NATIVE_ENTRIES`]) are forced here, in order, whatever code that runs, because compiled GNU
-/// R forces them in the caller before the builtin runs.
+/// R forces them in the caller before the builtin runs. `lookup`'s second argument says
+/// whether such a forcing has run, since its R code can give a slot caller an environment.
 pub unsafe fn native_entry_by_value(
     function: Sexp,
     arguments: Sexp,
     compiled: bool,
-    lookup: impl Fn(Sexp) -> Option<Sexp>,
+    lookup: impl Fn(Sexp, bool) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
     // The boundary-call recorder sees closure calls only where their frames start.
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
@@ -839,7 +840,7 @@ pub unsafe fn native_entry_by_value(
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
         let value = if expression.kind() == SexpType::Symbol {
-            match lookup(expression) {
+            match lookup(expression, rooted > 0) {
                 Some(value)
                     if forcing
                         && value.kind() == SexpType::Promise
@@ -881,11 +882,14 @@ unsafe fn forced_keeping(gathered: &[Arg], promise: Sexp, rooted: &mut usize) ->
     unsafe {
         handles::in_caller_scope(|context| {
             for arg in gathered {
-                context.root(Gc::adopt(arg.value));
+                let value: Gc<'_> = Gc::adopt(arg.value);
+                context.root(value);
             }
             *rooted += gathered.len() + 1;
-            let promise = context.root(Gc::adopt(promise));
-            Ok(context.root(Gc::adopt(eval::force_promise(promise.raw())?)).raw())
+            let promise: Gc<'_> = Gc::adopt(promise);
+            let promise = context.root(promise);
+            let value: Gc<'_> = Gc::adopt(eval::force_promise(promise.raw())?);
+            Ok(context.root(value).raw())
         })
     }
 }
