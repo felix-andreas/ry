@@ -249,7 +249,6 @@ Loop fusion (`crates/typed/src/loops.rs`) leaves these lists in place:
 
 - **Loops that share an assigned variable** (a consumer that assigns what the producer reads) stay apart, also where an order of the two bodies exists that keeps every value.
 - **A loop with a call** of R or of a typed function that was not inlined never fuses, because the call could observe the order of the two loops. Only a typed function passed by name to `List.map` is inlined, so `spectralnorm.typed.R`'s `List.sum(List.map(..., \(j) u[[j + 1]] * eval_a(i, j)))` still builds its list per row; inlining a small typed callee inside a lambda would fuse it.
-- **A counter nothing else reads.** `unbox::remove_unread` keeps `count = count + 1` when only that instruction reads `count`, so a fused list whose length is never asked for still counts its items.
 
 The committed results of the kernels and applications suites (`tools/bench/kernels/results.json`, `tools/bench/applications/results.json`) were measured before `array_filter.typed.R`, `sales.typed.R` and `bond_book.typed.R` changed, so their typed columns, and the `typed_refused` flag on `sales`, describe the earlier sources at the commit each file names. The next release record (`just bench kernels applications typed --release ARCHIVE --write`) refreshes them and writes the first `tools/bench/typed/results.json`; only the recorder writes those files.
 

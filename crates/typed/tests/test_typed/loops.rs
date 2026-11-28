@@ -1132,3 +1132,30 @@ fn a_sum_with_no_loop_to_join_stays_a_sum() {
         );
     }
 }
+
+#[test]
+fn the_count_of_a_fused_list_goes_when_nothing_asks_for_its_length() {
+    for (lengths, steps) in [(false, 1), (true, 2)] {
+        let fused = assert_fuses_all(&Pipeline {
+            stages: vec![
+                Stage::Keep {
+                    input: 0,
+                    body: Body::default(),
+                    modulus: 3,
+                    leaves_at: None,
+                    refuses_empty: false,
+                    capacity: Capacity::None,
+                    made_early: false,
+                },
+                walk_of(1),
+            ],
+            lengths,
+            ..Pipeline::default()
+        });
+        assert_eq!(
+            count(&fused, |op| matches!(op, Op::Step(..))),
+            steps,
+            "{fused}"
+        );
+    }
+}
