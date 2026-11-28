@@ -1047,11 +1047,10 @@ fn record_traceback(context: &mut Cx<'_>) -> R<()> {
 /// The jump that invokes the innermost `abort` restart established in R code, if any.
 fn user_abort_restart(context: &mut Cx<'_>) -> R<Option<Unwind>> {
     let found = restart_entries(context).find_map(|(entry, restart)| {
-        let restart = restart.standard::<List>()?;
+        let restart = restart.standard::<List>().filter(|restart| restart.len() >= 2)?;
         let name = restart.get(0).standard::<Str>()?;
-        let is_abort = restart.len() >= 2
-            && !restart.get(1).is(null())
-            && name.elements().first()?.bytes() == b"abort";
+        let is_abort =
+            !restart.get(1).is(null()) && name.elements().first()?.bytes() == b"abort";
         is_abort.then(|| (entry.next.clone(), context.root(restart.get(1))))
     });
     let Some((next, exit)) = found else {
