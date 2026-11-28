@@ -1080,13 +1080,12 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // of other names go straight to the enclosure, so a method that sees forwarded locals gets
     // its environment from the start.
     let result = if vars.len() > dispatch_vars && found.method.kind() == SexpType::Closure {
-        let env = eval::bind_arguments(new_call, found.method, &args, Some(&vars))?;
-        eval::run_closure(
+        eval::run_on_heap_frame(
             new_call,
             found.method,
-            env,
-            sys_parent,
             &args,
+            sys_parent,
+            Some(&vars),
             Entry::Unchecked,
         )?
     } else {
@@ -1368,7 +1367,7 @@ unsafe fn dispatch_argument(function: Sexp, args: &[Arg]) -> R<Sexp> {
 }
 
 /// `owned` says the promises in `args` were made for this call alone and are not read again,
-/// so the call releases them once it returns ([`eval::apply_closure_owning`]).
+/// so a builtin method releases them once it returns.
 unsafe fn apply_method(
     call: Sexp,
     method: Sexp,
@@ -1378,9 +1377,6 @@ unsafe fn apply_method(
     owned: bool,
 ) -> R<Sexp> {
     match method.kind() {
-        SexpType::Closure if owned => {
-            eval::apply_closure_owning(call, method, args, sys_parent, Some(vars))
-        }
         SexpType::Closure => apply_closure(call, method, args, sys_parent, Some(vars)),
         SexpType::Builtin => {
             let definition = eval::builtin_def(method)?;

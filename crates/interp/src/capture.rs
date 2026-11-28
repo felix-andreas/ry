@@ -83,14 +83,14 @@ impl Scope {
         Scope { record: 0 }
     }
 
-    /// Ends the call's record with the call's outcome. A scope that drops without this records
-    /// the call as ended by an unwind.
+    /// Ends the call's record with the value the call returned, `None` when it failed. A scope
+    /// that drops without this records the call as ended by an unwind.
     #[inline(always)]
-    pub unsafe fn returned(&mut self, result: &R<Sexp>) {
+    pub unsafe fn returned(&mut self, value: Option<Sexp>) {
         if self.record != 0 {
             let index = self.record - 1;
             self.record = 0;
-            leave(index, Some(result));
+            leave(index, value);
         }
     }
 }
@@ -694,7 +694,7 @@ fn push(layer: Layer, role: impl FnOnce(&mut Capture) -> Role) -> Scope {
 }
 
 /// Pops the record at `index`, and any a non-local exit left above it, and attributes its time.
-unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
+unsafe fn leave(index: usize, value: Option<Sexp>) {
     let stopped = Instant::now();
     let Some((record, inclusive, exclusive)) = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
@@ -775,13 +775,9 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
             if let Some(Selected { slot, inputs }) = sample {
                 let stored = inputs.and_then(|inputs| {
                     let _suspended = Suspend::start();
-                    let value = match result {
-                        Some(Ok(value)) => {
-                            heap.root(*value);
-                            Some(*value)
-                        }
-                        _ => None,
-                    };
+                    if let Some(value) = value {
+                        heap.root(value);
+                    }
                     write_sample(key, slot, &inputs, inclusive, value, &settled).unwrap_or_else(
                         |unwind| {
                             note_failure(&unwind);

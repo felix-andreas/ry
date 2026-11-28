@@ -10930,7 +10930,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     },
                 ));
             }
-            None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
+            None => eval::apply_closure(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {
             eval::release_references(references);

@@ -13,7 +13,7 @@ use {
         builtins::Arg,
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
-        eval,
+        eval::{self, CallFrame},
         handles::{
             self, Cx, Environment, Expression, List, Local, NativeArgs, Str, StringFill, Symbol,
             safe,
@@ -815,13 +815,14 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         ));
     }
     eval::define(generic_symbol, generic, method_env)?;
-    eval::run_closure(
+    eval::run_frame(
         call,
         method,
-        method_env,
+        CallFrame::Env(method_env),
         sys_parent,
         &promargs,
         Entry::Unchecked,
+        &[],
     )
 }
 

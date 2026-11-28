@@ -438,14 +438,16 @@ const GLOBAL_LABEL: &str = "R_GlobalEnv";
 
 /// What a closure call holds while boundary calls are recorded: its record, until the scope
 /// drops.
+#[derive(Default)]
 pub struct ClosureScope(Option<crate::capture::Scope>);
 
 impl ClosureScope {
-    /// Hands the call's result to the boundary-call recorder before the scope drops.
+    /// Hands the value the call returned, `None` when it failed, to the boundary-call recorder
+    /// before the scope drops.
     #[inline(always)]
-    pub unsafe fn returned(&mut self, result: &R<Sexp>) {
+    pub unsafe fn returned(&mut self, value: Option<Sexp>) {
         if let Some(capture) = &mut self.0 {
-            unsafe { capture.returned(result) };
+            unsafe { capture.returned(value) };
         }
     }
 }

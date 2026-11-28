@@ -532,6 +532,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Promise forcing takes handles, and a live frame is read through `LiveFrame`
 - The frame machinery takes handles, and an allocation that cannot collect runs under `&Cx`
 - A frame's exit and a heap frame's binding take handles; `enter` and `leave` stay `unsafe fn`
+- Closure application takes handles, and the raw entries share its prepare step
 
 ## C API, R home and packages
 

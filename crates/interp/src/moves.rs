@@ -41,7 +41,7 @@ use {
     },
     heap::{
         Marker, activity,
-        handle::Gc,
+        handle::{Closure, Environment, Gc, Local},
         object::{Sexp, SexpType, gp},
         records::NativeKind,
     },
@@ -316,7 +316,11 @@ pub unsafe fn reaching_environment() -> R<()> {
 /// Called as the closure `function` starts running on `env`. The callee of the innermost move
 /// records its frame, and a closure made from a checked literal while every live move lasted
 /// adds its frame to theirs; any other closure ends every move.
-pub unsafe fn entering_closure(function: Sexp, env: Sexp) -> R<()> {
+pub fn entering_closure(
+    function: Local<'_, Closure>,
+    environment: Local<'_, Environment>,
+) -> R<()> {
+    let (function, env) = (function.raw(), environment.raw());
     let moves = &mut interp().moves.moves;
     let Some(innermost) = moves.last_mut() else {
         return Ok(());
@@ -331,7 +335,8 @@ pub unsafe fn entering_closure(function: Sexp, env: Sexp) -> R<()> {
         entry.frames.len() < TRACKED_LIMIT && entry.closures.contains(&(function, true))
     });
     if !checked {
-        return end_all();
+        // SAFETY: ending a move restores the variables it moved, which runs no R code.
+        return unsafe { end_all() };
     }
     for entry in moves.iter_mut().filter(|entry| !entry.ended) {
         entry.frames.push(env);
@@ -446,6 +451,7 @@ unsafe fn end_all() -> R<()> {
 /// How many entries `value` has, when it is a value a move handles: a dictionary, a set, a plain
 /// list or an Array, which an update may grow in place. A list with attributes is never updated
 /// in place, so moving one gains nothing.
+#[inline]
 unsafe fn extent(value: Sexp) -> Option<usize> {
     match value.kind() {
         SexpType::Record
