@@ -885,6 +885,11 @@ unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
     // One scope for both class lookups, which root the class name and the definitions they
     // find until the answer is known.
     handles::with(|context| {
+        // The table comes first: forcing a lazy-loaded table allocates, which the new class
+        // string below would not survive before it is rooted.
+        let Some(table) = crate::methods::class_table(context)? else {
+            return Ok(None);
+        };
         let class1 = dispatch::class_of_raw(object)?;
         let mut s3_case = length(class1) > 1;
         let class1 = if s3_case {
@@ -902,9 +907,6 @@ unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
                 (name, Some(class2))
             }
             _ => return Ok(None),
-        };
-        let Some(table) = crate::methods::class_table(context)? else {
-            return Ok(None);
         };
         let class1 = handles::adopt(context, class1);
         let Some(definition1) = cached_class_in(context, table, class1)? else {
@@ -1154,10 +1156,12 @@ unsafe fn simple(extension: Sexp) -> R<bool> {
 /// `None` when the R code would look further, in the environments or packages it searches.
 unsafe fn cached_class(class: Sexp) -> R<Option<Sexp>> {
     handles::with_result(|context| {
+        // Rooted, as callers pass new strings, and finding the class may run a deferred
+        // definition's code.
+        let class = handles::adopt(context, class);
         let Some(table) = crate::methods::class_table(context)? else {
             return Ok(None);
         };
-        let class = handles::held(context, class);
         Ok(cached_class_in(context, table, class)?.map(Local::raw))
     })
 }
