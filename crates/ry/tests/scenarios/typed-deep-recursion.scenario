@@ -1,14 +1,17 @@
 # A typed recursion deeper than R allows stops its native code, and the interpreter runs the call
 # again and reports R's error. No native code, a scalar function's included, is entered again
 # inside that call: each entry would recurse as deep and stop again, which made the error take
-# quadratic time.
+# quadratic time. `rec_grow` assigns its recursive call before returning it, so the call is not a
+# tail call, which would run as a loop.
 
 requires ry-runtime
 
 file deep.R
 | alias Acc = Record{n: I64, values: List<F64>}
 | rec_grow <- function(acc: Acc, i: I64, count: I64) -> Acc {
-|   if (i > count) acc else rec_grow((..acc, values = List.append(acc$values, Num.to_f64(i))), i + 1i64, count)
+|   if (i > count) return(acc)
+|   grown <- rec_grow((..acc, values = List.append(acc$values, Num.to_f64(i))), i + 1i64, count)
+|   grown
 | }
 | rec_len <- function(count: I64) -> I64 {
 |   start: Acc <- (n = 0i64, values = [])

@@ -125,6 +125,16 @@ print(first_or([], 7))
 method dispatch: a function is called by its plain name, and a standard library function by its
 module and name, such as `List.map`.
 
+A typed function that calls itself in tail position runs as a loop, so its depth is not limited by
+the stack or by R's `expressions` option. A tail position is the body itself, the last expression
+of a `{` or a branch of an `if` that is in tail position, or the argument of `return()`, also inside
+a loop. `down <- function(n: I64, total: I64) -> I64 if (n == 0) total else down(n - 1, total + n)`
+returns `500000500000i64` for `down(1000000, 0)`. A call written as `(f(x))`, assigned before it is
+returned, or in a `switch()` branch is an ordinary call, and so is any call while the function has
+an `on.exit()` handler or a debugger is attached. The tail call replaces the running call, so
+`sys.call()` shows the latest call, `parent.frame()` is the first call's caller, and the loop counts
+as one frame in `sys.nframe()` and `sys.calls()`.
+
 ## Records and tuples
 
 ```r

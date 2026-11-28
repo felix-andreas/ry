@@ -1295,7 +1295,7 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
         Unwind::Interrupt => write_console(b"\n", false),
         Unwind::Jump(jump) => match jump {
             Jump::TopLevel => {}
-            Jump::Return { .. } => {
+            Jump::Return { .. } | Jump::TailCall { .. } => {
                 write_console(
                     b"Error: no function to return from, jumping to top level\n",
                     true,

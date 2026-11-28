@@ -17,7 +17,7 @@ use {
         handles::{
             self, AssignmentCall, AssignmentCopy, Binding, Bytecode, Cells, Chars, Closure, Cx,
             Environment, Expression, Gc, Held, Integer, Language, List, Local, LocalBinding, Owned,
-            Pairlist, Pointer, Promise, Real, Str, StringFill, Symbol, Tagged, Value, safe,
+            Pairlist, Pointer, Promise, Real, Step, Str, StringFill, Symbol, Tagged, Value, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -3384,10 +3384,13 @@ fn prepare_closure_call<'s>(
     {
         return Ok(Prepared::Done(value));
     }
-    if crate::annotations::typed_closure(function.read(context))
-        && let Some(value) = native_typed(context, closure_call)?
-    {
-        return Ok(Prepared::Done(value?));
+    if crate::annotations::typed_closure(function.read(context)) {
+        if let Some(value) = native_typed(context, closure_call)? {
+            return Ok(Prepared::Done(value?));
+        }
+        if let Some(unwind) = self_tail_call(context, closure_call)? {
+            return Err(unwind);
+        }
     }
     Ok(match bind_slot_frame(context, call, function, args)? {
         Some(frame) => Prepared::Slots(frame),
@@ -3535,7 +3538,163 @@ fn run_heap_frame<'s>(
         args,
         method_vars: handles::MethodVariables::none(),
     };
-    run_general(context, &general, signature)
+    if supplied.is_some() || !crate::annotations::typed_closure(function.read(context)) {
+        return run_general(context, &general, signature);
+    }
+    let result = run_replaceable(context, &general, signature);
+    let Err(unwind) = result else {
+        return result;
+    };
+    match handles::tail_call(context, &unwind, environment.value()) {
+        Some(cell) => run_tail_calls(context, function, sys_parent, cell),
+        None => Err(unwind),
+    }
+}
+
+/// [`run_general`] for the frame of a typed closure, which a self call in its tail position
+/// replaces ([`self_tail_call`]).
+fn run_replaceable<'s>(
+    context: &mut Cx<'s>,
+    frame: &GeneralFrame<'_, 's>,
+    signature: Signature<'s>,
+) -> R<Local<'s>> {
+    let state = interp();
+    let previous = std::mem::replace(&mut state.tail_call_frame, state.frames.len() as u32 + 1);
+    let result = run_general(context, frame, signature);
+    interp().tail_call_frame = previous;
+    result
+}
+
+/// Runs the self tail calls that replace a typed closure's frame one after another, from the
+/// call cell `first` ([`handles::tail_call_jump`]), each in a fresh frame with the original
+/// caller, until one returns.
+#[cold]
+#[inline(never)]
+fn run_tail_calls<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'s, Closure>,
+    sys_parent: Local<'s>,
+    first: Local<'s>,
+) -> R<Local<'s>> {
+    context.scope_loop(first, |inner, enclosing, cell| {
+        let function = enclosing.pass(function);
+        let sys_parent = enclosing.pass(sys_parent);
+        let (call, args) = handles::tail_call_parts(inner, cell)?;
+        let environment = bind_environment(inner, call, function, &args, Arguments::Unsupplied)?;
+        let general = GeneralFrame {
+            call,
+            function,
+            body: BodyFrame::Environment(environment),
+            sys_parent,
+            args: &args,
+            method_vars: handles::MethodVariables::none(),
+        };
+        match run_replaceable(inner, &general, Signature::Unchecked) {
+            Ok(value) => Ok(Step::Done(value)),
+            Err(unwind) => match handles::tail_call(inner, &unwind, environment.value()) {
+                Some(next) => Ok(Step::Next(next)),
+                None => Err(unwind),
+            },
+        }
+    })
+}
+
+/// The jump that replaces the running frame with `closure_call` when it is a self call of the
+/// frame's typed closure in the tail position of its body, so a loop written as recursion runs
+/// in one frame in the interpreter, as its native code runs it in one activation. The new frame
+/// keeps the original caller (`parent.frame()`), and `sys.call()` shows the tail call.
+#[cold]
+#[inline(never)]
+fn self_tail_call<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+) -> R<Option<Unwind>> {
+    let &ClosureCall {
+        call,
+        function,
+        args,
+        sys_parent,
+        supplied,
+    } = closure_call;
+    let state = interp();
+    if supplied.is_some()
+        || activity::observers() != 0
+        || state.tail_call_frame == 0
+        || state.tail_call_frame as usize != state.frames.len()
+    {
+        return Ok(None);
+    }
+    let Some(frame) = state.frames.last() else {
+        return Ok(None);
+    };
+    if frame.role != crate::FrameRole::Call
+        || frame.function.raw() != function.raw()
+        || frame.env.raw() != sys_parent.raw()
+        || !frame.on_exit.is_empty()
+    {
+        return Ok(None);
+    }
+    let Some(environment) = sys_parent.downcast::<Environment>() else {
+        return Ok(None);
+    };
+    let Some(body) = handles::closure_source(function.read(context)) else {
+        return Ok(None);
+    };
+    if !in_tail_position(body, call.read(context)) {
+        return Ok(None);
+    }
+    handles::tail_call_jump(context, environment, call, args).map(Some)
+}
+
+/// Whether `call` sits in a tail position of the closure body `body`, where its value is what
+/// the closure returns: the body itself, the last expression of a `{` in tail position, a
+/// branch of an `if` in tail position, or the argument of a `return` that the body runs as a
+/// statement, also inside a loop. `(` is not one, since it makes an invisible value visible.
+/// Native code loops only at the self calls this accepts (`typed::lower`), so the tiers agree on
+/// which recursions run in one frame.
+pub fn in_tail_position(body: Gc<'_>, call: Gc<'_>) -> bool {
+    let brace = handles::symbol(|symbols| symbols.brace).raw();
+    let if_ = handles::symbol(|symbols| symbols.if_).raw();
+    let return_ = handles::symbol(|symbols| symbols.return_).raw();
+    let for_ = handles::symbol(|symbols| symbols.for_).raw();
+    let while_ = handles::symbol(|symbols| symbols.while_).raw();
+    let repeat = handles::symbol(|symbols| symbols.repeat).raw();
+    // Each pending expression says whether its value is the closure's value (a tail) or is
+    // dropped (a statement), where only a `return` can reach a tail.
+    let mut pending: SmallVec<[(Gc<'_>, bool); 4]> = SmallVec::new();
+    pending.push((body, true));
+    while let Some((expression, tail)) = pending.pop() {
+        if tail && expression.raw() == call.raw() {
+            return true;
+        }
+        let Some(language) = expression.downcast::<Language>() else {
+            continue;
+        };
+        let head = language.head().raw();
+        let mut arguments: SmallVec<[Gc<'_>; 4]> = SmallVec::new();
+        let mut rest = language.rest();
+        while let Some(cell) = rest.downcast::<Pairlist>() {
+            arguments.push(cell.head());
+            rest = cell.rest();
+        }
+        if head == brace {
+            let last = arguments.len().saturating_sub(1);
+            for (index, &statement) in arguments.iter().enumerate() {
+                pending.push((statement, tail && index == last));
+            }
+        } else if head == return_ && arguments.len() == 1 {
+            pending.push((arguments[0], true));
+        } else if head == if_ && arguments.len() >= 2 {
+            pending.extend(arguments[1..].iter().map(|&branch| (branch, tail)));
+        } else if head == while_ && arguments.len() == 2 {
+            pending.push((arguments[1], false));
+        } else if head == for_ && arguments.len() == 3 {
+            pending.push((arguments[2], false));
+        } else if head == repeat && arguments.len() == 1 {
+            pending.push((arguments[0], false));
+        }
+    }
+    false
 }
 
 /// Runs `closure_call`, a call of a typed closure, natively when the native tier takes it, and
