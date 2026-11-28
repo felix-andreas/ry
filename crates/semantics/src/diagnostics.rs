@@ -2003,7 +2003,7 @@ fn vector_element_atomic<'db>(
 }
 
 /// The heads lowering resolves before the unknown-name check and before any type definition,
-/// besides the ry scalars, the lower-case spellings and `Promoted`/`Compared`.
+/// besides the ry scalars, the lower-case spellings and the family heads (`Promoted`, `Subtracted`, `Compared`).
 const ANNOTATION_PRIMITIVES: &[&str] = &[
     "Any",
     "Unknown",

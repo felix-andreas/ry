@@ -317,8 +317,13 @@ pub enum TyKind<'db> {
 /// Which outcome a [`TyKind::Family`] picks for each side of the R and ry divide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum FamilyResult {
-    /// `x * 2.5`, `x / y`, `x ^ 2`: ry's numbers keep their type, R's give `double`.
+    /// `x * 2.5`, `x / y`, `x ^ 2`: ry's numbers keep their type, R's give `double`, and a
+    /// class with arithmetic methods keeps its class (`Sys.Date() - 0.5` is a `Date`).
     Arithmetic,
+    /// `a - b` on two values of one type: ry's numbers keep their type, a class closed under
+    /// arithmetic keeps its class, and any other R value gives `double` (two dates subtract to
+    /// a `difftime`, not a date).
+    Difference,
     /// `x > 0`: ry's values give `Bool`, R's give `logical`.
     Comparison,
 }
@@ -327,6 +332,7 @@ impl FamilyResult {
     pub fn head(self) -> &'static str {
         match self {
             FamilyResult::Arithmetic => "Promoted",
+            FamilyResult::Difference => "Subtracted",
             FamilyResult::Comparison => "Compared",
         }
     }
@@ -334,6 +340,7 @@ impl FamilyResult {
     pub fn from_head(head: &str) -> Option<FamilyResult> {
         match head {
             "Promoted" => Some(FamilyResult::Arithmetic),
+            "Subtracted" => Some(FamilyResult::Difference),
             "Compared" => Some(FamilyResult::Comparison),
             _ => None,
         }
@@ -342,7 +349,7 @@ impl FamilyResult {
     /// The outcome for an operand on ry's side.
     pub fn ry_outcome<'db>(self, db: &'db dyn Db, operand: Ty<'db>) -> Ty<'db> {
         match self {
-            FamilyResult::Arithmetic => operand,
+            FamilyResult::Arithmetic | FamilyResult::Difference => operand,
             FamilyResult::Comparison => Ty::new(db, TyKind::Native(NativeScalar::Bool)),
         }
     }
@@ -352,7 +359,7 @@ impl FamilyResult {
         Ty::new(
             db,
             TyKind::Scalar(match self {
-                FamilyResult::Arithmetic => Atomic::Double,
+                FamilyResult::Arithmetic | FamilyResult::Difference => Atomic::Double,
                 FamilyResult::Comparison => Atomic::Logical,
             }),
         )
@@ -388,7 +395,7 @@ pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db
                 .all(|member| matches!(member.kind(db), TyKind::Native(_))) =>
         {
             match result {
-                FamilyResult::Arithmetic => operand,
+                FamilyResult::Arithmetic | FamilyResult::Difference => operand,
                 FamilyResult::Comparison => result.ry_outcome(db, operand),
             }
         }

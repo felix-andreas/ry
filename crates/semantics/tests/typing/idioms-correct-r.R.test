@@ -1356,14 +1356,14 @@ remove_paths: Unknown
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else 2L)
 #++++
-span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
+span: <T: arithmetic or number> fn(from: T, to: T) -> Subtracted<T>
 count_up: fn(fine: logical) -> double
 
 #---- a_numeric_binding_still_rejects_a_union_with_text
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
 #++++
-span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
+span: <T: arithmetic or number> fn(from: T, to: T) -> Subtracted<T>
 count_up: Unknown
 73..95 error[type-mismatch] expected `integer`, found `double | character`
 
@@ -1390,7 +1390,7 @@ step <- function(f, pars, arglist) {
   f(pars = pars + 1, arglist) - base
 }
 #++++
-step: <T: arithmetic or number, U, V: arithmetic or number> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> Promoted<V>
+step: <T: arithmetic or number, U, V: arithmetic or number> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> Subtracted<V>
 
 #---- a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed
 # AzureRMR calls `api_func(op, options = ...)` and then `api_func(op)`, relying on the callee's
@@ -2785,9 +2785,9 @@ none <- function() search(fun = function(x) 1, constraint = NULL, target = NULL)
 maybe <- function(flag) search(fun = function(x) 1, target = if (flag) 2 else NULL)
 wrong <- function() search(fun = function(x) 1, target = "a")
 #++++
-check: <T, U: arithmetic or number> fn(pars: T, fun: fn(T) -> U, target: U) -> Promoted<U>
-solve: <T, U, V: arithmetic or number> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Promoted<V> | U
-search: <T, U, V: arithmetic or number> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Promoted<V> | U
+check: <T, U: arithmetic or number> fn(pars: T, fun: fn(T) -> U, target: U) -> Subtracted<U>
+solve: <T, U, V: arithmetic or number> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Subtracted<V> | U
+search: <T, U, V: arithmetic or number> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Subtracted<V> | U
 none: fn() -> double
 maybe: fn(flag: logical) -> double
 wrong: Unknown

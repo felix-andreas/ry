@@ -825,15 +825,19 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 
 The constraints named `... or ...` join an R constraint and a ry one, and they are what
 [unannotated arithmetic](#unannotated-values-in-arithmetic) and comparisons infer, with a result
-written `Promoted<T>` or `Compared<T>` when R and ry give different results:
+written `Promoted<T>`, `Subtracted<T>` or `Compared<T>` when R and ry give different results:
 
-| Type | `T` a ry value | `T` an R value |
-| --- | --- | --- |
-| `Promoted<T>` | `T` | `double` |
-| `Compared<T>` | `Bool`, or `List<Bool>` for a `List` | `logical` |
+| Type | `T` a ry value | `T` a class | `T` another R value |
+| --- | --- | --- | --- |
+| `Promoted<T>` | `T` | `T`, for a class with arithmetic | `double` |
+| `Subtracted<T>` | `T` | `T`, for a class with arithmetic between two of its values | `double` |
+| `Compared<T>` | `Bool`, or `List<Bool>` for a `List` | `logical` | `logical` |
 
 So `function(x) x * 2` is `<T: arithmetic or number> fn(x: T) -> Promoted<T>`: it gives an `I64`
-for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer`, as R does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
+for an `I64`, as `x * 2` on an `I64` does in ry, a `double` for an `integer`, as R does, and a
+`matrix` for a `matrix`, because R keeps the class through its arithmetic methods.
+`Subtracted<T>` is the difference of two values of one type, so it gives a `double` for two dates,
+whose difference R makes a `difftime`. The three may be written in an annotation too.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call, and the message names the
@@ -956,7 +960,7 @@ the declaration's arity:
 
 A type definition cannot take the name of a built-in type: an atomic or ry scalar name (`double`,
 `I64`, `Str`), `Any`, `Unknown`, `NULL`, a table type (`DataFrame`, `LazyFrame`, `GroupBy`,
-`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Compared`, or the standard library's `List`, `Dict`,
+`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Subtracted`, `Compared`, or the standard library's `List`, `Dict`,
 `Set` and `Expr`. Annotations and checks read such a name as the built-in type, so a definition
 with it would conflict, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
 an alias, which a project's own definition of `Result` replaces.
@@ -2864,7 +2868,7 @@ operand pick the [constraint](#constraints) and the result:
 | `x` beside a whole `double` literal (`x * 2`) | `arithmetic or number` | `Promoted<T>` |
 | `x` beside a fractional literal (`x * 0.5`), or under `/` | `arithmetic or F64` | `Promoted<T>` |
 | two of one type, under `+`, `*`, `%%` or `%/%` | `num` | `T` |
-| two of one type, under `-` | `arithmetic or number` | `Promoted<T>` |
+| two of one type, under `-` | `arithmetic or number` | `Subtracted<T>` |
 | two of one type, under `/` | `numeric or F64` | `Promoted<T>` |
 | two of one type, under `^` | `num` | `Promoted<T>` |
 | beside any other value | `arithmetic` | R's result |
@@ -2879,12 +2883,15 @@ A whole literal is one with no fractional part, so `2.0` counts as whole and `2.
 class such as `Date` adds a number but not another value of its own, so two operands of one type
 take `num` under `+`. A difference `a - b` is the exception, because R subtracts two dates or two
 times: it asks only `arithmetic` on the R side, and the difference of two dates is a `difftime`,
-so its R result is `double`, the representation every arithmetic class shares.
+so its result is `Subtracted<T>`: a `double`, the representation every arithmetic class shares,
+unless the class has arithmetic between two of its values (two `difftime`s subtract to a
+`difftime`). Beside a number, a class with arithmetic keeps its class: `Sys.Date() - 0.5` is a
+`Date`.
 
 A family result keeps both outcomes while it is bound, returned, passed to a function, or used as
 another operand. Anywhere only an R value fits, such as a subscript (`(x * 2)[1]`), a `for`
 sequence, `c()`, an overloaded base function (`abs(x - y)`), or an operand beside another open
-value, `Promoted<T>` is `double`, `Compared<T>` is `logical`, and the operand takes its
+value, `Promoted<T>` and `Subtracted<T>` are `double`, `Compared<T>` is `logical`, and the operand takes its
 constraint's R half. A value tested as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes R's half
 the same way, because a condition reads R's truth of a number, which a ry number lacks.
 
@@ -2894,7 +2901,7 @@ the same way, because a condition reads R's truth of a number, which a ry number
   a `double` for an R number, and a type error for an `I64`.
 - `function(a, b) a + b` is `<T: num> fn(a: T, b: T) -> T`, and calling it with two dates is a
   type error. Calling it with two `I64`s is an `I64`.
-- `function(a, b) a - b` is `<T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>`, and gives
+- `function(a, b) a - b` is `<T: arithmetic or number> fn(a: T, b: T) -> Subtracted<T>`, and gives
   a `double` for two dates and an `I64` for two `I64`s.
 - `function(x) x > 0` is `<T: comparable or number> fn(x: T) -> Compared<T>`, a `Bool` for an
   `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
