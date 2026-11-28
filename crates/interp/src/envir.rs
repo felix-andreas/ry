@@ -2119,10 +2119,9 @@ fn do_import_into_env<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<L
 }
 
 /// Whether `value` is the logical `TRUE` of length one, as `isTRUE` asks.
-fn is_true(context: &Cx<'_>, value: Local<'_>) -> bool {
-    value
-        .standard::<Logical>()
-        .is_some_and(|value| matches!(value.as_slice(context), [1]))
+fn is_true<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<bool> {
+    let value = handles::dense::<Logical>(context, value)?;
+    Ok(value.is_some_and(|value| matches!(value.as_slice(context), [1])))
 }
 
 /// `function` called with `values` as its unnamed arguments, from `environment`.
@@ -2184,7 +2183,7 @@ fn do_local_s4_generics<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R
         let value = eval::forced_value(context, binding)?;
         let is_s4_generic = (handles::is_object(value) || handles::is_s4(value)) && {
             let answer = call_with(context, is_generic, &[value], caller)?;
-            is_true(context, answer)
+            is_true(context, answer)?
         };
         answered.insert(symbol.raw(), i32::from(is_s4_generic));
         generic.push(i32::from(is_s4_generic));
@@ -2374,7 +2373,7 @@ fn register_method<'s>(
                 && (handles::is_object(function) || handles::is_s4(function))
                 && {
                     let answer = call_with(context, registration.generic, &[function], caller)?;
-                    is_true(context, answer)
+                    is_true(context, answer)?
                 }
             {
                 function = call_with(context, registration.default, &[function], caller)?;
