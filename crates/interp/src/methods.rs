@@ -1731,6 +1731,9 @@ fn class_from_cache<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) ->
             arguments.error("class should be either a character-string name or a class definition")
         );
     }
+    if handles::length(context, class) == 0 {
+        return Ok(handles::null());
+    }
     let Some(table) = table.downcast::<Environment>() else {
         return Err(arguments.error("invalid class table: expected an environment"));
     };

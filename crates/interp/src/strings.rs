@@ -781,6 +781,9 @@ struct FormatPiece<'a> {
 /// The pieces of every format string of a call, one format after another.
 type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 4]>;
 
+/// The most arguments `sprintf` takes, its format included, as in GNU R.
+const MAX_SPRINTF_ARGUMENTS: usize = 100;
+
 /// An argument of `sprintf` and the conversions it needs, computed once per call.
 struct FormatArgument<'s> {
     value: Local<'s>,
@@ -796,8 +799,10 @@ fn do_sprintf<'s>(context: &mut Cx<'s>, call: &Args<'_, 's>) -> R<Local<'s>> {
     let Some(formats) = handles::dense::<Str>(context, call.value(0))? else {
         return Err(error("'fmt' is not a character vector"));
     };
-    if call.len() > 100 {
-        return Err(error("only 100 arguments are allowed"));
+    if call.len() > MAX_SPRINTF_ARGUMENTS {
+        return Err(error(format!(
+            "only {MAX_SPRINTF_ARGUMENTS} arguments are allowed"
+        )));
     }
     refuse_bytes(context, formats)?;
     let mut arguments: SmallVec<[FormatArgument<'s>; 8]> = SmallVec::new();
@@ -845,8 +850,8 @@ fn format_call<'s>(
     format_text: &mut String,
 ) -> R<Local<'s>> {
     let format_count = formats.len();
-    // One bit per argument, set once a conversion reads it: `do_sprintf` refuses more than 100.
-    let mut used = [0u64; 2];
+    // One bit per argument, set once a conversion reads it.
+    let mut used = [0u64; MAX_SPRINTF_ARGUMENTS.div_ceil(64)];
     // An `NA` format is the text "NA", as in GNU R. The texts are copied out of the vector, one
     // after another, because the conversions below run R code, which a borrow of it could not
     // outlive; format `i` is `format_text[text_ends[i - 1]..text_ends[i]]`.
