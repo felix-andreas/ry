@@ -268,7 +268,7 @@ ns: integer[]
 words: character[]
 flags: logical[]
 a105: Any
-a106: Unknown
+a106: double[]
 a107: character[]
 
 #---- matrices

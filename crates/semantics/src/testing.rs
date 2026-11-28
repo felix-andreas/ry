@@ -1154,19 +1154,28 @@ pub fn compare_renamed(
                 .sum();
             (offset as i64 + growth) as usize
         };
+        // A finding that quotes source text keeps an occurrence the rename backquoted
+        // (`length(`x` == 0)`), so both sides compare with a backquoted old name unquoted.
+        let unquoted = |line: String| {
+            rename.names.iter().fold(line, |line, (old, _)| {
+                line.replace(&format!("`{old}`"), old)
+            })
+        };
         let mut expected: Vec<String> = map_ranges(before, moved, moved)
             .lines()
-            .map(str::to_owned)
+            .map(|line| unquoted(line.to_owned()))
             .collect();
         let mut actual: Vec<String> = after
             .lines()
             .map(|line| {
-                rename
-                    .names
-                    .iter()
-                    .fold(line.to_owned(), |line, (old, new)| {
-                        line.replace(new.as_str(), old)
-                    })
+                unquoted(
+                    rename
+                        .names
+                        .iter()
+                        .fold(line.to_owned(), |line, (old, new)| {
+                            line.replace(new.as_str(), old)
+                        }),
+                )
             })
             .collect();
         expected.sort_unstable();

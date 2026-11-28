@@ -13,8 +13,8 @@ The quality bar is four things.
 - **No false positive on the roughly 200 most-used base functions**, with `[check] typing = true`,
   on an idiomatic call form. `crates/semantics/tests/typing/base-functions.R.test` measures it: the
   functions the corpus calls most, one idiomatic call each, with no diagnostic allowed. Its
-  remaining `Unknown` results (`Reduce` over an operator, a replacement call's value) are strict-mode
-  gaps, not false reports.
+  remaining `Unknown` results (the value a replacement call such as `attr(x, "tag") <- "t"` leaves
+  in `x`) are strict-mode gaps, not false reports.
 - **Keystroke to diagnostics at a median of 30 ms or less and a 95th percentile of 100 ms or less,
   at 300k lines.** Read those against the raw-parse floor the instrument prints, because a latency
   number swings by about 1.4 times with machine load. `crates/semantics/tests/test_perf.rs` pins
