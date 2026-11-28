@@ -542,9 +542,7 @@ enum Matprod {
 
 /// Records a new value of option `name` (`matprod` or `ry.blas`), which `options()` has
 /// already validated; `NULL` restores the default.
-pub(crate) unsafe fn set_product_option(options: &mut ProductOptions, name: &[u8], value: Sexp) {
-    let choice = values::first_string(value);
-    let choice = choice.as_deref();
+pub(crate) fn set_product_option(options: &mut ProductOptions, name: &[u8], choice: Option<&str>) {
     if name == b"matprod" {
         options.matprod = match choice {
             Some("internal") => Matprod::Internal,

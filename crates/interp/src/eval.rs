@@ -635,6 +635,20 @@ pub fn frame_value<'s>(
     handles::force(context, value).map(Some)
 }
 
+/// The content of the binding of `symbol` in the frame of `environment` itself, `None` when the
+/// frame does not bind it. A promise comes back unforced, though an active binding is called.
+pub fn frame_content<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'_, Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> R<Option<Local<'s>>> {
+    let Some(binding) = handles::frame_binding(context, environment, symbol) else {
+        return Ok(None);
+    };
+    let found = bound(context, binding_found(binding));
+    resolve(context, found)
+}
+
 /// `findFun`: the first function bound to `symbol` from `env` outward.
 pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
     find_called_fun(symbol, env, unbound())
@@ -5198,7 +5212,7 @@ pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
-#[inline]
+#[inline(always)]
 pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
@@ -8726,10 +8740,10 @@ fn do_eval<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Loc
             .downcast::<Environment>()
             .ok_or_else(|| invalid_envir(envir))?,
         SexpType::Nil => enclosure.unwrap_or_else(handles::base_environment),
-        SexpType::List => handles::list_environment_in(context, envir, enclosure)?,
+        SexpType::List => crate::envir::list_to_environment(context, envir, enclosure)?,
         SexpType::Pairlist => {
             let list = handles::pairlist_to_list(context, envir)?;
-            handles::list_environment_in(context, list, enclosure)?
+            crate::envir::list_to_environment(context, list, enclosure)?
         }
         SexpType::Integer | SexpType::Real => {
             if handles::length(context, envir) != 1 {
@@ -8740,7 +8754,7 @@ fn do_eval<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Loc
                 return Err(invalid_envir(envir));
             }
             let caller = arguments.environment(context)?;
-            handles::sys_frame(context, which, caller)?
+            crate::envir::sys_frame(context, which, caller)?
         }
         _ => return Err(invalid_envir(envir)),
     };
@@ -8982,7 +8996,15 @@ fn do_substitute<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) ->
         SexpType::Environment => environment
             .downcast::<Environment>()
             .ok_or_else(|| arguments.error("invalid environment specified"))?,
-        SexpType::List | SexpType::Pairlist => handles::list_environment(context, environment)?,
+        SexpType::List => crate::envir::list_to_environment(
+            context,
+            environment,
+            Some(handles::empty_environment()),
+        )?,
+        SexpType::Pairlist => {
+            let list = handles::pairlist_to_list(context, environment)?;
+            crate::envir::list_to_environment(context, list, Some(handles::empty_environment()))?
+        }
         SexpType::Nil => handles::empty_environment(),
         _ => return Err(arguments.error("invalid environment specified")),
     };
@@ -9566,9 +9588,7 @@ fn assign_variable<'s>(
         let enclosure = enclosure_of(context, environment);
         return assign_outward(context, symbol, value, enclosure);
     }
-    let binding =
-        handles::frame_binding(context, environment, symbol).map(|cell| context.root(cell));
-    handles::assign_local(context, symbol, value, environment, binding)
+    handles::assign_in_frame(context, symbol, value, environment)
 }
 
 /// Where `<<-` from `environment` starts: its enclosure, or the empty environment itself, whose

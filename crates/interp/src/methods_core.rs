@@ -5850,7 +5850,7 @@ unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
         crate::eval::Reify::Site(crate::eval::Site::S4Dispatch),
     )?;
     let target = crate::envir::get_option("topLevelEnvironment");
-    Ok(Some(crate::envir::top_env(caller, target)))
+    Ok(Some(crate::envir::top_env(caller, target)?))
 }
 
 /// A single, non-empty string without attributes.
