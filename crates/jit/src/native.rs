@@ -2931,7 +2931,19 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
         return None;
     }
     let function = typed.function;
-    let (arguments, ahead) = gather(function, typed.args)?;
+    let (arguments, ahead) = match gather(function, typed.args) {
+        Gathered::Values(arguments, ahead) => (arguments, ahead),
+        Gathered::Declined => return None,
+        Gathered::Unread(unread) => {
+            if let Err(unwind) = force_read_first(typed, &unread)? {
+                return Some(Err(unwind));
+            }
+            match gather(function, typed.args) {
+                Gathered::Values(arguments, ahead) => (arguments, ahead),
+                _ => return None,
+            }
+        }
+    };
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
     if let Some(value) = typed::call(typed, &arguments, &ahead) {
@@ -2955,24 +2967,53 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
     })
 }
 
-/// The arguments a native call passes, as values with no promise left: `None` unless every
-/// argument matches a formal as R matches it and is at hand without evaluating anything. A
+/// What [`gather`] found for a call's arguments.
+pub(crate) enum Gathered {
+    /// The values the native call passes, with no promise left, and what reading them ahead
+    /// read.
+    Values(SmallVec<[Sexp; 4]>, ReadAhead),
+    /// Every argument is at hand but the promises at [`Unread::positions`], whose code only
+    /// forcing computes.
+    Unread(Unread),
+    /// The native tier does not take the call, for the reason [`annotations::decline`] got.
+    Declined,
+}
+
+/// The arguments of a call that [`gather`] could not read without forcing.
+pub(crate) struct Unread {
+    /// The formals' positions whose argument is a promise of code that only forcing computes.
+    positions: SmallVec<[u32; 2]>,
+    /// For each formal, the argument matched to it, if the call passes one.
+    matched: SmallVec<[Option<usize>; 4]>,
+}
+
+/// The arguments a native call passes, as values with no promise left, unless an argument does
+/// not match a formal as R matches it or is not at hand without evaluating anything. A
 /// formal the call leaves out with a constant scalar default gets that value, and the typed
 /// core's code computes any other default; one before a later value stands in the compile key as
 /// `Type::Absent` ([`ReadAhead::absent`]). Also gives what reading them
 /// ahead read ([`ReadAhead`]): each promise read without forcing, with its value, and each
-/// variable a value depends on.
-pub(crate) unsafe fn gather(
+/// variable a value depends on. An argument whose code only forcing computes, such as a call,
+/// makes the result [`Gathered::Unread`], which [`force_read_first`] may resolve.
+pub(crate) unsafe fn gather(function: Sexp, args: &[interp::builtins::Arg]) -> Gathered {
+    match gather_values(function, args) {
+        Ok(Some((arguments, ahead))) => Gathered::Values(arguments, ahead),
+        Ok(None) => Gathered::Declined,
+        Err(unread) => Gathered::Unread(unread),
+    }
+}
+
+unsafe fn gather_values(
     function: Sexp,
     args: &[interp::builtins::Arg],
-) -> Option<(SmallVec<[Sexp; 4]>, ReadAhead)> {
+) -> Result<Option<(SmallVec<[Sexp; 4]>, ReadAhead)>, Unread> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         annotations::decline(|| String::from("it is being debugged or traced"));
-        return None;
+        return Ok(None);
     }
     if interp::moves::tracking() {
         annotations::decline(|| String::from("the session is tracking copies"));
-        return None;
+        return Ok(None);
     }
     let formals = function.car();
     // Arguments in the order of the formals, as most calls pass them, match without names.
@@ -2982,7 +3023,7 @@ pub(crate) unsafe fn gather(
     while formal.kind() == SexpType::Pairlist {
         if formal.tag() == values::symbols().dots {
             annotations::decline(|| String::from("the function takes `...`"));
-            return None;
+            return Ok(None);
         }
         if let Some(arg) = args.get(count)
             && arg.tag != values::nil()
@@ -3011,12 +3052,14 @@ pub(crate) unsafe fn gather(
             annotations::decline(|| {
                 String::from("R raises an error matching its arguments to the parameters")
             });
-            return None;
+            return Ok(None);
         };
         matched
     };
     let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut ahead = ReadAhead::default();
+    // The positions of promises only forcing computes, which `arguments` holds as the promise.
+    let mut unread: SmallVec<[u32; 2]> = SmallVec::new();
     // The formals, with their positions, left out since the last value `arguments` holds, whose
     // defaults the typed core computes in the function's own code.
     let mut left_out: SmallVec<[(usize, Sexp); 4]> = SmallVec::new();
@@ -3039,26 +3082,17 @@ pub(crate) unsafe fn gather(
                                     item + 1
                                 )
                             });
-                            return None;
+                            return Ok(None);
                         }
-                        annotations::decline(|| {
-                            format!(
-                                "argument {} is `{}`, which R code wrote, so it stays lazy until \
-                                 the function uses it, as in R, and the native tier reads ahead \
-                                 only constants, variables, arithmetic and literals: compute it \
-                                 into a variable before the call",
-                                item + 1,
-                                interp::deparse::deparse_first_line(bytecode::source_of_body(
-                                    arg.value.cdr()
-                                ))
-                            )
-                        });
-                        return None;
+                        unread.push(position as u32);
+                        arguments.push(arg.value);
+                        formal = formal.cdr();
+                        continue;
                     };
                     value
                 } else if arg.value == values::missing_arg() {
                     annotations::decline(|| format!("argument {} is empty", item + 1));
-                    return None;
+                    return Ok(None);
                 } else {
                     arg.value
                 }
@@ -3112,21 +3146,240 @@ pub(crate) unsafe fn gather(
                         "the call leaves out a formal past the 64th and passes a later one",
                     )
                 });
-                return None;
+                return Ok(None);
             }
             ahead.absent |= 1 << absent;
         }
         if !left_to_native(&left_out) {
-            return None;
+            return Ok(None);
         }
         left_out.clear();
         arguments.push(value);
         formal = formal.cdr();
     }
     if !left_to_native(&left_out) {
+        return Ok(None);
+    }
+    if unread.is_empty() {
+        Ok(Some((arguments, ahead)))
+    } else {
+        Err(Unread {
+            positions: unread,
+            matched,
+        })
+    }
+}
+
+/// Forces the promises [`gather`] could not read, at the native entry of the call `typed`, when
+/// forcing them first is what the interpreter would do: the body reads its parameters in an
+/// order ([`leading_reads`]) whose prefix up to the last of these promises runs nothing else and
+/// covers every one of them. Then the call binds its arguments in a frame of its own, runs the
+/// entry checks of the arguments that are values, as the interpreter does before the body, and
+/// forces the promises of that prefix in order, so their code runs where R would run it, under
+/// the call's frame. `None` declines the call, which the interpreter then runs.
+unsafe fn force_read_first(typed: &TypedCall<'_>, unread: &Unread) -> Option<R<()>> {
+    let function = typed.function;
+    let reads = leading_reads(function);
+    // The reads up to the last of the promises, or none when the body may not read one first.
+    let prefix = unread
+        .positions
+        .iter()
+        .map(|position| reads.iter().position(|read| read == position))
+        .try_fold(0, |end, index| Some(end.max(index? + 1)))
+        .map_or(&[][..], |end| &reads[..end]);
+    let supplied = prefix.iter().all(|&position| {
+        unread
+            .matched
+            .get(position as usize)
+            .is_some_and(Option::is_some)
+    });
+    if prefix.is_empty() || !supplied {
+        let first = unread.positions[0] as usize;
+        let item = unread.matched.get(first).copied().flatten()?;
+        let source = bytecode::source_of_body(typed.args.get(item)?.value.cdr());
+        annotations::decline(|| {
+            format!(
+                "argument {} is `{}`, which R code wrote, so it stays lazy until the function \
+                 uses it, as in R, and the function does other work before it reads it: compute \
+                 it into a variable before the call",
+                item + 1,
+                interp::deparse::deparse_first_line(source)
+            )
+        });
         return None;
     }
-    Some((arguments, ahead))
+    let formals = values::pairlist_items(function.car());
+    Some(interp::eval::run_in_frame(typed, |env| {
+        for (position, item) in unread.matched.iter().enumerate() {
+            if let (Some(item), Some(formal)) = (item, formals.get(position)) {
+                interp::heap().define(env, formal.0, typed.args[*item].value)?;
+            }
+        }
+        annotations::enter(typed.call, function, env, interp::interp().frames.len())?;
+        for &position in prefix {
+            let Some(formal) = formals.get(position as usize) else {
+                continue;
+            };
+            // An entry check that converts binds a promise of its own over the argument's.
+            if let Some(cell) = interp::heap().frame_cell(env, formal.0)
+                && cell.cdr().kind() == SexpType::Promise
+            {
+                interp::eval::force_promise(cell.cdr())?;
+            }
+        }
+        Ok(())
+    }))
+}
+
+/// The positions of the formals `function`'s body reads, in the order it reads them, before it
+/// runs anything that could see a difference between an argument forced then and one forced at
+/// the call: the walk stops at a call of anything but a base builtin or a typed closure, which
+/// takes its arguments strictly from typed code, at the first such call's own work, at a
+/// variable that is not a formal, whose lookup may force a promise, and at control flow other
+/// than a sequence. A formal read twice appears once.
+unsafe fn leading_reads(function: Sexp) -> SmallVec<[u32; 4]> {
+    let mut reads = SmallVec::new();
+    let body = bytecode::source_of_body(bytecode::closure_body(function));
+    let mut env = function.tag();
+    let mut resolvable = true;
+    while env.kind() == SexpType::Environment && env != values::global_env() {
+        resolvable &= !env.has_gp(gp::PENDING_FRAME);
+        env = env.enclosure();
+    }
+    let walk = LeadingReads {
+        formals: function.car(),
+        env: function.tag(),
+        resolvable,
+    };
+    read_expression(&walk, body, &mut reads, 0);
+    reads
+}
+
+/// What [`leading_reads`] walks a body with.
+struct LeadingReads {
+    formals: Sexp,
+    env: Sexp,
+    /// Whether a function name resolves from `env` without asking a slot frame.
+    resolvable: bool,
+}
+
+/// Adds the formals `expression` reads before it runs anything to `reads`, and whether the
+/// walk goes on past it.
+unsafe fn read_expression(
+    walk: &LeadingReads,
+    expression: Sexp,
+    reads: &mut SmallVec<[u32; 4]>,
+    depth: usize,
+) -> bool {
+    match expression.kind() {
+        SexpType::Symbol => {
+            let mut formal = walk.formals;
+            let mut position = 0u32;
+            while formal.kind() == SexpType::Pairlist {
+                if formal.tag() == expression {
+                    if !reads.contains(&position) {
+                        reads.push(position);
+                    }
+                    return true;
+                }
+                formal = formal.cdr();
+                position += 1;
+            }
+            false
+        }
+        SexpType::Language if depth < MAX_PURE_DEPTH => read_call(walk, expression, reads, depth),
+        SexpType::Integer
+        | SexpType::Real
+        | SexpType::Logical
+        | SexpType::I64
+        | SexpType::String => expression.attrib() == values::nil(),
+        _ => false,
+    }
+}
+
+unsafe fn read_call(
+    walk: &LeadingReads,
+    call: Sexp,
+    reads: &mut SmallVec<[u32; 4]>,
+    depth: usize,
+) -> bool {
+    let symbols = values::symbols();
+    let head = call.car();
+    let args = call.cdr();
+    if head == symbols.brace {
+        let mut item = args;
+        while item.kind() == SexpType::Pairlist {
+            if !read_expression(walk, item.car(), reads, depth + 1) {
+                return false;
+            }
+            item = item.cdr();
+        }
+        return true;
+    }
+    if head == symbols.paren {
+        return args.kind() == SexpType::Pairlist
+            && read_expression(walk, args.car(), reads, depth + 1);
+    }
+    // Each of these runs its first operand and then does something the walk does not follow.
+    if [
+        symbols.return_,
+        symbols.if_,
+        symbols.and2,
+        symbols.or2,
+        symbols.assign,
+        symbols.assign_eq,
+    ]
+    .contains(&head)
+    {
+        let first = if head == symbols.assign || head == symbols.assign_eq {
+            args.cdr()
+        } else {
+            args
+        };
+        if first.kind() == SexpType::Pairlist {
+            read_expression(walk, first.car(), reads, depth + 1);
+        }
+        return false;
+    }
+    if head.kind() != SexpType::Symbol || !walk.resolvable || is_formal(walk, head) {
+        return false;
+    }
+    let Some(resolved) = resolve_function(head, walk.env) else {
+        return false;
+    };
+    let callee = resolved.function;
+    let strict = match callee.kind() {
+        SexpType::Builtin => true,
+        SexpType::Closure => annotations::is_typed(callee),
+        _ => false,
+    };
+    if !strict {
+        return false;
+    }
+    let mut item = args;
+    while item.kind() == SexpType::Pairlist {
+        if item.tag() != values::nil()
+            || item.car() == values::missing_arg()
+            || item.car() == values::symbols().dots
+            || !read_expression(walk, item.car(), reads, depth + 1)
+        {
+            return false;
+        }
+        item = item.cdr();
+    }
+    // The call itself runs code.
+    false
+}
+
+unsafe fn is_formal(walk: &LeadingReads, symbol: Sexp) -> bool {
+    let mut formal = walk.formals;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbol {
+            return true;
+        }
+        formal = formal.cdr();
+    }
+    false
 }
 
 /// Whether the formals `left_out` can be left to the typed core's code: each has a default.
