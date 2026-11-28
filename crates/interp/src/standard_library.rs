@@ -45,6 +45,7 @@ use {
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
+        ops::Range,
         sync::LazyLock,
     },
 };
@@ -700,7 +701,7 @@ unsafe fn missing_scalar(value: Sexp) -> Option<&'static str> {
 /// dropped.
 unsafe fn list_elements(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Vec<Sexp>> {
     let count = list_count(call, parameter, value)?;
-    list_slice(value, 0, count)
+    (0..count).map(|index| list_item(value, index)).collect()
 }
 
 /// The length of a list argument, refusing anything that is not a list. A function that reads
@@ -721,9 +722,117 @@ unsafe fn list_item(value: Sexp, index: usize) -> R<Sexp> {
     Ok(value.element(index))
 }
 
-/// Items `from..to` of a list argument [`list_count`] accepted.
-unsafe fn list_slice(value: Sexp, from: usize, to: usize) -> R<Vec<Sexp>> {
-    (from..to).map(|index| list_item(value, index)).collect()
+/// Runs `body` while the call holds a reference to `list`, the way an R closure's argument
+/// does, so a callback that assigns into the list with `<<-` copies it instead of changing the
+/// items the call is still reading one at a time.
+unsafe fn holding<T>(list: Sexp, body: impl FnOnce() -> R<T>) -> R<T> {
+    list.increment_refcount();
+    let result = body();
+    list.decrement_refcount();
+    result
+}
+
+/// A part of a collection the library builds from its arguments: a run of one list's items, or
+/// one new item.
+enum Piece {
+    Run(Sexp, Range<usize>),
+    Item(Sexp),
+}
+
+/// The collection of the items of `pieces` in order, as [`sequence`] builds it from them, except
+/// that an empty result keeps the storage of the first Array a run reads, as [`subset`] keeps
+/// `like`'s. When `like` and every non-empty run are Arrays of one item type that each new item
+/// has too, the items move in their packed form, so appending to a million doubles copies one
+/// vector instead of boxing a million numbers.
+unsafe fn assembled(call: &Call<'_>, like: Sexp, pieces: &[Piece]) -> R<Sexp> {
+    'packed: {
+        if !like.is_array() {
+            break 'packed;
+        }
+        let (mut first, mut source, mut total) = (None, None::<Sexp>, 0usize);
+        for piece in pieces {
+            match piece {
+                Piece::Run(list, range) if range.is_empty() => {
+                    if list.is_array() {
+                        first.get_or_insert(*list);
+                    }
+                }
+                Piece::Run(list, range) => {
+                    if !list.is_array() || list.is_altrep() {
+                        break 'packed;
+                    }
+                    match source {
+                        Some(kind) if arrays::items(kind) != arrays::items(*list) => break 'packed,
+                        Some(_) => {}
+                        None => source = Some(*list),
+                    }
+                    first.get_or_insert(*list);
+                    total += range.len();
+                }
+                Piece::Item(_) => total += 1,
+            }
+        }
+        let Some(source) = source else {
+            match first {
+                Some(list) if total == 0 => return arrays::empty_of(list.kind()),
+                _ => break 'packed,
+            }
+        };
+        let fits = |piece: &Piece| match piece {
+            Piece::Item(value) => arrays::holds_item(source, *value),
+            Piece::Run(..) => true,
+        };
+        if !pieces.iter().all(fits) {
+            break 'packed;
+        }
+        let result = values::alloc(source.kind(), total)?;
+        // Strings and ry values are written uncounted and counted once at the end.
+        let references = matches!(source.kind(), SexpType::String | SexpType::List);
+        let mut at = 0;
+        for piece in pieces {
+            match piece {
+                Piece::Run(_, range) if range.is_empty() => {}
+                Piece::Run(list, range) => {
+                    let end = at + range.len();
+                    match source.kind() {
+                        SexpType::Logical | SexpType::Integer => values::ints_mut(result)[at..end]
+                            .copy_from_slice(&values::ints(*list)[range.clone()]),
+                        SexpType::Real => values::reals_mut(result)[at..end]
+                            .copy_from_slice(&values::reals(*list)[range.clone()]),
+                        SexpType::I64 => result.slice_mut::<i64>()[at..end]
+                            .copy_from_slice(&list.slice::<i64>()[range.clone()]),
+                        _ => result.slice_mut::<Sexp>()[at..end]
+                            .copy_from_slice(&list.slice::<Sexp>()[range.clone()]),
+                    }
+                    at = end;
+                }
+                Piece::Item(value) => {
+                    match source.kind() {
+                        SexpType::String => result.slice_mut::<Sexp>()[at] = value.element(0),
+                        SexpType::List => result.slice_mut::<Sexp>()[at] = *value,
+                        _ => arrays::store_item(result, *value, at),
+                    }
+                    at += 1;
+                }
+            }
+        }
+        if references {
+            crate::heap().count_written_elements(result);
+        }
+        return Ok(arrays::finish(result));
+    }
+    let mut items = Vec::new();
+    for piece in pieces {
+        match piece {
+            Piece::Run(list, range) => {
+                for index in range.clone() {
+                    items.push(list_item(*list, index)?);
+                }
+            }
+            Piece::Item(value) => items.push(*value),
+        }
+    }
+    sequence(call, like, &items)
 }
 
 /// A collection the library returns: an Array when the collection the call works on (`like`)
@@ -1193,6 +1302,16 @@ unsafe fn result_map2(call: &Call<'_>) -> R<Sexp> {
 /// `Num.to_r` converts them, and integers and doubles together give a double vector.
 unsafe fn list_to_r(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
+    // An Array of R scalars is already the R vector without the Array bit, which a copy drops.
+    if list.is_array()
+        && length(list) > 0
+        && matches!(
+            list.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String
+        )
+    {
+        return values::duplicate(list);
+    }
     let mut items = list_elements(call, "list", list)?;
     for item in &mut items {
         if let Some(number) = numbers::read(*item) {
@@ -1281,12 +1400,20 @@ unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
         }
         return Ok(list);
     }
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let index = whole(call, "index", index)?;
-    if let Some(at) = position(index, items.len()) {
-        items[at] = value;
+    match position(index, count) {
+        Some(at) => assembled(
+            call,
+            list,
+            &[
+                Piece::Run(list, 0..at),
+                Piece::Item(value),
+                Piece::Run(list, at + 1..count),
+            ],
+        ),
+        None => assembled(call, list, &[Piece::Run(list, 0..count)]),
     }
-    sequence(call, list, &items)
 }
 
 unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
@@ -1311,9 +1438,15 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
         replace_owned(list, at, value)?;
         return Ok(list);
     }
-    let mut items = list_slice(list, 0, count)?;
-    items[at] = value;
-    sequence(call, list, &items)
+    assembled(
+        call,
+        list,
+        &[
+            Piece::Run(list, 0..at),
+            Piece::Item(value),
+            Piece::Run(list, at + 1..count),
+        ],
+    )
 }
 
 unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
@@ -1321,29 +1454,65 @@ unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
     if let Some(grown) = append_owned(call, list, &[value])? {
         return Ok(grown);
     }
-    let mut items = list_elements(call, "list", list)?;
-    items.push(value);
-    sequence(call, list, &items)
+    let count = list_count(call, "list", list)?;
+    assembled(
+        call,
+        list,
+        &[Piece::Run(list, 0..count), Piece::Item(value)],
+    )
 }
 
 unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
-    let mut items = vec![value];
-    items.extend(list_elements(call, "list", list)?);
-    sequence(call, list, &items)
+    let count = list_count(call, "list", list)?;
+    assembled(
+        call,
+        list,
+        &[Piece::Item(value), Piece::Run(list, 0..count)],
+    )
 }
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
+    // An owned Array grows by the other Array's packed items.
+    if owned_array(call, first)
+        && second.is_array()
+        && !second.is_altrep()
+        && length(second) > 0
+        && first.kind() == second.kind()
+    {
+        let (count, added) = (length(first), length(second));
+        let grown = grown_to(first, count + added)?;
+        let end = count + added;
+        match grown.kind() {
+            SexpType::Logical | SexpType::Integer => {
+                values::ints_mut(grown)[count..end].copy_from_slice(&values::ints(second)[..added])
+            }
+            SexpType::Real => values::reals_mut(grown)[count..end]
+                .copy_from_slice(&values::reals(second)[..added]),
+            SexpType::I64 => grown.slice_mut::<i64>()[count..end]
+                .copy_from_slice(&second.slice::<i64>()[..added]),
+            _ => {
+                for offset in 0..added {
+                    crate::heap().set_element(grown, count + offset, second.element(offset));
+                }
+            }
+        }
+        return Ok(grown);
+    }
     if owned_collection_list(call, first) {
         let added = list_elements(call, "second", second)?;
         if let Some(grown) = append_owned(call, first, &added)? {
             return Ok(grown);
         }
     }
-    let mut items = list_elements(call, "first", first)?;
-    items.extend(list_elements(call, "second", second)?);
-    sequence(call, first, &items)
+    let before = list_count(call, "first", first)?;
+    let after = list_count(call, "second", second)?;
+    assembled(
+        call,
+        first,
+        &[Piece::Run(first, 0..before), Piece::Run(second, 0..after)],
+    )
 }
 
 unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
@@ -1388,38 +1557,45 @@ unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
     let [lists] = arguments(call, ["lists"])?;
-    let mut items = Vec::new();
+    let mut pieces = Vec::new();
     for inner in list_elements(call, "lists", lists)? {
         if inner.kind() != SexpType::List && !inner.is_array() {
             return Err(wrong(call, "lists", "a list of lists", inner));
         }
-        items.extend(list_elements(call, "lists", inner)?);
+        pieces.push(Piece::Run(inner, 0..length(inner)));
     }
-    sequence(call, lists, &items)
+    assembled(call, lists, &pieces)
 }
 
 unsafe fn list_map(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    let mut mapped = Vec::with_capacity(items.len());
-    for item in items {
-        mapped.push(scope(|| invoke(call, f, &[item]))?);
-    }
+    let mut mapped = Vec::with_capacity(count);
+    holding(list, || {
+        for at in 0..count {
+            mapped.push(scope(|| invoke(call, f, &[list_item(list, at)?]))?);
+        }
+        Ok(())
+    })?;
     sequence(call, list, &mapped)
 }
 
 unsafe fn list_map_with_index(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    let mut mapped = Vec::with_capacity(items.len());
-    for (index, item) in items.into_iter().enumerate() {
-        mapped.push(scope(|| {
-            let index = whole_number(index + 1)?;
-            invoke(call, f, &[item, index])
-        })?);
-    }
+    let mut mapped = Vec::with_capacity(count);
+    holding(list, || {
+        for at in 0..count {
+            mapped.push(scope(|| {
+                let item = list_item(list, at)?;
+                let index = whole_number(at + 1)?;
+                invoke(call, f, &[item, index])
+            })?);
+        }
+        Ok(())
+    })?;
     sequence(call, list, &mapped)
 }
 
@@ -1451,49 +1627,70 @@ unsafe fn list_map4(call: &Call<'_>) -> R<Sexp> {
 
 /// Calls `f` with the elements at each position of the named `lists`, up to the shortest one.
 unsafe fn map_lists(call: &Call<'_>, lists: &[(&str, Sexp)], f: Sexp) -> R<Sexp> {
-    let mut columns = Vec::with_capacity(lists.len());
+    let mut shortest = usize::MAX;
     for &(parameter, list) in lists {
-        columns.push(list_elements(call, parameter, list)?);
+        shortest = shortest.min(list_count(call, parameter, list)?);
     }
+    let shortest = if lists.is_empty() { 0 } else { shortest };
     let f = function(call, "f", f)?;
-    let shortest = columns.iter().map(Vec::len).min().unwrap_or(0);
     let mut mapped = Vec::with_capacity(shortest);
-    for at in 0..shortest {
-        let row: Vec<Sexp> = columns.iter().map(|column| column[at]).collect();
-        mapped.push(scope(|| invoke(call, f, &row))?);
+    for &(_, list) in lists {
+        list.increment_refcount();
     }
+    let visited = (|| -> R<()> {
+        for at in 0..shortest {
+            mapped.push(scope(|| {
+                let mut row = SmallVec::<[Sexp; 4]>::new();
+                for &(_, list) in lists {
+                    row.push(list_item(list, at)?);
+                }
+                invoke(call, f, &row)
+            })?);
+        }
+        Ok(())
+    })();
+    for &(_, list) in lists {
+        list.decrement_refcount();
+    }
+    visited?;
     let like = lists.first().map_or(nil(), |&(_, list)| list);
     sequence(call, like, &mapped)
 }
 
 unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    let mut joined = Vec::new();
-    for item in items {
-        let inner = scope(|| invoke(call, f, &[item]))?;
-        if inner.kind() != SexpType::List && !inner.is_array() {
-            return Err(wrong(call, "f()", "a list", inner));
+    let mut joined = Vec::with_capacity(count);
+    holding(list, || {
+        for at in 0..count {
+            let inner = scope(|| invoke(call, f, &[list_item(list, at)?]))?;
+            if inner.kind() != SexpType::List && !inner.is_array() {
+                return Err(wrong(call, "f()", "a list", inner));
+            }
+            joined.push(Piece::Run(inner, 0..length(inner)));
         }
-        joined.extend(list_elements(call, "f()", inner)?);
-    }
-    sequence(call, list, &joined)
+        Ok(())
+    })?;
+    assembled(call, list, &joined)
 }
 
 /// The elements for which `predicate` answers `keep`.
 unsafe fn filter(call: &Call<'_>, keep: bool) -> R<Sexp> {
     let [list, predicate] = arguments(call, ["list", "predicate"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let predicate = function(call, "predicate", predicate)?;
     let mut kept = Vec::new();
-    for item in items {
-        let answer = scope(|| invoke(call, predicate, &[item]))?;
-        if verdict(call, "predicate", answer)? == keep {
-            kept.push(item);
+    holding(list, || {
+        for at in 0..count {
+            let answer = scope(|| invoke(call, predicate, &[list_item(list, at)?]))?;
+            if verdict(call, "predicate", answer)? == keep {
+                kept.push(at);
+            }
         }
-    }
-    subset(call, list, &kept)
+        Ok(())
+    })?;
+    picked(call, list, kept.into_iter())
 }
 
 unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
@@ -1507,36 +1704,45 @@ unsafe fn list_drop_if(call: &Call<'_>) -> R<Sexp> {
 /// The elements for which `predicate` returns `:Ok(TRUE)`, stopping at the first `:Err`.
 unsafe fn list_keep_if_try(call: &Call<'_>) -> R<Sexp> {
     let [list, predicate] = arguments(call, ["list", "predicate"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let predicate = function(call, "predicate", predicate)?;
     let mut kept = Vec::new();
-    for item in items {
-        let result = scope(|| invoke(call, predicate, &[item]))?;
-        match returned_result(call, "predicate", result)? {
-            (true, answer) => {
-                if verdict(call, "predicate", answer)? {
-                    kept.push(item);
+    let failed = holding(list, || {
+        for at in 0..count {
+            let result = scope(|| invoke(call, predicate, &[list_item(list, at)?]))?;
+            match returned_result(call, "predicate", result)? {
+                (true, answer) => {
+                    if verdict(call, "predicate", answer)? {
+                        kept.push(at);
+                    }
                 }
+                (false, _) => return Ok(Some(result)),
             }
-            (false, _) => return Ok(result),
         }
+        Ok(None)
+    })?;
+    match failed {
+        Some(result) => Ok(result),
+        None => ok(picked(call, list, kept.into_iter())?),
     }
-    ok(subset(call, list, &kept)?)
 }
 
 /// The payloads of the results `f` returns that are `:Ok` (when `oks`) or `:Err`.
 unsafe fn keep_results(call: &Call<'_>, oks: bool) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
     let mut kept = Vec::new();
-    for item in items {
-        let result = scope(|| invoke(call, f, &[item]))?;
-        let (is_ok, payload) = returned_result(call, "f", result)?;
-        if is_ok == oks {
-            kept.push(payload);
+    holding(list, || {
+        for at in 0..count {
+            let result = scope(|| invoke(call, f, &[list_item(list, at)?]))?;
+            let (is_ok, payload) = returned_result(call, "f", result)?;
+            if is_ok == oks {
+                kept.push(payload);
+            }
         }
-    }
+        Ok(())
+    })?;
     sequence(call, list, &kept)
 }
 
@@ -1550,17 +1756,23 @@ unsafe fn list_keep_errs(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_map_try(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    let mut mapped = Vec::with_capacity(items.len());
-    for item in items {
-        let result = scope(|| invoke(call, f, &[item]))?;
-        match returned_result(call, "f", result)? {
-            (true, value) => mapped.push(value),
-            (false, _) => return Ok(result),
+    let mut mapped = Vec::with_capacity(count);
+    let failed = holding(list, || {
+        for at in 0..count {
+            let result = scope(|| invoke(call, f, &[list_item(list, at)?]))?;
+            match returned_result(call, "f", result)? {
+                (true, value) => mapped.push(value),
+                (false, _) => return Ok(Some(result)),
+            }
         }
+        Ok(None)
+    })?;
+    match failed {
+        Some(result) => Ok(result),
+        None => ok(sequence(call, list, &mapped)?),
     }
-    ok(sequence(call, list, &mapped)?)
 }
 
 /// How a walk visits a list's elements and what it passes `f`.
@@ -1572,51 +1784,16 @@ struct Walk {
     with_index: bool,
     /// `f` returns `:Continue(state)` or `:Break(state)`, and a break ends the walk.
     until: bool,
+    /// The walk starts at the 1-based position the `index` argument gives.
+    from: bool,
 }
 
 const FORWARDS: Walk = Walk {
     backwards: false,
     with_index: false,
     until: false,
+    from: false,
 };
-
-/// Folds `f` over `items` from 0-based position `start`, as `walk` describes.
-unsafe fn walk_items(
-    call: &Call<'_>,
-    items: &[Sexp],
-    start: usize,
-    state: Sexp,
-    f: Sexp,
-    walk: Walk,
-) -> R<Sexp> {
-    let f = function(call, "f", f)?;
-    let positions = start.min(items.len())..items.len();
-    let order: Box<dyn Iterator<Item = usize>> = if walk.backwards {
-        Box::new(positions.rev())
-    } else {
-        Box::new(positions)
-    };
-    let mut state = state;
-    for at in order {
-        let step = scope(|| {
-            if walk.with_index {
-                let index = whole_number(at + 1)?;
-                invoke(call, f, &[state, items[at], index])
-            } else {
-                invoke(call, f, &[state, items[at]])
-            }
-        })?;
-        if !walk.until {
-            state = step;
-            continue;
-        }
-        match walk_step(call, step)? {
-            Ok(next) => state = next,
-            Err(last) => return Ok(last),
-        }
-    }
-    Ok(state)
-}
 
 /// A `walk_until` step: `Ok(state)` for `:Continue(state)` and `Err(state)` for `:Break(state)`.
 unsafe fn walk_step(call: &Call<'_>, step: Sexp) -> R<Result<Sexp, Sexp>> {
@@ -1632,10 +1809,50 @@ unsafe fn walk_step(call: &Call<'_>, step: Sexp) -> R<Result<Sexp, Sexp>> {
     }
 }
 
+/// Folds `f` over the list's items, as `walk` describes.
 unsafe fn walk_list(call: &Call<'_>, walk: Walk) -> R<Sexp> {
-    let [list, state, f] = arguments(call, ["list", "state", "f"])?;
-    let items = list_elements(call, "list", list)?;
-    walk_items(call, &items, 0, state, f, walk)
+    let (list, index, state, f) = if walk.from {
+        let [list, index, state, f] = arguments(call, ["list", "index", "state", "f"])?;
+        (list, Some(index), state, f)
+    } else {
+        let [list, state, f] = arguments(call, ["list", "state", "f"])?;
+        (list, None, state, f)
+    };
+    let count = list_count(call, "list", list)?;
+    let start = match index {
+        Some(index) => start_position(call, "index", index)?,
+        None => 0,
+    };
+    let f = function(call, "f", f)?;
+    let positions = start.min(count)..count;
+    let order: Box<dyn Iterator<Item = usize>> = if walk.backwards {
+        Box::new(positions.rev())
+    } else {
+        Box::new(positions)
+    };
+    holding(list, || {
+        let mut state = state;
+        for at in order {
+            let step = scope(|| {
+                let item = list_item(list, at)?;
+                if walk.with_index {
+                    let index = whole_number(at + 1)?;
+                    invoke(call, f, &[state, item, index])
+                } else {
+                    invoke(call, f, &[state, item])
+                }
+            })?;
+            if !walk.until {
+                state = step;
+                continue;
+            }
+            match walk_step(call, step)? {
+                Ok(next) => state = next,
+                Err(last) => return Ok(last),
+            }
+        }
+        Ok(state)
+    })
 }
 
 unsafe fn list_walk(call: &Call<'_>) -> R<Sexp> {
@@ -1686,75 +1903,89 @@ unsafe fn list_walk_with_index_until(call: &Call<'_>) -> R<Sexp> {
     walk_list(call, walk)
 }
 
-unsafe fn walk_from(call: &Call<'_>, until: bool) -> R<Sexp> {
-    let [list, index, state, f] = arguments(call, ["list", "index", "state", "f"])?;
-    let items = list_elements(call, "list", list)?;
-    let start = start_position(call, "index", index)?;
-    walk_items(call, &items, start, state, f, Walk { until, ..FORWARDS })
-}
-
 unsafe fn list_walk_from(call: &Call<'_>) -> R<Sexp> {
-    walk_from(call, false)
+    walk_list(
+        call,
+        Walk {
+            from: true,
+            ..FORWARDS
+        },
+    )
 }
 
 unsafe fn list_walk_from_until(call: &Call<'_>) -> R<Sexp> {
-    walk_from(call, true)
+    let walk = Walk {
+        from: true,
+        until: true,
+        ..FORWARDS
+    };
+    walk_list(call, walk)
 }
 
 unsafe fn list_walk_try(call: &Call<'_>) -> R<Sexp> {
     let [list, state, f] = arguments(call, ["list", "state", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
     let mut state = state;
-    for item in items {
-        let step = scope(|| invoke(call, f, &[state, item]))?;
-        match returned_result(call, "f", step)? {
-            (true, next) => state = next,
-            (false, _) => return Ok(step),
+    let failed = holding(list, || {
+        for at in 0..count {
+            let step = scope(|| invoke(call, f, &[state, list_item(list, at)?]))?;
+            match returned_result(call, "f", step)? {
+                (true, next) => state = next,
+                (false, _) => return Ok(Some(step)),
+            }
         }
+        Ok(None)
+    })?;
+    match failed {
+        Some(step) => Ok(step),
+        None => ok(state),
     }
-    ok(state)
 }
 
 unsafe fn list_for_each(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    for item in items {
-        scope(|| invoke(call, f, &[item]))?;
-    }
-    Ok(nil())
+    holding(list, || {
+        for at in 0..count {
+            scope(|| invoke(call, f, &[list_item(list, at)?]))?;
+        }
+        Ok(nil())
+    })
 }
 
 unsafe fn list_for_each_try(call: &Call<'_>) -> R<Sexp> {
     let [list, f] = arguments(call, ["list", "f"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let f = function(call, "f", f)?;
-    for item in items {
-        let result = scope(|| invoke(call, f, &[item]))?;
-        if !returned_result(call, "f", result)?.0 {
-            return Ok(result);
+    holding(list, || {
+        for at in 0..count {
+            let result = scope(|| invoke(call, f, &[list_item(list, at)?]))?;
+            if !returned_result(call, "f", result)?.0 {
+                return Ok(result);
+            }
         }
-    }
-    ok(nil())
+        ok(nil())
+    })
 }
 
 /// The position of the first (or, `from_end`, the last) element `predicate` accepts.
-unsafe fn find(call: &Call<'_>, from_end: bool) -> R<(Vec<Sexp>, Option<usize>)> {
+unsafe fn find(call: &Call<'_>, from_end: bool) -> R<(Sexp, Option<usize>)> {
     let [list, predicate] = arguments(call, ["list", "predicate"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let predicate = function(call, "predicate", predicate)?;
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    if from_end {
-        order.reverse();
-    }
-    for at in order {
-        let answer = scope(|| invoke(call, predicate, &[items[at]]))?;
-        if verdict(call, "predicate", answer)? {
-            return Ok((items, Some(at)));
+    let found = holding(list, || {
+        for at in 0..count {
+            let at = if from_end { count - 1 - at } else { at };
+            let answer = scope(|| invoke(call, predicate, &[list_item(list, at)?]))?;
+            if verdict(call, "predicate", answer)? {
+                return Ok(Some(at));
+            }
         }
-    }
-    Ok((items, None))
+        Ok(None)
+    })?;
+    Ok((list, found))
 }
 
 unsafe fn list_any(call: &Call<'_>) -> R<Sexp> {
@@ -1763,15 +1994,17 @@ unsafe fn list_any(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_all(call: &Call<'_>) -> R<Sexp> {
     let [list, predicate] = arguments(call, ["list", "predicate"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let predicate = function(call, "predicate", predicate)?;
-    for item in items {
-        let answer = scope(|| invoke(call, predicate, &[item]))?;
-        if !verdict(call, "predicate", answer)? {
-            return scalar_bool(false);
+    holding(list, || {
+        for at in 0..count {
+            let answer = scope(|| invoke(call, predicate, &[list_item(list, at)?]))?;
+            if !verdict(call, "predicate", answer)? {
+                return scalar_bool(false);
+            }
         }
-    }
-    scalar_bool(true)
+        scalar_bool(true)
+    })
 }
 
 unsafe fn list_contains(call: &Call<'_>) -> R<Sexp> {
@@ -1807,28 +2040,38 @@ unsafe fn list_contains(call: &Call<'_>) -> R<Sexp> {
             _ => {}
         }
     }
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let flags = IdenticalFlags::default();
-    scalar_bool(items.iter().any(|&item| identical(item, value, &flags)))
+    let same_item =
+        |at: usize, value: Sexp| scope(|| Ok(identical(list_item(list, at)?, value, &flags)));
+    for at in 0..count {
+        if same_item(at, value)? {
+            return scalar_bool(true);
+        }
+    }
+    scalar_bool(false)
 }
 
 unsafe fn list_count_if(call: &Call<'_>) -> R<Sexp> {
     let [list, predicate] = arguments(call, ["list", "predicate"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let predicate = function(call, "predicate", predicate)?;
     let mut counted: usize = 0;
-    for item in items {
-        let answer = scope(|| invoke(call, predicate, &[item]))?;
-        if verdict(call, "predicate", answer)? {
-            counted += 1;
+    holding(list, || {
+        for at in 0..count {
+            let answer = scope(|| invoke(call, predicate, &[list_item(list, at)?]))?;
+            if verdict(call, "predicate", answer)? {
+                counted += 1;
+            }
         }
-    }
+        Ok(())
+    })?;
     whole_number(counted)
 }
 
 unsafe fn found_element(call: &Call<'_>, from_end: bool) -> R<Sexp> {
     match find(call, from_end)? {
-        (items, Some(at)) => ok(items[at]),
+        (list, Some(at)) => ok(list_item(list, at)?),
         (_, None) => err("NotFound"),
     }
 }
@@ -1927,12 +2170,16 @@ unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
     let [list, index] = arguments(call, ["list", "index"])?;
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let index = whole(call, "index", index)?;
-    if let Some(at) = position(index, items.len()) {
-        items.remove(at);
+    match position(index, count) {
+        Some(at) => assembled(
+            call,
+            list,
+            &[Piece::Run(list, 0..at), Piece::Run(list, at + 1..count)],
+        ),
+        None => picked(call, list, 0..count),
     }
-    subset(call, list, &items)
 }
 
 /// A 1-based start position as a 0-based index, which may lie past the end.
@@ -1962,33 +2209,33 @@ unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_chunks_of(call: &Call<'_>) -> R<Sexp> {
     let [list, size] = arguments(call, ["list", "size"])?;
-    let items = list_elements(call, "list", list)?;
+    let total = list_count(call, "list", list)?;
     let size = count(call, "size", size)?;
     // The chunks are lists, so an empty result is a list of lists without an item to tell by.
-    if (size == 0 || items.is_empty()) && list.is_array() {
+    if (size == 0 || total == 0) && list.is_array() {
         return arrays::empty_of(SexpType::List);
     }
     if size == 0 {
         return sequence(call, list, &[]);
     }
-    let mut chunks = Vec::with_capacity(items.len().div_ceil(size));
-    for chunk in items.chunks(size) {
-        chunks.push(sequence(call, list, chunk)?);
+    let mut chunks = Vec::with_capacity(total.div_ceil(size));
+    for start in (0..total).step_by(size) {
+        chunks.push(picked(call, list, start..total.min(start + size))?);
     }
     sequence(call, list, &chunks)
 }
 
 unsafe fn list_intersperse(call: &Call<'_>) -> R<Sexp> {
     let [list, separator] = arguments(call, ["list", "separator"])?;
-    let items = list_elements(call, "list", list)?;
-    let mut spaced = Vec::with_capacity((items.len() * 2).saturating_sub(1));
-    for (index, item) in items.into_iter().enumerate() {
+    let count = list_count(call, "list", list)?;
+    let mut spaced = Vec::with_capacity((count * 2).saturating_sub(1));
+    for index in 0..count {
         if index > 0 {
-            spaced.push(separator);
+            spaced.push(Piece::Item(separator));
         }
-        spaced.push(item);
+        spaced.push(Piece::Run(list, index..index + 1));
     }
-    sequence(call, list, &spaced)
+    assembled(call, list, &spaced)
 }
 
 /// An ordering tag, `:LT`, `:EQ` or `:GT`.
@@ -2277,18 +2524,16 @@ unsafe fn affix(call: &Call<'_>, parameter: &str, at_start: bool) -> R<Sexp> {
     if part.len() > total {
         return scalar_bool(false);
     }
-    let window = if at_start {
-        list_slice(list, 0, part.len())?
-    } else {
-        list_slice(list, total - part.len(), total)?
-    };
+    let start = if at_start { 0 } else { total - part.len() };
     let flags = IdenticalFlags::default();
-    scalar_bool(
-        window
-            .iter()
-            .zip(&part)
-            .all(|(&left, &right)| identical(left, right, &flags)),
-    )
+    let same_item =
+        |at: usize, value: Sexp| scope(|| Ok(identical(list_item(list, at)?, value, &flags)));
+    for (offset, &wanted) in part.iter().enumerate() {
+        if !same_item(start + offset, wanted)? {
+            return scalar_bool(false);
+        }
+    }
+    scalar_bool(true)
 }
 
 unsafe fn list_starts_with(call: &Call<'_>) -> R<Sexp> {
@@ -2307,6 +2552,33 @@ unsafe fn sort_numbers(call: &Call<'_>, descending: bool) -> R<Sexp> {
             if descending { order.reverse() } else { order }
         });
         return numbers::list(&items);
+    }
+    // A numeric Array is sorted in its own storage type, so its items are never boxed.
+    if list.is_array() && !list.is_altrep() {
+        match list.kind() {
+            SexpType::Real => {
+                let mut items = values::reals(list).to_vec();
+                // An Array holds no `NaN`, so the comparison is total.
+                items.sort_by(|left, right| {
+                    let order = left.partial_cmp(right).unwrap_or(Ordering::Equal);
+                    if descending { order.reverse() } else { order }
+                });
+                let sorted = values::alloc(SexpType::Real, items.len())?;
+                values::reals_mut(sorted).copy_from_slice(&items);
+                return Ok(arrays::finish(sorted));
+            }
+            SexpType::Integer => {
+                let mut items = values::ints(list).to_vec();
+                items.sort_by(|left, right| {
+                    let order = left.cmp(right);
+                    if descending { order.reverse() } else { order }
+                });
+                let sorted = values::alloc(SexpType::Integer, items.len())?;
+                values::ints_mut(sorted).copy_from_slice(&items);
+                return Ok(arrays::finish(sorted));
+            }
+            _ => {}
+        }
     }
     let mut numbers = list_numbers(call)?;
     // `number` refuses `NaN`, so the comparison is total.
@@ -2356,41 +2628,67 @@ unsafe fn list_swap(call: &Call<'_>) -> R<Sexp> {
         }
         return Ok(list);
     }
-    let mut items = list_elements(call, "list", list)?;
-    if let (Some(left), Some(right)) = (position(first, items.len()), position(second, items.len()))
-    {
-        items.swap(left, right);
-    }
-    sequence(call, list, &items)
+    let count = list_count(call, "list", list)?;
+    let (Some(left), Some(right)) = (position(first, count), position(second, count)) else {
+        return assembled(call, list, &[Piece::Run(list, 0..count)]);
+    };
+    let (low, high) = (left.min(right), left.max(right));
+    let swapped = if low == high {
+        vec![Piece::Run(list, 0..count)]
+    } else {
+        vec![
+            Piece::Run(list, 0..low),
+            Piece::Run(list, high..high + 1),
+            Piece::Run(list, low + 1..high),
+            Piece::Run(list, low..low + 1),
+            Piece::Run(list, high + 1..count),
+        ]
+    };
+    assembled(call, list, &swapped)
 }
 
 unsafe fn list_replace(call: &Call<'_>) -> R<Sexp> {
     let [list, index, value] = arguments(call, ["list", "index", "value"])?;
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let index = whole(call, "index", index)?;
-    let previous = match position(index, items.len()) {
-        Some(at) => std::mem::replace(&mut items[at], value),
-        None => value,
+    let (replaced, previous) = match position(index, count) {
+        Some(at) => {
+            let previous = list_item(list, at)?;
+            let replaced = assembled(
+                call,
+                list,
+                &[
+                    Piece::Run(list, 0..at),
+                    Piece::Item(value),
+                    Piece::Run(list, at + 1..count),
+                ],
+            )?;
+            (replaced, previous)
+        }
+        None => (assembled(call, list, &[Piece::Run(list, 0..count)])?, value),
     };
-    let replaced = sequence(call, list, &items)?;
     record(&[("list", replaced), ("value", previous)])
 }
 
 /// Splits the list around its first (or, `last`, its final) element identical to `delimiter`.
 unsafe fn split_around(call: &Call<'_>, last: bool) -> R<Sexp> {
     let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let flags = IdenticalFlags::default();
-    let matches = |item: &Sexp| identical(*item, delimiter, &flags);
-    let found = if last {
-        items.iter().rposition(matches)
-    } else {
-        items.iter().position(matches)
-    };
+    let same_item =
+        |at: usize, value: Sexp| scope(|| Ok(identical(list_item(list, at)?, value, &flags)));
+    let mut found = None;
+    for at in 0..count {
+        let at = if last { count - 1 - at } else { at };
+        if same_item(at, delimiter)? {
+            found = Some(at);
+            break;
+        }
+    }
     match found {
         Some(at) => {
-            let before = subset(call, list, &items[..at])?;
-            let after = subset(call, list, &items[at + 1..])?;
+            let before = picked(call, list, 0..at)?;
+            let after = picked(call, list, at + 1..count)?;
             ok(record(&[("before", before), ("after", after)])?)
         }
         None => err("NotFound"),
@@ -2405,43 +2703,42 @@ unsafe fn list_split_last(call: &Call<'_>) -> R<Sexp> {
     split_around(call, true)
 }
 
-/// The pieces of `items` between occurrences of the non-empty `delimiter` run.
-unsafe fn split_pieces(call: &Call<'_>, like: Sexp, items: &[Sexp], delimiter: &[Sexp]) -> R<Sexp> {
+/// The pieces of `list`'s `count` items between occurrences of the non-empty `delimiter` run.
+unsafe fn split_pieces(call: &Call<'_>, list: Sexp, count: usize, delimiter: &[Sexp]) -> R<Sexp> {
     let flags = IdenticalFlags::default();
+    let same_item =
+        |at: usize, value: Sexp| scope(|| Ok(identical(list_item(list, at)?, value, &flags)));
     let mut pieces = Vec::new();
     let (mut start, mut at) = (0, 0);
-    while at + delimiter.len() <= items.len() {
-        let window = &items[at..at + delimiter.len()];
-        if window
-            .iter()
-            .zip(delimiter)
-            .all(|(&left, &right)| identical(left, right, &flags))
-        {
-            pieces.push(subset(call, like, &items[start..at])?);
-            at += delimiter.len();
-            start = at;
-        } else {
-            at += 1;
+    'windows: while at + delimiter.len() <= count {
+        for (offset, &wanted) in delimiter.iter().enumerate() {
+            if !same_item(at + offset, wanted)? {
+                at += 1;
+                continue 'windows;
+            }
         }
+        pieces.push(picked(call, list, start..at)?);
+        at += delimiter.len();
+        start = at;
     }
-    pieces.push(subset(call, like, &items[start..])?);
-    sequence(call, like, &pieces)
+    pieces.push(picked(call, list, start..count)?);
+    sequence(call, list, &pieces)
 }
 
 unsafe fn list_split_on(call: &Call<'_>) -> R<Sexp> {
     let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
-    let items = list_elements(call, "list", list)?;
-    split_pieces(call, list, &items, &[delimiter])
+    let count = list_count(call, "list", list)?;
+    split_pieces(call, list, count, &[delimiter])
 }
 
 unsafe fn list_split_on_list(call: &Call<'_>) -> R<Sexp> {
     let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let delimiter = list_elements(call, "delimiter", delimiter)?;
     if delimiter.is_empty() {
-        return sequence(call, list, &[sequence(call, list, &items)?]);
+        return sequence(call, list, &[picked(call, list, 0..count)?]);
     }
-    split_pieces(call, list, &items, &delimiter)
+    split_pieces(call, list, count, &delimiter)
 }
 
 unsafe fn list_append_if_ok(call: &Call<'_>) -> R<Sexp> {
@@ -2453,21 +2750,24 @@ unsafe fn list_append_if_ok(call: &Call<'_>) -> R<Sexp> {
     if is_ok && let Some(grown) = append_owned(call, list, &[value])? {
         return Ok(grown);
     }
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
+    let mut pieces = vec![Piece::Run(list, 0..count)];
     if is_ok {
-        items.push(value);
+        pieces.push(Piece::Item(value));
     }
-    sequence(call, list, &items)
+    assembled(call, list, &pieces)
 }
 
 unsafe fn list_prepend_if_ok(call: &Call<'_>) -> R<Sexp> {
     let [list, result] = arguments(call, ["list", "result"])?;
     let (is_ok, value) = result_parts(call, "result", result)?;
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
+    let mut pieces = Vec::with_capacity(2);
     if is_ok {
-        items.insert(0, value);
+        pieces.push(Piece::Item(value));
     }
-    sequence(call, list, &items)
+    pieces.push(Piece::Run(list, 0..count));
+    assembled(call, list, &pieces)
 }
 
 unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
@@ -2480,9 +2780,10 @@ unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
     if let Some(grown) = append_owned(call, list, &bytes)? {
         return Ok(grown);
     }
-    let mut items = list_elements(call, "list", list)?;
-    items.extend(bytes);
-    sequence(call, list, &items)
+    let count = list_count(call, "list", list)?;
+    let mut pieces = vec![Piece::Run(list, 0..count)];
+    pieces.extend(bytes.into_iter().map(Piece::Item));
+    assembled(call, list, &pieces)
 }
 
 unsafe fn list_with_capacity(call: &Call<'_>) -> R<Sexp> {
@@ -2531,16 +2832,13 @@ unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
 /// The list with no room beyond its elements: the list itself when it has none to give back.
 unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    let items = list_elements(call, "list", list)?;
-    if list.is_array()
-        || !crate::heap().is_resizable(list)
-        || list.capacity() as usize <= items.len()
-    {
+    let count = list_count(call, "list", list)?;
+    if list.is_array() || !crate::heap().is_resizable(list) || list.capacity() as usize <= count {
         return Ok(list);
     }
-    let exact = resizable(SexpType::List, items.len(), items.len())?;
-    for (at, &item) in items.iter().enumerate() {
-        crate::heap().set_element(exact, at, item);
+    let exact = resizable(SexpType::List, count, count)?;
+    for at in 0..count {
+        crate::heap().set_element(exact, at, list.element(at));
     }
     Ok(exact)
 }
@@ -3834,15 +4132,7 @@ unsafe fn append_owned(call: &Call<'_>, list: Sexp, items: &[Sexp]) -> R<Option<
         return Ok(None);
     }
     let count = length(list);
-    let needed = count + items.len();
-    let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
-        list
-    } else {
-        let grown = with_capacity(list, needed.max(count * 2).max(4))?;
-        // A copy drops the Array bit, which the grown list must carry again.
-        if array { arrays::finish(grown) } else { grown }
-    };
-    heap.resize_vector(list, needed as isize)?;
+    let list = grown_to(list, count + items.len())?;
     for (offset, &item) in items.iter().enumerate() {
         if array {
             arrays::store_item(list, item, count + offset);
@@ -3851,6 +4141,27 @@ unsafe fn append_owned(call: &Call<'_>, list: Sexp, items: &[Sexp]) -> R<Option<
         }
     }
     Ok(Some(list))
+}
+
+/// `list`, a list or Array the call owns, resized to `needed` items, within its capacity when it
+/// has room and otherwise as a resizable copy with twice the room, so repeated appends cost
+/// amortized constant time. The new items hold `nil` or zero until the caller stores them.
+unsafe fn grown_to(list: Sexp, needed: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = length(list);
+    let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
+        list
+    } else {
+        let grown = with_capacity(list, needed.max(count * 2).max(4))?;
+        // A copy drops the Array bit, which the grown list must carry again.
+        if list.is_array() {
+            arrays::finish(grown)
+        } else {
+            grown
+        }
+    };
+    heap.resize_vector(list, needed as isize)?;
+    Ok(list)
 }
 
 /// Replaces item `at` of a list or Array that [`owned_for`] accepted with `value`, recording the
