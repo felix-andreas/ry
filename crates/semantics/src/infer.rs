@@ -381,12 +381,11 @@ impl<'db> InferenceTable<'db> {
     /// class with any arithmetic method, a difference of two of it only for one closed under
     /// arithmetic (two dates subtract to a `difftime`).
     fn keeps_class(&self, result: FamilyResult, name: Name<'db>) -> bool {
-        self.arithmetic_classes
-            .is_some_and(|classes| match result {
-                FamilyResult::Arithmetic => classes.contains(name.symbol()),
-                FamilyResult::Difference => classes.closed_under_arithmetic(name.symbol()),
-                FamilyResult::Comparison => false,
-            })
+        self.arithmetic_classes.is_some_and(|classes| match result {
+            FamilyResult::Arithmetic => classes.contains(name.symbol()),
+            FamilyResult::Difference => classes.closed_under_arithmetic(name.symbol()),
+            FamilyResult::Comparison => false,
+        })
     }
 
     /// Also expands aliases. Self-referential bindings and aliases cut to
@@ -1255,7 +1254,10 @@ impl<'db> InferenceTable<'db> {
             (FamilyResult::Comparison, TyKind::Native(NativeScalar::Bool)) => self
                 .constrain_family_operand(db, operand, Constraint::ArrayItem)
                 .map_err(|_| mismatch),
-            (FamilyResult::Arithmetic | FamilyResult::Difference, TyKind::Scalar(Atomic::Double))
+            (
+                FamilyResult::Arithmetic | FamilyResult::Difference,
+                TyKind::Scalar(Atomic::Double),
+            )
             | (FamilyResult::Comparison, TyKind::Scalar(Atomic::Logical)) => {
                 let side = self.family_operand_constraint(db, operand).r_side();
                 self.constrain_family_operand(db, operand, side)

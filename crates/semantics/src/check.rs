@@ -12500,9 +12500,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let [left, right] = operands;
         let computed = self.infer_binary_numeric_operands(range, operator, lhs, rhs, left, right);
         match promoted {
-            Some((result, operand))
-                if self.table.shallow_resolve(self.db, computed) == operand =>
-            {
+            Some((result, operand)) if self.table.shallow_resolve(self.db, computed) == operand => {
                 self.table.family(self.db, result, operand)
             }
             _ => computed,
