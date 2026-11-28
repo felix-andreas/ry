@@ -10774,7 +10774,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     function,
                     arguments,
                     true,
-                    |symbol| slot_eager_argument(state, symbol),
+                    |symbol| {
+                        handles::reading(|context| {
+                            slot_eager_value(context, RunningFrame { state }, Gc::adopt(symbol))
+                                .map(|value| value.raw())
+                        })
+                    },
                 )?
             } else {
                 let env = state.env(Reify::Site(Site::GenericCallNativeEntry))?;
@@ -11807,7 +11812,10 @@ unsafe fn settled_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
                 return Ok(None);
             }
             let found = if state.in_slots() {
-                slot_eager_argument(state, expression)
+                handles::reading(|context| {
+                    slot_eager_value(context, RunningFrame { state }, Gc::adopt(expression))
+                        .map(|value| value.raw())
+                })
             } else {
                 effects::eager_argument(expression, state.env(Reify::Site(Site::DoCallArgument))?)
             };
@@ -12132,7 +12140,7 @@ unsafe fn slot_switch(
     let Some(dots) = slot_named(state, symbols().dots) else {
         return Ok(None);
     };
-    if function == nil() || !forwardable_dots(*dots) {
+    if function == nil() || !forwardable_dots(Gc::adopt(*dots)) {
         return Ok(None);
     }
     let value = if selector.kind() == SexpType::Language {
@@ -12892,8 +12900,8 @@ fn slot_compiled(code: Gc<'_>) -> bool {
 /// Whether a `...` slot holding `value` passes on as it is: the arguments it collected, or
 /// none. A slot that was never set is the local of a function without the formal, which reads
 /// an enclosing function's `...`, and anything else is the error a heap frame reports.
-unsafe fn forwardable_dots(value: Sexp) -> bool {
-    value.kind() == SexpType::Dots || value == missing_arg()
+fn forwardable_dots(value: Gc<'_>) -> bool {
+    value.r_type() == SexpType::Dots || handles::is_missing_argument(value)
 }
 
 /// Appends the arguments the slot `frame`'s `...` collected, which are its caller's promises and
@@ -12919,14 +12927,6 @@ fn collect_slot_dots<'s>(
     let dots = context.root(dots);
     eval::push_dots(context, dots, !references, args)?;
     Ok(true)
-}
-
-/// [`effects::eager_argument`] in a slot frame: the raw entry of [`slot_eager_value`].
-unsafe fn slot_eager_argument(state: &Activation<'_, '_>, symbol: Sexp) -> Option<Sexp> {
-    handles::reading(|context| {
-        slot_eager_value(context, RunningFrame { state }, Gc::adopt(symbol))
-            .map(|value| value.raw())
-    })
 }
 
 /// [`effects::eager_value`] in the slot `frame`: the slot's value when `symbol` has a bound

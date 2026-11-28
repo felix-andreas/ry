@@ -1224,7 +1224,7 @@ into a cell, and 0.94 million frames take every variable. Sampled allocation cal
 | --- | --- |
 | pairlist | an attribute set on an object (`set_attr`, `attach`) 37%, the attribute list of a copied object (`duplicate_with`, `duplicate`) 35%, calls built by C code (`Rf_lang2`, `Rf_cons`) 6%, `values::call` 4% |
 | language | the renamed call of an S3 dispatch (`renamed_call`) 34%, copies (`duplicate`, `duplicate_with`) 21%, calls built by C code 11%, `do_force_and_call` 5% |
-| promise | `closure_args_into` 21%, `detach_reference` 20%, `slot_promise` 15%, the `tryCatch` prologues 14%, `promised_args` 9%, `evaluated_arguments` 4%, `replace_with_closure` 4% |
+| promise | `collect_arguments` 21%, `detach_reference` 20%, `slot_promise` 15%, the `tryCatch` prologues 14%, `promised_args` 9%, `evaluated_arguments` 4%, `replace_with_closure` 4% |
 | environment | `pending_env` 61%, heap frames (`frame_environment`) 21%, environments R code makes (`new.env`, `alloc_environment_with_capacity`) 18% |
 | binding cell | `define_formals_uncollected` 61%, `define_unbound` 39% |
 | `...` | `bind_plan` 72%, `matched_from_plan` 20%, `match_positional_args` 8% |
@@ -1274,7 +1274,7 @@ setup is about a tenth of the run, so take them for the objects they remove:
     38,391 frames on finbench.
 - **Environments that only stand for a frame.** Three quarters of all environments come from
   `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
-  (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that
+  (667k calls): the generic call protocol 100k, `collect_slot_arguments` 105k, a builtin that
   receives the calling environment 74k, a closure made in the frame 55k, `Call::env` 52k, a
   promise whose code the compiler did not compile 46k, `parent.frame` 38k, `$` 34k, a detached
   reference 25k. A caller that only passes the environment on (the generic protocol, `$`, a
@@ -1444,7 +1444,7 @@ mandelbrot 0.41x), which tier-0 dispatch and scalar allocation decide.
 
 The open work, in build order with the gap each item targets, is the roadmap in
 `r-runtime.md` ("Untyped performance roadmap"); update its status column with each change. Numbers
-behind its rows, kept here: `closure_args_into` 3.8% and `args_pairlist` 2.7% of a 3-million-call
+behind its rows, kept here: `collect_arguments` 3.8% and `args_pairlist` 2.7% of a 3-million-call
 microbenchmark, `scalar_real` from `fast_arithmetic` 2%, page sweep and refill 3.4%, `run_closure`
 6% self (srcref walk, `stacker` check, annotation lookup, three `Rc` clones, a 9-field `Frame`
 push); `lookup_method` walks the calling frames to the top environment and probes a hash map per
