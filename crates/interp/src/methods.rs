@@ -535,6 +535,7 @@ fn class_keys<'s>(
 /// the string alone: a site's entries compare classes by identity, and their own strings are
 /// held, so an address read here can match only a string that is alive. Nothing is rooted,
 /// which keeps the dispatch fast path free of roots.
+#[inline(always)]
 fn class_identities<'s>(
     context: &mut Cx<'s>,
     signature: &[Gc<'static, Symbol>],
@@ -2266,6 +2267,16 @@ fn is_function(value: Local<'_>) -> bool {
         value.r_type(),
         SexpType::Closure | SexpType::Builtin | SexpType::Special
     )
+}
+
+/// The methods package's class table, which [`cached_class_definition`] reads: `None` before
+/// the package is loaded.
+pub(crate) fn class_table<'s>(context: &mut Cx<'s>) -> R<Option<Local<'s, Environment>>> {
+    let Some(namespace) = handles::methods_namespace(context) else {
+        return Ok(None);
+    };
+    let symbol = handles::symbol(|symbols| symbols.class_table);
+    Ok(frame_forced(context, namespace, symbol)?.and_then(|table| table.downcast::<Environment>()))
 }
 
 fn methods_namespace<'s>(context: &Cx<'s>) -> R<Local<'s, Environment>> {

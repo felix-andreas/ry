@@ -884,85 +884,86 @@ unsafe fn do_is(call: &Call<'_>) -> R<Sexp> {
 unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
     // One scope for both class lookups, which root the class name and the definitions they
     // find until the answer is known.
-    handles::with(|context| is_instance_in(context, object, class2))
-}
-
-unsafe fn is_instance_in<'s>(context: &mut Cx<'s>, object: Sexp, class2: Sexp) -> R<Option<bool>> {
-    let class1 = dispatch::class_of_raw(object)?;
-    let mut s3_case = length(class1) > 1;
-    let class1 = if s3_case {
-        values::scalar_string_charsxp(class1.element(0))?
-    } else {
-        class1
-    };
-    let (class2_name, given_definition) = match class2.kind() {
-        SexpType::String if length(class2) == 1 => (class2, None),
-        SexpType::Object if class2.has_gp(gp::S4_OBJECT) => {
-            let name = get_attr(class2, symbols().class_name);
-            if name.kind() != SexpType::String || length(name) != 1 {
-                return Ok(None);
+    handles::with(|context| {
+        let class1 = dispatch::class_of_raw(object)?;
+        let mut s3_case = length(class1) > 1;
+        let class1 = if s3_case {
+            values::scalar_string_charsxp(class1.element(0))?
+        } else {
+            class1
+        };
+        let (class2_name, given_definition) = match class2.kind() {
+            SexpType::String if length(class2) == 1 => (class2, None),
+            SexpType::Object if class2.has_gp(gp::S4_OBJECT) => {
+                let name = get_attr(class2, symbols().class_name);
+                if name.kind() != SexpType::String || length(name) != 1 {
+                    return Ok(None);
+                }
+                (name, Some(class2))
             }
-            (name, Some(class2))
-        }
-        _ => return Ok(None),
-    };
-    let class1 = handles::adopt(context, class1);
-    let Some(definition1) = cached_class_in(context, class1)? else {
-        return Ok(None);
-    };
-    let definition1 = definition1.raw();
-    let class1 = class1.raw();
-    let definition2 = match given_definition {
-        Some(definition) => definition,
-        None => match cached_class_in(context, handles::held(context, class2_name))? {
-            Some(definition) => definition.raw(),
-            None => return Ok(None),
-        },
-    };
-    let name2 = class2_name.element(0).bytes();
-    s3_case = s3_case || (values::class_attr(object) != nil() && !object.has_gp(gp::S4_OBJECT));
-    if s3_case {
-        let old_class = basic_classes()?.contains(&name2)
-            || match class_extends(definition2, b"oldClass")? {
-                Some(extends) => extends,
+            _ => return Ok(None),
+        };
+        let Some(table) = crate::methods::class_table(context)? else {
+            return Ok(None);
+        };
+        let class1 = handles::adopt(context, class1);
+        let Some(definition1) = cached_class_in(context, table, class1)? else {
+            return Ok(None);
+        };
+        let definition1 = definition1.raw();
+        let class1 = class1.raw();
+        let definition2 = match given_definition {
+            Some(definition) => definition,
+            None => match cached_class_in(context, table, handles::held(context, class2_name))? {
+                Some(definition) => definition.raw(),
                 None => return Ok(None),
-            };
-        if old_class {
-            if object.has_gp(gp::S4_OBJECT) {
-                return Ok(None);
+            },
+        };
+        let name2 = class2_name.element(0).bytes();
+        s3_case = s3_case || (values::class_attr(object) != nil() && !object.has_gp(gp::S4_OBJECT));
+        if s3_case {
+            let old_class = basic_classes()?.contains(&name2)
+                || match class_extends(definition2, b"oldClass")? {
+                    Some(extends) => extends,
+                    None => return Ok(None),
+                };
+            if old_class {
+                if object.has_gp(gp::S4_OBJECT) {
+                    return Ok(None);
+                }
+                let classes = dispatch::class_of_raw(object)?;
+                return Ok(Some(
+                    (0..length(classes)).any(|index| classes.element(index).bytes() == name2),
+                ));
             }
-            let classes = dispatch::class_of_raw(object)?;
-            return Ok(Some(
-                (0..length(classes)).any(|index| classes.element(index).bytes() == name2),
-            ));
         }
-    }
-    let name1 = class1.element(0).bytes();
-    if name1 == name2 || name2 == b"ANY" {
-        return Ok(Some(true));
-    }
-    if let Some(extension) = element(slot(definition1, symbols().contains)?, name2) {
-        return Ok(simple(extension)?.then_some(true));
-    }
-    if !is_plain_representation(definition2) {
-        match is_class_union(definition2)? {
-            None => return Ok(None),
-            Some(true) => {
-                let subclasses = values::names(slot(definition2, symbols().subclasses)?);
-                let contained = values::names(slot(definition1, symbols().contains)?);
-                let found = position_of(subclasses, name1).is_some()
-                    || (0..length(contained)).any(|index| {
-                        position_of(subclasses, contained.element(index).bytes()).is_some()
-                    });
-                return Ok(Some(found));
+        let name1 = class1.element(0).bytes();
+        if name1 == name2 || name2 == b"ANY" {
+            return Ok(Some(true));
+        }
+        if let Some(extension) = element(slot(definition1, symbols().contains)?, name2) {
+            return Ok(simple(extension)?.then_some(true));
+        }
+        if !is_plain_representation(definition2) {
+            match is_class_union(definition2)? {
+                None => return Ok(None),
+                Some(true) => {
+                    let subclasses = values::names(slot(definition2, symbols().subclasses)?);
+                    let contained = values::names(slot(definition1, symbols().contains)?);
+                    let found = position_of(subclasses, name1).is_some()
+                        || (0..length(contained)).any(|index| {
+                            position_of(subclasses, contained.element(index).bytes()).is_some()
+                        });
+                    return Ok(Some(found));
+                }
+                Some(false) => {}
             }
-            Some(false) => {}
         }
-    }
-    match element(slot(definition2, symbols().subclasses)?, name1) {
-        None => Ok(Some(false)),
-        Some(extension) => Ok(simple(extension)?.then_some(true)),
-    }
+        match element(slot(definition2, symbols().subclasses)?, name1) {
+            None => Ok(Some(false)),
+            Some(extension) => Ok(simple(extension)?.then_some(true)),
+        }
+    })
 }
 
 /// `extends(class1, class2)` with `maybe = TRUE` and `fullInfo = FALSE`.
@@ -1153,22 +1154,20 @@ unsafe fn simple(extension: Sexp) -> R<bool> {
 /// `None` when the R code would look further, in the environments or packages it searches.
 unsafe fn cached_class(class: Sexp) -> R<Option<Sexp>> {
     handles::with_result(|context| {
+        let Some(table) = crate::methods::class_table(context)? else {
+            return Ok(None);
+        };
         let class = handles::held(context, class);
-        Ok(cached_class_in(context, class)?.map(Local::raw))
+        Ok(cached_class_in(context, table, class)?.map(Local::raw))
     })
 }
 
 /// [`cached_class`] in the caller's handle scope.
-fn cached_class_in<'s>(context: &mut Cx<'s>, class: Local<'s>) -> R<Option<Local<'s>>> {
-    let namespace = interp().globals.methods_namespace;
-    // SAFETY: the methods namespace binds the class table, and the lookup runs no R code.
-    let table =
-        unsafe { eval::value_of(eval::find_var_in_frame(symbols().class_table, namespace)?)? };
-    // SAFETY: the namespace holds the table until the scope ends, whatever R code runs, as
-    // nothing rebinds it.
-    let Some(table) = unsafe { handles::held(context, table) }.downcast::<Environment>() else {
-        return Ok(None);
-    };
+fn cached_class_in<'s>(
+    context: &mut Cx<'s>,
+    table: Local<'s, Environment>,
+    class: Local<'s>,
+) -> R<Option<Local<'s>>> {
     let definition = crate::methods::cached_class_definition(context, class, table)?;
     // More than one package defines the class: the R code picks one by where it is called from.
     if definition.raw() == nil()
