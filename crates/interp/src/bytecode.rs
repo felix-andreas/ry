@@ -12523,9 +12523,7 @@ fn bind_in_environment<'s>(
     let Some(environment) = frame.environment(context) else {
         return Err(error("internal error: a slot frame lost its environment"));
     };
-    let binding =
-        handles::frame_binding(context, environment, variable).map(|binding| context.root(binding));
-    handles::assign_local(context, variable, value, environment, binding)
+    handles::assign_in_frame(context, variable, value, environment)
 }
 
 /// `x[i] <- value`, `x[[i]] <- value` or `x$name <- value` on a slot frame's slot, without

@@ -180,7 +180,9 @@ unsafe fn start_from_image(
         // GNU R's order: the profiles and `.First()` run with only `methods`, `Autoloads` and base
         // attached, then `.First.sys()` attaches the default packages in front of what they
         // attached (`decisions/heap-gc.md`, "Profiles run over the start-up image").
-        let methods = crate::envir::as_environment(values::scalar_string("package:methods")?)?;
+        let methods = crate::envir::search_path()
+            .find(|&env| crate::envir::search_name(env) == "package:methods")
+            .ok_or_else(|| error("no item called \"package:methods\" on the search list"))?;
         let held: Vec<Sexp> = crate::envir::search_path()
             .skip(1)
             .take_while(|&env| env != methods)

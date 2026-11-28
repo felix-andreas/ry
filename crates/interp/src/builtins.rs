@@ -99,26 +99,16 @@ impl Call<'_> {
 
     /// The position in the frame stack of the slot frame the call was made from, while that
     /// frame has no environment.
-    pub unsafe fn slot_frame(&self) -> Option<usize> {
+    pub fn slot_frame(&self) -> Option<usize> {
         (self.rho == nil()
             && self.frame != crate::NO_SLOTS
             && crate::interp().frames[self.frame as usize].env.raw() == nil())
         .then_some(self.frame as usize)
     }
 
-    /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
-    /// that has no environment and a `...` formal; `None` otherwise, and then the caller's
-    /// environment answers.
-    pub unsafe fn slot_dots(&self) -> Option<Sexp> {
-        if self.rho != nil() || self.frame == crate::NO_SLOTS {
-            return None;
-        }
-        crate::eval::slot_dots(self.frame as usize)
-    }
-
     /// The position in the frame stack of the closure frame the call was made from, without
     /// giving a slot frame its environment; `None` when it was made from no closure frame.
-    pub unsafe fn frame_index(&self) -> Option<usize> {
+    pub fn frame_index(&self) -> Option<usize> {
         if self.rho == nil() {
             return (self.frame != crate::NO_SLOTS).then_some(self.frame as usize);
         }

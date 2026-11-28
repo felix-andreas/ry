@@ -231,6 +231,7 @@ symbol_table! {
     scientific = "scientific",
     decimal_mark = "decimal.mark",
     out_dec = "OutDec",
+    scipen = "scipen",
     expr = "expr",
     width_cutoff = "width.cutoff",
     backtick = "backtick",
