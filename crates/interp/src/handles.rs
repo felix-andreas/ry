@@ -10,8 +10,8 @@
 pub use heap::handle::{
     Alt, Atomic, Binding, Bytecode, Chars, Closure, Complex, Cx, Elements, Enclosing, Environment,
     Exact, Expression, Fresh, Gc, Held, I64, Identity, Integer, Item, Kind, Language, List, Local,
-    LocalBinding, Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Unfilled,
-    Value, Vector,
+    LocalBinding, Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Step, Str, Symbol,
+    Unfilled, Value, Vector,
 };
 use {
     crate::{
@@ -3229,14 +3229,99 @@ pub fn returned_value<'s>(
     unwind: &Unwind,
     environment: impl Pointer<Value>,
 ) -> Option<Local<'s>> {
-    use crate::unwind::Jump;
-    match *unwind {
-        Unwind::Jump(Jump::Return { env, value }) if env == environment.raw() => {
-            // SAFETY: an unwind holds what it carries alive, and nothing allocates before the
-            // root.
-            Some(unsafe { rooted(context, value) })
-        }
+    match landing(context, unwind, environment) {
+        Some((Landing::Return, value)) => Some(value),
         _ => None,
+    }
+}
+
+/// The call cell of a self tail call that `unwind` carries to the frame of `environment`,
+/// rooted ([`tail_call_jump`]), or `None` when `unwind` is no such call.
+#[inline]
+pub fn tail_call<'s>(
+    context: &Cx<'s>,
+    unwind: &Unwind,
+    environment: impl Pointer<Value>,
+) -> Option<Local<'s>> {
+    match landing(context, unwind, environment) {
+        Some((Landing::TailCall, call)) => Some(call),
+        _ => None,
+    }
+}
+
+/// What a jump that lands at a frame carries there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Landing {
+    Return,
+    TailCall,
+}
+
+/// What `unwind` carries to the frame of `environment`, rooted, or `None` when it carries
+/// nothing there.
+#[inline]
+fn landing<'s>(
+    context: &Cx<'s>,
+    unwind: &Unwind,
+    environment: impl Pointer<Value>,
+) -> Option<(Landing, Local<'s>)> {
+    use crate::unwind::Jump;
+    let (landing, carried) = match *unwind {
+        Unwind::Jump(Jump::Return { env, value }) if env == environment.raw() => {
+            (Landing::Return, value)
+        }
+        Unwind::Jump(Jump::TailCall { env, call }) if env == environment.raw() => {
+            (Landing::TailCall, call)
+        }
+        _ => return None,
+    };
+    // SAFETY: an unwind holds what it carries alive, and nothing allocates before the root.
+    Some((landing, unsafe { rooted(context, carried) }))
+}
+
+/// The jump that replaces the frame of `environment` with its self call `call` of `args`: a
+/// pairlist cell whose value is the call and whose rest is the arguments ([`tail_call`]).
+pub fn tail_call_jump(
+    context: &mut Cx<'_>,
+    environment: Local<'_, Environment>,
+    call: Local<'_>,
+    args: &[Tagged<'_>],
+) -> R<Unwind> {
+    let rest = chain(context, args, null())?;
+    let cell = cons(context, null(), call, rest)?;
+    Ok(crate::unwind::jump(crate::unwind::Jump::TailCall {
+        env: environment.raw(),
+        call: cell.raw(),
+    }))
+}
+
+/// The call and the arguments of the call cell [`tail_call_jump`] built, each rooted.
+pub fn tail_call_parts<'s>(
+    context: &Cx<'s>,
+    cell: Local<'_>,
+) -> R<(Local<'s>, SmallVec<[Tagged<'s>; 8]>)> {
+    let Some(cell) = cell.downcast::<Pairlist>() else {
+        return Err(error("internal error: a tail call is not a call cell"));
+    };
+    let cell = cell.read(context);
+    let call = context.root(cell.head());
+    let mut args = SmallVec::new();
+    let mut rest = cell.rest();
+    while let Some(arg) = rest.downcast::<Pairlist>() {
+        args.push(Tagged {
+            tag: context.root(arg.tag()),
+            value: context.root(arg.head()),
+        });
+        rest = arg.rest();
+    }
+    Ok((call, args))
+}
+
+/// The expression a closure's body was defined with, also once it has compiled.
+pub fn closure_source(closure: Gc<'_, Closure>) -> Option<Gc<'_>> {
+    let body = closure.body();
+    match body.downcast::<Bytecode>() {
+        Some(code) => constants(code)?.get(crate::bytecode::SOURCE).copied(),
+        None => Some(body),
     }
 }
 

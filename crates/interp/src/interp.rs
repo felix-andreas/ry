@@ -693,6 +693,9 @@ pub struct Interp {
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
+    /// The depth (one-based) of the frame of a typed closure whose runner replaces it with a
+    /// self call in its tail position (`eval::self_tail_call`), or 0 for none.
+    pub tail_call_frame: u32,
     /// The innermost complex assignment running: its replacement call (or the target standing
     /// for one that was never built), the whole assignment, and the frame depth it runs at.
     /// GNU R evaluates the replacement inside a context whose call is the assignment, so a
@@ -967,6 +970,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         symbols,
         visible: true,
         returned_values: Vec::new(),
+        tail_call_frame: 0,
         frame_queries: Vec::new(),
         assignment_call: None,
         native_entries: Vec::new(),

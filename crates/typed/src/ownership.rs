@@ -9,7 +9,9 @@
 //! across it, so a call that gives up leaves nothing allocated behind.
 //!
 //! Parameters borrow their caller's references: they are never dropped and never moved, and an
-//! instruction that would consume one copies it instead.
+//! instruction that would consume one copies it instead. A function whose self tail calls assign
+//! its parameters (`Function::owned_params`) takes a reference to each counted argument on entry,
+//! and its parameters are counted like any other local.
 
 use {
     crate::ir::{Block, BlockId, Function, Inst, Local, Op, Terminator},
@@ -24,7 +26,7 @@ pub fn insert(function: &mut Function) {
     let counted = {
         let mut counted = Bits::new(locals);
         for (index, ty) in function.locals.iter().enumerate() {
-            if ty.is_counted() && index >= function.params {
+            if ty.is_counted() && (function.owned_params || index >= function.params) {
                 counted.insert(index);
             }
         }

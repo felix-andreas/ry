@@ -877,7 +877,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(18) {
+        let mut lines = match rng.below(20) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -1098,6 +1098,66 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                 definitions.push(format!("print(Num.to_f64(times_{index}({n}, 3)))"));
                 definitions.push(format!("print(Num.to_f64(times_{index}({n} + 1, 2)))"));
                 definitions
+            }
+            17 => {
+                // A call R returns invisibly shows nothing at the top level, however it compiles,
+                // also through a function that ends in calling it.
+                let ending = match rng.below(3) {
+                    0 => format!("y <- x * {n}"),
+                    1 => "for (i in List.range(1, 2)) cat(Num.to_r(x), \"\\n\")".to_owned(),
+                    _ => format!("if (x > {n}) stop(\"big\")\n  y <- x + 1"),
+                };
+                let result = if ending.starts_with("for") {
+                    "NULL"
+                } else {
+                    "F64"
+                };
+                vec![
+                    format!("quiet_{index} <- function(x: F64) -> {result} {{\n  {ending}\n}}"),
+                    format!("via_{index} <- function(x: F64) -> {result} quiet_{index}(x)"),
+                    format!("quiet_{index}({n})"),
+                    format!("via_{index}({n})"),
+                    format!("print(via_{index}({n}))"),
+                ]
+            }
+            18 => {
+                // A self tail call runs without a new frame in every tier, so a depth past R's
+                // `expressions` limit works, with counted parameters too. Erased code is plain
+                // R, whose recursion stops at that limit.
+                erasable = false;
+                let depth = 6000 + n;
+                let (parameter, start, step, measure) = match rng.below(3) {
+                    0 => (
+                        "I64",
+                        "0i64".to_owned(),
+                        format!("total + n %% {n}i64"),
+                        "total",
+                    ),
+                    1 => (
+                        "Str",
+                        "\"\"".to_owned(),
+                        "if (n %% 3i64 == 0i64) Str.concat(total, \"a\") else total".to_owned(),
+                        "Str.count_utf8_bytes(total)",
+                    ),
+                    _ => (
+                        "List<I64>",
+                        "List.with_capacity(1i64)".to_owned(),
+                        "List.append(total, n)".to_owned(),
+                        "List.len(total)",
+                    ),
+                };
+                let body = if rng.chance(1, 2) {
+                    format!("if (n == 0i64) {measure} else tail_{index}(n - 1i64, {step})")
+                } else {
+                    format!(
+                        "{{\n  if (n == 0i64) return({measure})\n  tail_{index}(n - 1i64, {step})\n}}"
+                    )
+                };
+                vec![
+                    format!("tail_{index} <- function(n: I64, total: {parameter}) -> I64 {body}"),
+                    format!("start_{index} <- {start}"),
+                    format!("print(tail_{index}({depth}i64, start_{index}))"),
+                ]
             }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),

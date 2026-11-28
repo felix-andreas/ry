@@ -183,6 +183,12 @@ pub struct Function {
     pub params: usize,
     pub blocks: Vec<Block>,
     pub result: Type,
+    /// Whether the parameters own their references, because a self tail call assigns them
+    /// (`typed::loop_tail_calls`); otherwise they borrow the caller's.
+    pub owned_params: bool,
+    /// The results of the self calls in tail position of the closure's body, the only ones a
+    /// loop may replace (`interp::eval::in_tail_position`).
+    pub tail_calls: SmallVec<[Local; 2]>,
 }
 
 impl Function {
@@ -883,6 +889,8 @@ impl Builder {
                 name,
                 locals: params.to_vec(),
                 params: params.len(),
+                owned_params: false,
+                tail_calls: SmallVec::new(),
                 blocks: vec![Block {
                     insts: Vec::new(),
                     terminator: Terminator::Fail,

@@ -9368,6 +9368,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 !arms.is_empty() && self.module[arms].iter().all(|arm| self.diverges(arm.body))
             }
             ExpressionKind::Repeat { body } => !self.breaks_out(*body),
+            ExpressionKind::While { condition, body } => {
+                matches!(
+                    self.module.kind(*condition),
+                    ExpressionKind::Literal(LiteralKind::Logical(true))
+                ) && !self.breaks_out(*body)
+            }
             _ => false,
         }
     }
