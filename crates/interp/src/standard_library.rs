@@ -1474,8 +1474,10 @@ unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
-    // An owned Array grows by the other Array's packed items.
+    // An owned Array grows by the other Array's packed items, unless both are one list, whose
+    // storage the copy would read while writing it.
     if owned_array(call, first)
+        && first != second
         && second.is_array()
         && !second.is_altrep()
         && length(second) > 0

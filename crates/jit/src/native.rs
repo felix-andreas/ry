@@ -2935,7 +2935,22 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
         Gathered::Values(arguments, ahead) => (arguments, ahead),
         Gathered::Declined => return None,
         Gathered::Unread(unread) => {
-            if let Err(unwind) = force_read_first(typed, &unread)? {
+            // Forcing runs R code, which must copy a watched value it assigns into rather than
+            // change it in place, so that `resume` sees the change as a new binding.
+            let held: SmallVec<[Sexp; 4]> = unread
+                .ahead
+                .watches
+                .iter()
+                .filter_map(|watch| typed::held_value(watch.bound))
+                .collect();
+            for value in &held {
+                value.increment_refcount();
+            }
+            let forcing = force_read_first(typed, &unread);
+            for value in &held {
+                value.decrement_refcount();
+            }
+            if let Err(unwind) = forcing? {
                 return Some(Err(unwind));
             }
             match resume(unread)? {
@@ -3026,16 +3041,18 @@ unsafe fn resume(mut unread: Unread) -> Option<Option<(SmallVec<[Sexp; 4]>, Read
     ahead
         .watches
         .retain(|watch| watch.param >= 64 || forced & 1 << watch.param == 0);
-    let stale = ahead.watches.iter().any(|watch| {
-        let now = match watch.variable {
-            Watched::Variable { symbol, env } => peek_variable(symbol, env),
-            Watched::Reference(reference) => reference_variable(reference),
-        };
-        now != Some(watch.bound)
-    }) || ahead
-        .promises
-        .iter()
-        .any(|&(promise, value, _)| promise.car() != values::unbound() && promise.car() != value);
+    // A left-out default was computed before forcing, from variables no watch covers.
+    let stale = ahead.fixed != 0
+        || ahead.watches.iter().any(|watch| {
+            let now = match watch.variable {
+                Watched::Variable { symbol, env } => peek_variable(symbol, env),
+                Watched::Reference(reference) => reference_variable(reference),
+            };
+            now != Some(watch.bound)
+        })
+        || ahead.promises.iter().any(|&(promise, value, _)| {
+            promise.car() != values::unbound() && promise.car() != value
+        });
     Some((!stale).then_some((unread.arguments, unread.ahead)))
 }
 
