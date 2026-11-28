@@ -183,6 +183,9 @@ pub struct Function {
     pub params: usize,
     pub blocks: Vec<Block>,
     pub result: Type,
+    /// Whether the parameters own their references, because a self tail call assigns them
+    /// (`typed::loop_tail_calls`); otherwise they borrow the caller's.
+    pub owned_params: bool,
 }
 
 impl Function {
@@ -883,6 +886,7 @@ impl Builder {
                 name,
                 locals: params.to_vec(),
                 params: params.len(),
+                owned_params: false,
                 blocks: vec![Block {
                     insts: Vec::new(),
                     terminator: Terminator::Fail,

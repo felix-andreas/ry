@@ -125,6 +125,12 @@ print(first_or([], 7))
 method dispatch: a function is called by its plain name, and a standard library function by its
 module and name, such as `List.map`.
 
+A function whose last step calls itself runs as a loop, so its depth is not limited by the stack or
+by R's `expressions` option: `down <- function(n: I64, total: I64) -> I64 if (n == 0) total else
+down(n - 1, total + n)` returns `500000500000i64` for `down(1000000, 0)`. The call replaces the
+running call, so `sys.call()` shows the latest call and the loop counts as one frame in
+`sys.nframe()`.
+
 ## Records and tuples
 
 ```r

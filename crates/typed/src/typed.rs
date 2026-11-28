@@ -1117,9 +1117,125 @@ fn optimize(ir: &mut ir::Function) {
     unbox::unbox(ir);
     unbox::remove_unread(ir);
     fusion::fuse(ir);
+    loop_tail_calls(ir);
     ownership::insert(ir);
     if std::env::var_os("RY_TYPED_DUMP").is_some() {
         eprintln!("{ir}");
+    }
+}
+
+/// Turns each self call whose value the function returns into a jump back to its start, with
+/// the arguments as the new parameters, so a loop written as recursion runs in one activation,
+/// as the interpreter runs it in one frame. The parameters then hold values the loop assigns,
+/// so they own their references ([`ir::Function::owned_params`]): a new entry block takes one
+/// of each counted argument, and the old one, which the loop jumps back to, polls for an
+/// interrupt first, as a loop header does.
+fn loop_tail_calls(function: &mut ir::Function) {
+    let mut sites: SmallVec<[(usize, usize); 2]> = SmallVec::new();
+    for (block, body) in function.blocks.iter().enumerate() {
+        for (position, inst) in body.insts.iter().enumerate() {
+            if let (ir::Op::CallTyped(lower::SELF, arguments), Some(dest)) = (&inst.op, inst.dest)
+                && arguments.len() == function.params
+                && arguments
+                    .iter()
+                    .zip(&function.locals[..function.params])
+                    .all(|(&argument, &ty)| function.ty(argument) == ty)
+                && returned(function, block, position + 1, dest)
+            {
+                sites.push((block, position));
+            }
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+    let header = ir::BlockId(function.blocks.len() as u32);
+    let mut start = std::mem::replace(
+        &mut function.blocks[0],
+        ir::Block {
+            insts: Vec::new(),
+            terminator: ir::Terminator::Jump(header),
+        },
+    );
+    start.insts.insert(0, ir::Inst::new(None, ir::Op::Poll));
+    function.blocks.push(start);
+    for body in &mut function.blocks[1..] {
+        retarget(&mut body.terminator, header);
+    }
+    for param in 0..function.params {
+        if function.locals[param].is_counted() {
+            function.blocks[0]
+                .insts
+                .push(ir::Inst::new(None, ir::Op::Dup(ir::Local(param as u32))));
+        }
+    }
+    function.owned_params = true;
+    for (block, position) in sites {
+        let block = if block == 0 { header.0 as usize } else { block };
+        let insts = &mut function.blocks[block].insts;
+        let ir::Op::CallTyped(_, arguments) = insts[position].op.clone() else {
+            continue;
+        };
+        insts.truncate(position);
+        // Every argument is read before any parameter is assigned, since an argument may read
+        // a parameter.
+        let mut staged: SmallVec<[ir::Local; 4]> = SmallVec::new();
+        for &argument in &arguments {
+            function.locals.push(function.locals[argument.0 as usize]);
+            let temporary = ir::Local(function.locals.len() as u32 - 1);
+            function.blocks[block]
+                .insts
+                .push(ir::Inst::new(Some(temporary), ir::Op::Copy(argument)));
+            staged.push(temporary);
+        }
+        let body = &mut function.blocks[block];
+        for (param, temporary) in staged.into_iter().enumerate() {
+            body.insts.push(ir::Inst::new(
+                Some(ir::Local(param as u32)),
+                ir::Op::Copy(temporary),
+            ));
+        }
+        body.terminator = ir::Terminator::Jump(header);
+    }
+}
+
+/// Whether the value of `value`, assigned just before instruction `start` of `block`, is what
+/// the function returns, through copies and jumps alone.
+fn returned(function: &ir::Function, mut block: usize, mut start: usize, value: ir::Local) -> bool {
+    let mut value = value;
+    for _ in 0..function.blocks.len() {
+        let body = &function.blocks[block];
+        for inst in &body.insts[start..] {
+            match (&inst.op, inst.dest) {
+                (ir::Op::Copy(source), Some(dest)) if *source == value => value = dest,
+                _ => return false,
+            }
+        }
+        match body.terminator {
+            ir::Terminator::Jump(target) => (block, start) = (target.0 as usize, 0),
+            ir::Terminator::Return(returned) => return returned == value,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Points a jump to the entry block at `header` instead.
+fn retarget(terminator: &mut ir::Terminator, header: ir::BlockId) {
+    let entry = |target: &mut ir::BlockId| {
+        if target.0 == 0 {
+            *target = header;
+        }
+    };
+    match terminator {
+        ir::Terminator::Jump(target) => entry(target),
+        ir::Terminator::Branch {
+            then, otherwise, ..
+        } => {
+            entry(then);
+            entry(otherwise);
+        }
+        ir::Terminator::Return(_) | ir::Terminator::Fail => {}
     }
 }
 

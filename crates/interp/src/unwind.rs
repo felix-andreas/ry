@@ -182,6 +182,10 @@ pub(crate) unsafe fn trace_unwind(unwind: &Unwind, marker: &mut Marker<'_>) {
                     marker.mark(value);
                 }
                 Jump::Break { env } | Jump::Next { env } => marker.mark(env),
+                Jump::TailCall { env, call } => {
+                    marker.mark(env);
+                    marker.mark(call);
+                }
                 Jump::TopLevel => {}
             },
         }
@@ -280,6 +284,13 @@ pub enum Jump {
     },
     Next {
         env: Sexp,
+    },
+    /// Replace the frame of the typed closure whose environment is `env` with the self call in
+    /// its tail position: `call` is a pairlist cell whose value is the call as written and whose
+    /// rest is the forced arguments (`eval::self_tail_call`).
+    TailCall {
+        env: Sexp,
+        call: Sexp,
     },
     /// The default error handler ran, so the error goes to the innermost top-level context.
     TopLevel,
@@ -427,6 +438,10 @@ impl Unwind {
                     heap.root(value);
                 }
                 Jump::Break { env } | Jump::Next { env } => heap.root(env),
+                Jump::TailCall { env, call } => {
+                    heap.root(env);
+                    heap.root(call);
+                }
                 Jump::TopLevel => {}
             },
         }

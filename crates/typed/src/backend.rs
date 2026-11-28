@@ -762,7 +762,7 @@ impl Emitter<'_> {
                     return Err(Refusal::new("a `return` of another type than the result"));
                 }
                 let values = self.get(local)?;
-                if self.function.is_param(local) && ty.is_counted() {
+                if self.function.is_param(local) && !self.function.owned_params && ty.is_counted() {
                     self.dup(ty, &values);
                 }
                 let status = self.builder.ins().iconst(I64, 0);

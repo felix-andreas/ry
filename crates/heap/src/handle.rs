@@ -590,6 +590,77 @@ impl<'s> Cx<'s> {
     }
 }
 
+impl<'s> Cx<'s> {
+    /// Runs `step` in a fresh nested handle scope per iteration, from `first`, until it is
+    /// [`Step::Done`]. Each iteration's roots are released before the next, and the value it
+    /// hands on is rooted again in the next one's scope, so a loop of any length holds a
+    /// constant number of handles. A trampoline uses it to run a chain of calls in one place.
+    #[inline]
+    pub fn scope_loop<T: Kind, U: Kind, E: Reroot>(
+        &mut self,
+        first: Local<'s, T>,
+        mut step: impl for<'inner> FnMut(
+            &mut Cx<'inner>,
+            Enclosing<'s, 'inner>,
+            Local<'inner, T>,
+        ) -> Result<Step<'inner, T, U>, E>,
+    ) -> Result<Local<'s, U>, E> {
+        // SAFETY: the heap is live.
+        let mark = unsafe { (*self.heap.as_ptr()).handle_mark() };
+        let mut carried = first.raw;
+        loop {
+            // SAFETY: the heap is live, and `carried` is live: it is `first`, which this scope
+            // roots, or the value of the last iteration, whose root was released with no
+            // allocation since.
+            let heap = unsafe { &mut *self.heap.as_ptr() };
+            heap.root(carried);
+            let mut inner = Cx {
+                heap: self.heap,
+                scope: PhantomData,
+            };
+            let value = Local {
+                raw: carried,
+                scope: PhantomData,
+                kind: PhantomData,
+            };
+            let result = step(
+                &mut inner,
+                Enclosing {
+                    enclosing: PhantomData,
+                    inner: PhantomData,
+                },
+                value,
+            );
+            // SAFETY: as in [`Cx::scope`]: no handle of the iteration's scope outlives `step`
+            // but its result, which is rooted again before anything can collect.
+            let heap = unsafe { &mut *self.heap.as_ptr() };
+            heap.release_handles(mark);
+            match result {
+                Ok(Step::Next(next)) => carried = next.raw,
+                Ok(Step::Done(value)) => {
+                    heap.root(value.raw);
+                    return Ok(Local {
+                        raw: value.raw,
+                        scope: PhantomData,
+                        kind: PhantomData,
+                    });
+                }
+                Err(error) => {
+                    error.reroot(heap);
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+/// What one iteration of [`Cx::scope_loop`] ends with: the value the next one starts from, or
+/// the loop's result.
+pub enum Step<'s, T: Kind, U: Kind> {
+    Next(Local<'s, T>),
+    Done(Local<'s, U>),
+}
+
 /// Proof that the scope `'s` encloses the scope `'inner`, which [`Cx::scope_reading`] hands
 /// its body: a handle of `'s` stays rooted for all of `'inner`, so it is a handle of `'inner`
 /// too.
