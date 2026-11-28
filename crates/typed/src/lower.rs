@@ -533,6 +533,7 @@ unsafe fn lower_calling(
         speculations: Vec::new(),
         nesting: 0,
         control: 0,
+        regions: Vec::new(),
         unusable: SmallVec::new(),
         any_tag: None,
         returned: None,
@@ -864,6 +865,7 @@ struct Checkpoint {
     speculations: usize,
     nesting: usize,
     control: usize,
+    regions: usize,
     unusable: usize,
     returned: Option<Type>,
     constructed: usize,
@@ -920,6 +922,9 @@ struct Lowering<'c> {
     nesting: usize,
     /// How many branches and loop bodies enclose the current point in the current scope.
     control: usize,
+    /// The names of the current scope where each enclosing branch or loop body starts,
+    /// innermost last, which [`Lowering::leave_control`] restores.
+    regions: Vec<FxHashMap<Sexp, Binding>>,
     /// The results of an `if` whose branches have different types, which nothing may read.
     unusable: SmallVec<[Local; 4]>,
     /// What the matches over any tag relied on.
@@ -1107,21 +1112,30 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Enters a branch or a loop body, which may not run, giving the current scope's names to
-    /// hand back to [`Lowering::leave_control`].
-    fn enter_control(&mut self) -> FxHashMap<Sexp, Binding> {
+    /// Enters a branch or a loop body, which may not run, giving the region to hand back to
+    /// [`Lowering::leave_control`].
+    fn enter_control(&mut self) -> usize {
         self.control += 1;
-        self.scopes
+        let names = self
+            .scopes
             .last()
             .map(|scope| scope.names.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.regions.push(names);
+        self.regions.len() - 1
     }
 
     /// Leaves a branch or loop body: the names it created go out of scope, and come back as a
     /// list for the caller to bind as an `if` or a loop leaves them ([`Lowering::join_names`],
     /// [`Lowering::leave_loop`]).
-    fn leave_control(&mut self, saved: FxHashMap<Sexp, Binding>) -> Created {
+    fn leave_control(&mut self, region: usize) -> Created {
         self.control -= 1;
+        let saved = self
+            .regions
+            .get_mut(region)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        self.regions.truncate(region);
         let Some(scope) = self.scopes.last_mut() else {
             return SmallVec::new();
         };
@@ -1720,14 +1734,11 @@ impl Lowering<'_> {
             }
             _ => self.lookup_assignable(symbol),
         };
-        match assignable {
-            Some(variable) => {
-                self.unify_pending(variable, value)?;
-                let ty = self.builder.ty(value);
-                let fits = self.fits_widening(symbol, self.builder.ty(variable), ty);
-                if !fits {
-                    return Err(Refusal::new("a variable that changes type"));
-                }
+        if let Some(variable) = assignable {
+            self.unify_pending(variable, value)?;
+            let held = self.builder.ty(variable);
+            let ty = self.builder.ty(value);
+            if self.fits_widening(symbol, held, ty) {
                 if variable != value {
                     self.builder.push(Some(variable), Op::Copy(value));
                 }
@@ -1735,48 +1746,64 @@ impl Lowering<'_> {
                     self.reassigned.push(variable);
                 }
                 self.bind(symbol, Binding::Value(variable));
-                Ok(variable)
+                return Ok(variable);
             }
-            None => {
-                if self.control > 0
-                    && matches!(
-                        self.scopes
-                            .last()
-                            .and_then(|scope| scope.names.get(&symbol)),
-                        Some(Binding::Function(..))
-                    )
-                {
-                    return Err(Refusal::new("a local function rebound in a branch or loop"));
-                }
-                let family = self.pending_family(value);
-                // A pending empty list gets a variable of its own, never shared, since its type is a
-                // placeholder; it still counts as one of the name's variables for the set flags.
-                let variable = match family {
-                    Some(_) => {
-                        let local = self.builder.local(ty);
-                        let (scope, entry) = self
-                            .scopes
-                            .last()
-                            .map_or((0, (BlockId(0), 0)), |scope| (scope.id, scope.entry));
-                        self.variables.push(Variable {
-                            scope,
-                            entry,
-                            symbol,
-                            local,
-                            flag: None,
-                        });
-                        local
-                    }
-                    None => self.variable(symbol, ty),
-                };
-                self.builder.push(Some(variable), Op::Copy(value));
-                if let Some(family) = family {
-                    self.pending[family].push(variable);
-                }
-                self.bind(symbol, Binding::Value(variable));
-                Ok(variable)
+            // A value of another type goes into a variable of its own type, which is sound
+            // wherever no code after it can read the name's old variable: outside any branch or
+            // loop, or for a name the innermost branch or loop body bound, which goes out of
+            // scope as it ends. A tag union that needs more tags restarts wider instead.
+            let widening = matches!(
+                (held_tags(held), held_tags(ty)),
+                (Some(held_union), Some(found_union))
+                    if with_tags(held, found_union) == with_tags(ty, held_union)
+            );
+            let entered = self.control > 0
+                && self
+                    .regions
+                    .last()
+                    .is_some_and(|names| names.contains_key(&symbol));
+            if widening || entered {
+                return Err(Refusal::new("a variable that changes type"));
             }
         }
+        let ty = self.builder.ty(value);
+        if self.control > 0
+            && matches!(
+                self.scopes
+                    .last()
+                    .and_then(|scope| scope.names.get(&symbol)),
+                Some(Binding::Function(..))
+            )
+        {
+            return Err(Refusal::new("a local function rebound in a branch or loop"));
+        }
+        let family = self.pending_family(value);
+        // A pending empty list gets a variable of its own, never shared, since its type is a
+        // placeholder; it still counts as one of the name's variables for the set flags.
+        let variable = match family {
+            Some(_) => {
+                let local = self.builder.local(ty);
+                let (scope, entry) = self
+                    .scopes
+                    .last()
+                    .map_or((0, (BlockId(0), 0)), |scope| (scope.id, scope.entry));
+                self.variables.push(Variable {
+                    scope,
+                    entry,
+                    symbol,
+                    local,
+                    flag: None,
+                });
+                local
+            }
+            None => self.variable(symbol, ty),
+        };
+        self.builder.push(Some(variable), Op::Copy(value));
+        if let Some(family) = family {
+            self.pending[family].push(variable);
+        }
+        self.bind(symbol, Binding::Value(variable));
+        Ok(variable)
     }
 
     /// The index of the pending empty list `local` holds, if it holds one.
@@ -3435,7 +3462,7 @@ impl Lowering<'_> {
             otherwise: else_block,
         });
         self.builder.switch_to(then_block);
-        let saved = self.enter_control();
+        let region = self.enter_control();
         let then_value = self.part(then, dropped)?;
         if let Some(value) = then_value
             && self.inlined.is_empty()
@@ -3443,15 +3470,15 @@ impl Lowering<'_> {
         {
             self.tail_branch.get_or_insert(self.builder.ty(value));
         }
-        let then_created = self.leave_control(saved);
+        let then_created = self.leave_control(region);
         let then_end = self.builder.current;
         self.builder.switch_to(else_block);
-        let saved = self.enter_control();
+        let region = self.enter_control();
         let else_value = match otherwise {
             Some(otherwise) => self.part(otherwise, dropped)?,
             None => Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))),
         };
-        let else_created = self.leave_control(saved);
+        let else_created = self.leave_control(region);
         let else_end = self.builder.current;
         let ends: SmallVec<[(BlockId, Created); 2]> = [
             then_value.map(|_| (then_end, then_created)),
@@ -3793,7 +3820,7 @@ impl Lowering<'_> {
         };
         // The latch leaves once the counter has reached the end, so stepping never passes it.
         let header = self.loop_header();
-        let saved = self.enter_control();
+        let region = self.enter_control();
         let item = match items {
             Some(held) => self.builder.emit(
                 Type::of_item(
@@ -3811,7 +3838,7 @@ impl Lowering<'_> {
         self.loops.push((latch, exit));
         let completed = self.part(body, true)?;
         self.loops.pop();
-        let created = self.leave_control(saved);
+        let created = self.leave_control(region);
         self.leave_loop(created);
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(latch));
@@ -4027,9 +4054,9 @@ impl Lowering<'_> {
         });
         self.builder.switch_to(body_block);
         self.loops.push((header, exit));
-        let saved = self.enter_control();
+        let region = self.enter_control();
         let completed = self.part(body, true)?;
-        let created = self.leave_control(saved);
+        let created = self.leave_control(region);
         self.leave_loop(created);
         self.loops.pop();
         if completed.is_some() {
@@ -4053,9 +4080,9 @@ impl Lowering<'_> {
         let header = self.loop_header();
         let exit = self.builder.block();
         self.loops.push((header, exit));
-        let saved = self.enter_control();
+        let region = self.enter_control();
         let completed = self.part(body, true)?;
-        let created = self.leave_control(saved);
+        let created = self.leave_control(region);
         self.leave_loop(created);
         self.loops.pop();
         if completed.is_some() {
@@ -4378,9 +4405,9 @@ impl Lowering<'_> {
                 self.builder.push(Some(result), Op::Copy(constant));
                 self.builder.terminate(Terminator::Jump(join));
                 self.builder.switch_to(evaluate);
-                let saved = self.enter_control();
+                let region = self.enter_control();
                 let b = self.condition(b)?;
-                self.leave_control(saved);
+                self.leave_control(region);
                 let b = self.builder.emit(Type::Lgl, Op::Copy(b));
                 self.builder.function.locals[b.0 as usize] = Type::Lgl;
                 self.builder.push(Some(result), Op::Copy(b));
@@ -8323,7 +8350,7 @@ impl Lowering<'_> {
                 _ => self.builder.terminate(Terminator::Jump(body)),
             }
             self.builder.switch_to(body);
-            let saved = self.enter_control();
+            let region = self.enter_control();
             // A shape only confirmed somewhere, which the code may never see, whose arm does not
             // lower (a field of another type than the annotation says, say) gives up for that
             // shape alone rather than for the whole function.
@@ -8352,7 +8379,7 @@ impl Lowering<'_> {
                 }
                 (completed, _) => completed,
             };
-            let created = self.leave_control(saved);
+            let created = self.leave_control(region);
             if let Some(completed) = completed? {
                 if !matches!(expected, Expected::Dropped(_)) {
                     self.usable(completed)?;
@@ -8483,6 +8510,7 @@ impl Lowering<'_> {
             speculations: self.speculations.len(),
             nesting: self.nesting,
             control: self.control,
+            regions: self.regions.len(),
             unusable: self.unusable.len(),
             returned: self.returned,
             constructed: self.constructed.len(),
@@ -8530,6 +8558,7 @@ impl Lowering<'_> {
         self.speculations.truncate(checkpoint.speculations);
         self.nesting = checkpoint.nesting;
         self.control = checkpoint.control;
+        self.regions.truncate(checkpoint.regions);
         self.unusable.truncate(checkpoint.unusable);
         self.returned = checkpoint.returned;
         self.constructed.truncate(checkpoint.constructed);
@@ -8647,23 +8676,23 @@ impl Lowering<'_> {
                 continue;
             }
             if let Some(guard) = arm.guard {
-                let saved = self.enter_control();
+                let region = self.enter_control();
                 for &(symbol, bound) in &bindings {
                     self.bind(symbol, Binding::Value(bound));
                 }
                 let holds = self.condition(guard);
-                self.leave_control(saved);
+                self.leave_control(region);
                 self.pass_if(holds?, next);
                 test = Test::Maybe;
             }
-            let saved = self.enter_control();
+            let region = self.enter_control();
             for &(symbol, bound) in &bindings {
                 self.assign(symbol, bound)?;
             }
             let completed = self
                 .part(arm.body, dropped)?
                 .map(|completed| self.toward(completed, expected).unwrap_or(completed));
-            let created = self.leave_control(saved);
+            let created = self.leave_control(region);
             if let Some(completed) = completed {
                 if !matches!(expected, Expected::Dropped(_)) {
                     self.usable(completed)?;
