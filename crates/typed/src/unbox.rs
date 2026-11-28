@@ -55,6 +55,9 @@ pub fn unbox(function: &mut Function) {
 /// fused list leaves where nothing asks for its length. A record that became its fields leaves
 /// such instructions behind too: the value of a field no read asks for is still computed, and
 /// for a string that is an allocation.
+///
+/// It must run before `ownership::insert`: a `Take`, a `Dup` or a consuming `Push` assigns a
+/// local and cannot fail, yet removing it leaks or skips a slot clear.
 pub fn remove_unread(function: &mut Function) {
     let locals = function.locals.len();
     let kept = |inst: &Inst| inst.op.can_fail() || inst.assigned().is_empty();
