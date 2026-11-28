@@ -12348,6 +12348,13 @@ impl<'f> RunningFrame<'f, '_, '_> {
         unsafe { Local::adopt(self.state.machine.enclosure()) }
     }
 
+    /// The environment the frame's function was defined in, which encloses the frame while it
+    /// runs on its slots without an environment.
+    fn function_environment<'s>(self, _context: &Cx<'s>) -> Local<'s, Environment> {
+        // SAFETY: the activation's function holds its environment for as long as it runs.
+        unsafe { Local::adopt(self.state.machine.function.tag()) }
+    }
+
     /// The slot of the variable whose symbol is the code's constant `constant`.
     fn slot_at(self, constant: usize) -> Option<Slot<'f>> {
         // SAFETY: the activation's code holds its slot table, and its registers outlive it.
@@ -12896,7 +12903,8 @@ fn slot_eager_value<'c>(
             });
         }
     }
-    effects::eager_value(context, symbol, frame.enclosure(context).read(context))
+    debug_assert!(!frame.has_environment());
+    effects::eager_value(context, symbol, frame.function_environment(context).read(context))
 }
 
 #[inline(always)]
