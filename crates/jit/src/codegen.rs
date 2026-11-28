@@ -18,7 +18,7 @@ use {
     crate::{
         analysis::{
             self, Action, Argument, Effect, Fast, Fold, IN_PLACE_SLOTS, Inspection, Intrinsic,
-            Numeric, Passing, Plan, Refusal, StateId, StateRef, Store, Ty, bit, jump_target,
+            Numeric, Passing, Plan, Refusal, StateId, StateRef, Store, Ty, jump_target, marks,
             status,
         },
         native,
@@ -774,19 +774,20 @@ impl<'p> Translator<'p> {
                         (Ty::DblVec, SexpType::Real)
                     };
                     let pc = self.frame.plan.insts[position].pc;
-                    let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                    // Tier 0 assigns again, raising the error that failed the copy or keeping
+                    // a sequence too long to copy compact, which the recompile then leaves
+                    // unexpanded.
+                    let failed = self.deopt(pc, before.id, None, position, reason::SPECULATION);
                     let kind = self.builder.ins().iconst(I64, kind as i64);
-                    let unlimited = self.builder.ins().iconst(I64, -1);
+                    let marked = iconst(&mut self.builder, pc);
                     let contents = self
                         .call(
                             runtime::jit_sequence_contents as *const () as usize,
                             &[I64, I64, I64, I64],
                             Some(I64),
-                            &[self.frame.activation, value, kind, unlimited],
+                            &[self.frame.activation, value, kind, marked],
                         )
                         .ok_or(Refusal("a helper without a result"))?;
-                    // The sequence passed its guard and the copy takes any length, so only an
-                    // error makes it fail.
                     let copied = self.builder.ins().icmp_imm_s(IntCC::NotEqual, contents, 0);
                     self.guard(copied, failed);
                     (ty, contents)
@@ -4276,7 +4277,7 @@ impl<'p> Translator<'p> {
             }
         }
         self.finish_load(
-            pc,
+            marks(self.frame.plan.insts[position].op).then_some(pc),
             slot,
             ty,
             dst,
@@ -4295,9 +4296,10 @@ impl<'p> Translator<'p> {
     /// checks the value has type `ty`, leaving through `mismatch` otherwise, and unboxes it into
     /// the slot's variables. `record` says nothing recorded the value's type at `pc` yet, so a
     /// value of another type is recorded for the recompile after the deoptimization to see.
+    /// `pc` is `None` when it is not a variable load's, as for a `Peek` of inlined code.
     unsafe fn finish_load(
         &mut self,
-        pc: usize,
+        pc: Option<usize>,
         slot: usize,
         ty: Ty,
         dst: Option<usize>,
@@ -4315,7 +4317,7 @@ impl<'p> Translator<'p> {
         };
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
-            if record {
+            if let (true, Some(pc)) = (record, pc) {
                 let fitting = self.builder.create_block();
                 let record = self.builder.create_block();
                 self.builder.set_cold_block(record);
@@ -4521,7 +4523,8 @@ impl<'p> Translator<'p> {
         };
         match loaded {
             Some((value, status)) => {
-                self.finish_load(pc, slot, ty, dst, value, status, mismatch, false, false)?;
+                let marked = marks(self.frame.plan.insts[position].op).then_some(pc);
+                self.finish_load(marked, slot, ty, dst, value, status, mismatch, false, false)?;
             }
             None => self.set_status(slot, local),
         }
@@ -5683,12 +5686,11 @@ impl<'p> Translator<'p> {
     /// `value`, or when it is a compact sequence where `ty` expects a plain vector, a plain copy
     /// of it that the slot and `dst` hold from then on: a formal declared `integer[]` called with
     /// `1:n` would otherwise fail the guard on every first call. Anything else that does not fit
-    /// jumps to `mismatch`, and so does a sequence too long to copy into a variable the body
-    /// never assigns into, which the load at `pc` records for the recompile. The second value
-    /// says whether the slot now holds a copy.
+    /// jumps to `mismatch`, and so does a sequence too long to copy, which the load at `pc`
+    /// records for the recompile. The second value says whether the slot now holds a copy.
     fn sequence_contents(
         &mut self,
-        pc: usize,
+        pc: Option<usize>,
         value: Value,
         ty: Ty,
         slot: usize,
@@ -5712,18 +5714,16 @@ impl<'p> Translator<'p> {
             SexpType::Real
         };
         let kind = self.builder.ins().iconst(I64, kind as i64);
-        let limit = if bit(&self.frame.plan.modified, slot) {
-            -1
-        } else {
-            pc as i64
-        };
-        let limit = self.builder.ins().iconst(I64, limit);
+        let marked = self
+            .builder
+            .ins()
+            .iconst(I64, pc.map_or(-1, |pc| pc as i64));
         let contents = self
             .call(
                 runtime::jit_sequence_contents as *const () as usize,
                 &[I64, I64, I64, I64],
                 Some(I64),
-                &[self.frame.activation, value, kind, limit],
+                &[self.frame.activation, value, kind, marked],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let converted = self.builder.create_block();

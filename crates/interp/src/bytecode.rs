@@ -2500,9 +2500,9 @@ pub mod feedback {
     /// it as tier 0's step. Compiled code records it, and the bit says nothing about the
     /// value's type.
     pub const HANDED_OFF: u32 = 1 << 17;
-    /// A compiled load that speculated on a plain vector found a compact sequence too long to
-    /// copy, so the recompile keeps the variable boxed. Compiled code records it, and the bit
-    /// says nothing else about the value's type.
+    /// Compiled code that speculated on a plain vector found a compact (ALTREP) vector too long
+    /// to copy, so the recompile keeps the variable boxed. Compiled code records it, and the
+    /// bit says nothing else about the value's type.
     pub const LONG_SEQUENCE: u32 = 1 << 18;
 }
 
