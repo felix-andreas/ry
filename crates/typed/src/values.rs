@@ -2625,11 +2625,75 @@ pub unsafe extern "C" fn ry_list_select(a: *mut List, mask: *mut List) -> *mut L
         );
         kept += 1;
     }
-    if kind == STR {
-        for &item in items::<Str>(result) {
-            str_dup(item);
-        }
+    dup_items(kind, (*result).data, count);
+    result
+}
+
+/// `a[positions]` of a ry list and a list of whole-number positions ([`pick`]). Null for
+/// positions that are not whole numbers, or hold an `NA`.
+pub unsafe extern "C" fn ry_list_pick(a: *mut List, positions: *mut List) -> *mut List {
+    let numbers: SmallVec<[i64; 8]> = match (*positions).kind {
+        I64 => items::<i64>(positions).iter().copied().collect(),
+        INT if !items::<i32>(positions).contains(&NA_INTEGER) => items::<i32>(positions)
+            .iter()
+            .map(|&number| i64::from(number))
+            .collect(),
+        _ => return null_mut(),
+    };
+    pick(a, &numbers)
+}
+
+/// `a[position]` of a ry list and one position ([`pick`]).
+pub unsafe extern "C" fn ry_list_pick_one(a: *mut List, position: i64) -> *mut List {
+    pick(a, &[position])
+}
+
+/// The items of `a` that `numbers` select, as the interpreter's lists read positions
+/// (`interp::arrays`): positive ones in their order, or with negative ones every item but
+/// those, and zeros select nothing. Null on a position past the end or a mix of signs.
+unsafe fn pick(a: *mut List, numbers: &[i64]) -> *mut List {
+    let length = (*a).length as usize;
+    if numbers.iter().any(|&number| number > length as i64) {
+        return null_mut();
     }
+    let kind = (*a).kind;
+    let width = item_size(kind);
+    let copy = |result: *mut List, from: usize, to: usize| {
+        ptr::copy_nonoverlapping(
+            (*a).data.add(from * width),
+            (*result).data.add(to * width),
+            width,
+        );
+    };
+    let result = if numbers.iter().any(|&number| number < 0) {
+        if numbers.iter().any(|&number| number > 0) {
+            return null_mut();
+        }
+        let mut left_out: SmallVec<[u64; 4]> = smallvec::smallvec![0; length.div_ceil(64)];
+        for &number in numbers {
+            let index = number.unsigned_abs() as usize;
+            if (1..=length).contains(&index) {
+                left_out[(index - 1) / 64] |= 1 << ((index - 1) % 64);
+            }
+        }
+        let dropped: usize = left_out.iter().map(|word| word.count_ones() as usize).sum();
+        let count = length - dropped;
+        let result = list_alloc(kind, count, count);
+        let kept = (0..length).filter(|&index| left_out[index / 64] & (1 << (index % 64)) == 0);
+        for (to, from) in kept.enumerate() {
+            copy(result, from, to);
+        }
+        result
+    } else {
+        let count = numbers.iter().filter(|&&number| number > 0).count();
+        let result = list_alloc(kind, count, count);
+        let chosen = numbers.iter().filter(|&&number| number > 0);
+        for (to, &number) in chosen.enumerate() {
+            copy(result, number as usize - 1, to);
+        }
+        result
+    };
+    dup_items(kind, (*result).data, (*result).length as usize);
     result
 }
 

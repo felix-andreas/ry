@@ -709,6 +709,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A typed self tail call runs without a new frame in every tier (settled)
 - The native entry forces an R call argument that the body reads first (settled)
 - A typed entry proves its lookups by the heap's stamps, not by walking them (settled)
+- `xs[i]` on a ry list compiles as the interpreter reads positions (settled)
 
 ## DataFrame and the table engine
 

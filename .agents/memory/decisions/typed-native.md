@@ -686,3 +686,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - A speculation made ahead of time before the script defined its function has no cell, and accepts any cell that holds the function. The proof watches the cell the walk found instead, so `ry run --aot` code walks only until the function is defined.
 - The check is about 70 instructions per call in a debug build, down from about 7,700; scenario `typed-rebound-names-recompile` pins that rebinding a callee, by assignment, `assign`, a later binding in an enclosing frame or `rm()` of a global that uncovers an attached one, takes effect at the next call, with and without `--aot`. A speculated value is only a `package:std` constant, which nothing rebinds in practice, so the value path is not pinned.
 - Running code proves its lookups again after each R call that may have acted (`ry_call_r`), against the entered code's speculations, which cover every function it calls directly, and the cells it calls through. A failed proof stops the code, and the interpreter runs the call again with what the R calls returned (`replay`), so the R calls' effects happen once and later calls find the new binding. The proof's epoch makes the check a comparison unless the call bound a name. Rejected: leaving at the next call of the rebound function only, because native code holds no frame states to resume the interpreter mid-body.
+
+## `xs[i]` on a ry list compiles as the interpreter reads positions
+
+**Status:** settled.
+
+- `Op::Pick` takes an `I64`, an R integer, a whole double or a `List<I64>` of positions, and `ry_list_pick` reads them as `interp::arrays::positions` does: positive positions in order, negative ones left out (a bitset of the items), zeros select nothing. A position past the end, mixed signs and `NA` return null, so the interpreter runs the call again and raises its error, and the error text has one source.
+- The checker claims single brackets compile for an `I64` or `List<I64>` index, a `List<Bool>` mask and a whole-number literal, negated or not; `xs[]` and a fractional literal stay `interpreted`. The lowerer compiles a fractional literal too, and the call fails at run time and reruns in the interpreter, which truncates it; an `F64` index is a type error.
+- Picked and masked items take a reference each (`dup_items`), records and nested lists included.

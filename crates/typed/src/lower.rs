@@ -5286,6 +5286,25 @@ impl Lowering<'_> {
                     };
                 }
                 self.known_items(vector)?;
+                if name == "["
+                    && let Type::Vector { array: true, .. } = ty
+                {
+                    return match self.builder.ty(index) {
+                        Type::I64
+                        | Type::Int
+                        | Type::Vector {
+                            item: Item::I64 | Item::Int,
+                            ..
+                        } => Ok(self.builder.emit(ty, Op::Pick(vector, index))),
+                        Type::Dbl => {
+                            let index = self.to_i64(index)?;
+                            Ok(self.builder.emit(ty, Op::Pick(vector, index)))
+                        }
+                        _ => Err(Refusal::new(
+                            "a list indexed by something other than positions",
+                        )),
+                    };
+                }
                 let index = self.integer_index(index)?;
                 let item = ty
                     .items()

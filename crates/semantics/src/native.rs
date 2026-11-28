@@ -1667,21 +1667,48 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.column_read(id, usage);
                     return;
                 }
-                // Single brackets keep the items a list of `Bool` marks, which compiles.
-                let by_mask = arguments
+                // Single brackets take the items a list of `Bool` marks, an `I64` position or a
+                // list of `I64` positions picks, which compiles.
+                let by_position = arguments
                     .first()
                     .and_then(|argument| argument.value)
                     .and_then(|position| self.ty(position))
-                    .is_some_and(|ty| array_element(db, self.peel(ty)).is_some());
+                    .is_some_and(|ty| {
+                        let ty = self.peel(ty);
+                        let scalar = array_element(db, ty).map_or(ty, |item| self.peel(item));
+                        matches!(scalar.kind(db), TyKind::Native(NativeScalar::I64))
+                            || array_element(db, ty).is_some_and(|_| {
+                                matches!(scalar.kind(db), TyKind::Native(NativeScalar::Bool))
+                            })
+                    });
+                let whole_literal = arguments.first().is_some_and(|argument| {
+                    let value = argument.value.map(|value| match *module.kind(value) {
+                        ExpressionKind::Unary {
+                            operator: UnaryOperator::Minus,
+                            operand,
+                        } => operand,
+                        _ => value,
+                    });
+                    value.is_some_and(|value| match *module.kind(value) {
+                        ExpressionKind::Literal(
+                            LiteralKind::Integer(text) | LiteralKind::Double(text),
+                        ) => module[text]
+                            .trim_end_matches('L')
+                            .parse::<f64>()
+                            .is_ok_and(|number| number.fract() == 0.0),
+                        _ => false,
+                    })
+                });
                 if !double
-                    && !by_mask
+                    && !by_position
+                    && !whole_literal
                     && target_type.is_some_and(|ty| array_element(db, ty).is_some())
                 {
                     self.uncompiled(
                         id,
                         Uncompiled::Advised(
-                            "a part of a list taken by position with single brackets",
-                            "Read one item with `xs[[i]]`, or take a part with `List.sublist`",
+                            "a list indexed with single brackets by something other than positions or a mask",
+                            "Index the list with an `I64` position, a `List<I64>` of positions or a `List<Bool>` mask",
                         ),
                     );
                     return;
