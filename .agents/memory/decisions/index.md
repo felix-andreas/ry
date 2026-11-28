@@ -535,6 +535,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Closure application takes handles, and the raw entries share its prepare step
 - A closure call's arguments are collected in one walk on handles, chosen by a mode
 - Tier 0's call and return handlers stay raw `unsafe fn` (settled)
+- The environment builtins take handles; `lapply` and `vapply` stay raw
 
 ## C API, R home and packages
 
