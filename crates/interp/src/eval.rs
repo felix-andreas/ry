@@ -1604,7 +1604,7 @@ fn check_lifted(
 }
 
 /// An argument reference: the promise a slot frame at `owner` passes for the variable
-/// `symbol` to a callee that takes its arguments straight into slots ([`call_with_plan`]).
+/// `symbol` to a callee that takes its arguments straight into slots ([`handles::call_with_plan`]).
 /// Instead of an environment it names the variable's slot (`NO_REFERENCE_SLOT` when the frame
 /// keeps none for it), so passing a variable allocates nothing and leaves the caller without
 /// an environment. It forces like any promise ([`force_promise`]), once, reading the slot at
@@ -3176,7 +3176,7 @@ pub const COMPILED: u8 = 1;
 /// a new promise.
 pub const EAGER: u8 = 2;
 /// [`COMPILED`] for a callee that takes its arguments straight into slots
-/// ([`call_with_plan`]): a variable is passed as an argument reference
+/// ([`handles::call_with_plan`]): a variable is passed as an argument reference
 /// ([`environment_reference`]), which the calling instruction releases when the call returns.
 pub const REFERENCES: u8 = 3;
 /// [`REFERENCES`] for the AST evaluator, which also passes a constant as a reference, so that
@@ -4561,10 +4561,10 @@ pub struct CallShape {
     pub registers: u16,
 }
 
-/// The first half of [`handles::call_with_plan`]: binds the arguments into a new slot frame and pushes
-/// the call's frame ([`enter`]), leaving the body to the caller, which runs the code
-/// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic
-/// path runs whole here.
+/// The first half of [`handles::call_with_plan`]: binds the arguments into a new slot frame and
+/// pushes the call's frame ([`enter`]), leaving the body to the caller, which runs the code
+/// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic path
+/// runs whole here.
 pub unsafe fn bind_plan(
     call: Sexp,
     function: Sexp,

@@ -10852,17 +10852,19 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             // From a slot frame, a call whose arguments need no promise over the frame leaves
             // it without an environment, and the callee finds its caller as the frame below its
             // own.
-            let sys_parent = if state.in_slots()
-                && collect_slot_arguments(
-                    context,
-                    RunningFrame { state: &*state },
-                    cells,
-                    eager,
-                    plan.is_some(),
-                    &mut args,
-                )? {
-                handles::null()
-            } else {
+            let collected = (|| {
+                if state.in_slots()
+                    && collect_slot_arguments(
+                        context,
+                        RunningFrame { state: &*state },
+                        cells,
+                        eager,
+                        plan.is_some(),
+                        &mut args,
+                    )?
+                {
+                    return Ok(handles::null());
+                }
                 args.clear();
                 let env = state.env(Reify::Site(Site::GenericCallArguments))?;
                 // The frame's header register holds the environment from here on.
@@ -10889,14 +10891,28 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                         &mut args,
                     )?;
                 }
-                environment.value()
+                Ok(environment.value())
+            })();
+            // A failed collection gives back the references its arguments took.
+            let sys_parent = match collected {
+                Ok(sys_parent) => sys_parent,
+                Err(unwind) => {
+                    eval::return_references(context, references);
+                    return Err(unwind);
+                }
             };
             let raw_args = handles::raw_arguments(&args);
             // The sources are read from the table only once the arguments are collected, and
             // binding them grows no table.
             let planned = match plan {
                 Some(id) if per_call => {
-                    spread_plan(state, instruction, id, function, call, arguments, raw_args)?
+                    match spread_plan(state, instruction, id, function, call, arguments, raw_args) {
+                        Ok(planned) => planned,
+                        Err(unwind) => {
+                            eval::return_references(context, references);
+                            return Err(unwind);
+                        }
+                    }
                 }
                 Some(id) => (*state.interp).bytecode.call_plans.current(
                     id,
@@ -10963,11 +10979,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     handles::call_with_plan(context, &closure_call, shape, sources)
                 }
                 (Some(_), None) if per_call => eval::call_matching(context, &closure_call),
-                (Some(_), None) => match eval::call_plan(context, closure.value(), call_local)? {
-                    Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
+                (Some(_), None) => match eval::call_plan(context, closure.value(), call_local) {
+                    Ok(Some((shape, sources))) if sources[..] != [eval::MATCH_PER_CALL] => {
                         handles::call_with_plan(context, &closure_call, shape, &sources)
                     }
-                    _ => eval::call_matching(context, &closure_call),
+                    Ok(_) => eval::call_matching(context, &closure_call),
+                    Err(unwind) => Err(unwind),
                 },
                 (None, _) => eval::apply_closure_in(context, &closure_call),
             };
@@ -11196,7 +11213,7 @@ unsafe fn closure_arguments(
 /// time. A site has one count for all three.
 const PLAN_MISSES: i32 = 8;
 
-/// The direct-call plan of a call site for `function` (see [`eval::call_with_plan`]): which
+/// The direct-call plan of a call site for `function` (see [`handles::call_with_plan`]): which
 /// argument fills each of its formals' slots, or `None` when calls of it here take the
 /// generic path. A plan holds for every closure with the same formals and body, so the
 /// closures one `function` expression makes on each run share it.
