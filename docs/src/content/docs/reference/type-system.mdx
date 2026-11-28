@@ -802,6 +802,11 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 - `arithmetic or number` admits everything `arithmetic` does and `I64` and `F64`.
 - `arithmetic or F64` admits everything `arithmetic` does and `F64`.
 - `numeric or F64` admits everything `numeric` does and `F64`.
+- `promoted` admits what `arithmetic` does, and a value of it is one arithmetic keeps the type of:
+  an `integer` or `logical` argument binds as the `double` R's arithmetic makes of it, so
+  `<U: promoted> fn(init: U) -> U` returns a `double` for `1L`. It is what a fold asks of an
+  init its callback computes on. `promoted or number` and `promoted or F64` add the ry numbers
+  or `F64`.
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
 - `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
@@ -2944,9 +2949,11 @@ returns the accumulator unchanged in one branch (`if (x > 1L) acc * 2 else acc`)
 init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. An
 init the callback's arithmetic promotes or keeps gives the fold its own type:
 `Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))` is a `double[]`, and
-`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. One gap remains: an accumulator
-that a function's parameter gives, and that admits both families, takes R's `double`, so
-`function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`.
+`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. An init that a function's
+parameter gives stays generic under `promoted`, so
+`function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` is
+`<T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U`: an `I64` init gives an `I64`,
+`1L` a `double` and `Sys.Date()` a `Date`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

@@ -642,3 +642,40 @@ r1: Unknown
 r2: Unknown
 141..152 error[type-mismatch] expected a value `==` can compare (anything but a function or an environment), found `environment`
 165..174 error[type-mismatch] expected a value `==` can test against a number (an atomic value, a class, `I64` or `F64`), found `environment`
+
+#---- a_fold_over_an_open_init_stays_generic
+# A fold whose callback computes on its accumulator keeps the init's type when arithmetic keeps
+# it (`promoted`): a ry number, a `double` or a class. An `integer` or `logical` init binds as
+# the `double` R's arithmetic makes of it, and a `character` one is rejected.
+doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
+a <- doubled([1i64], 1i64)
+b <- doubled([1i64], 1L)
+c <- doubled([1i64], 2.5)
+d <- doubled([1i64], Sys.Date())
+summed <- function(xs, init) Reduce(function(acc, x) acc * 0.5, xs, init)
+e <- summed(c(1, 2), 1L)
+f <- summed(c(1, 2), c(1L, 2L))
+g <- doubled([1i64], "a")
+checked <- function(xs, init) {
+  total <- Reduce(function(acc, x) acc * 2, xs, init)
+  if (init > 0) total + 1 else total
+}
+h <- checked(1:3, 1L)
+#: <U: promoted> fn(init: U) -> U
+declared <- function(init) init
+i <- declared(TRUE)
+#++++
+doubled: <T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U
+a: I64
+b: double
+c: double
+d: Date
+summed: <T, U: promoted or F64> fn(xs: list[T] | T[], init: U) -> U
+e: double
+f: double[]
+g: Unknown
+checked: <T, U: promoted or number> fn(xs: list[T] | T[], init: U) -> U
+h: double
+declared: <U: promoted> fn(init: U) -> U
+i: double
+608..611 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`

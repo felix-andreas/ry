@@ -187,6 +187,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A comparison of an open operand asks what both families compare
 - Record and tag payload fields display in sorted order (settled)
 - A fold's accumulator rebinds to the type its init gives under arithmetic
+- A fold over an open init stays generic under `promoted`
 - A file's top-level literals are ry values only when it uses ry's own types or values
 
 ## Analysis core

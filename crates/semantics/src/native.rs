@@ -909,6 +909,7 @@ pub fn has_r_bound(scheme: &TypeScheme<'_>) -> bool {
             binder.constraint().r_side(),
             Constraint::Numeric
                 | Constraint::Arithmetic
+                | Constraint::Promoted
                 | Constraint::ScalarNumeric
                 | Constraint::AtomicElement
         )
