@@ -588,9 +588,9 @@ fold3: <A> fn(f: fn(A, integer) -> A, a: A, b: A) -> A
 t1: Unknown
 t2: Unknown
 t3: Unknown
-303..313 error[type-mismatch] expected `double`, found `Date`
-359..369 error[type-mismatch] expected `I64`, found `Date`
-420..424 error[type-mismatch] expected `integer[]`, found `I64`
+236..246 error[type-mismatch] expected `double`, found `Date`
+292..302 error[type-mismatch] expected `I64`, found `Date`
+353..357 error[type-mismatch] expected `integer[]`, found `I64`
 
 #---- arithmetic_on_an_open_operand_keeps_a_class_with_arithmetic
 # A class's arithmetic methods give the class, so a generic function's arithmetic on a `Date` or a
@@ -677,6 +677,11 @@ scaled <- function(x) {
   x * 2L
 }
 k <- scaled(1L)
+#: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
+declared <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
+l <- declared([1i64], 1L)
+#: <T: item, U> fn(ys: List<T>, init: U) -> U
+loose <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 #++++
 doubled: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
 a: I64
@@ -695,8 +700,12 @@ twice: <T, U: num> fn(xs: list[T] | T[], init: U) -> U
 j: Unknown
 scaled: <T: arithmetic or number> fn(x: T) -> T
 k: integer
+declared: <T: item, U: arithmetic or number> fn(ys: List<T>, init: U) -> Promoted<U>
+l: double
+loose: <T: item, U> fn(ys: List<T>, init: U) -> U
 713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 896..901 warning[unused] `total` is assigned but never used
 1012..1017 warning[unused] `total` is assigned but never used
 1096..1106 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
 1134..1139 warning[unused] `total` is assigned but never used
+1486..1510 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic

@@ -110,7 +110,7 @@ pub struct InferenceTable<'db> {
     pub comparisons: Vec<PendingComparison<'db>>,
     /// The open accumulators a fold's arithmetic callback left generic, newest last: the call
     /// that folds over one gives `Promoted<T>`, not `T` itself (the call arm of `Checker::infer`).
-    folded: Vec<InferenceVar>,
+    folded: Vec<Ty<'db>>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
     pub definitions: Option<TypeDefinitions<'db>>,
@@ -265,7 +265,7 @@ impl<'db> InferenceTable<'db> {
         let resolved = self.resolve(db, ty);
         let folded = self.folded[mark..]
             .iter()
-            .any(|&accumulator| self.resolve(db, Ty::new(db, TyKind::Var(accumulator))) == resolved);
+            .any(|&accumulator| self.resolve(db, accumulator) == resolved);
         self.folded.truncate(mark);
         folded
     }
@@ -1316,12 +1316,11 @@ impl<'db> InferenceTable<'db> {
         actual: Ty<'db>,
         expected: Ty<'db>,
     ) -> Option<Result<(), UnifyError<'db>>> {
-        let TyKind::Var(expected) = *self.shallow_resolve(db, expected).kind(db) else {
-            return None;
-        };
-        let var = self.find(expected);
-        let Entry::Unbound { constraint, .. } = *self.entry(var) else {
-            return None;
+        let expected = self.shallow_resolve(db, expected);
+        let accumulator = match *expected.kind(db) {
+            TyKind::Var(var) => Ok(self.find(var)),
+            TyKind::Rigid(name) => Err(name),
+            _ => return None,
         };
         let actual = self.shallow_resolve(db, actual);
         let members = match actual.kind(db) {
@@ -1342,13 +1341,38 @@ impl<'db> InferenceTable<'db> {
                 }
                 _ => member,
             };
-            let TyKind::Var(operand) = *self.shallow_resolve(db, operand).kind(db) else {
-                return None;
+            let operand = self.shallow_resolve(db, operand);
+            let same = match (*operand.kind(db), accumulator) {
+                (TyKind::Var(operand), Ok(var)) => self.find(operand) == var,
+                (TyKind::Rigid(_), Err(_)) => operand == expected,
+                _ => false,
             };
-            if self.find(operand) != var {
+            if !same {
                 return None;
             }
         }
+        let var = match accumulator {
+            Ok(var) => var,
+            // A declared accumulator `U` the family may promote (`<U: arithmetic or number>`)
+            // folds as an open one does: the call gives `Promoted<U>`.
+            Err(name) => {
+                let declared = self
+                    .rigid_constraints
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(Constraint::Unconstrained);
+                if family? != FamilyResult::Arithmetic
+                    || declared.join(Constraint::ArithmeticOrNumber) != Some(declared)
+                {
+                    return None;
+                }
+                self.folded.push(expected);
+                return Some(Ok(()));
+            }
+        };
+        let Entry::Unbound { constraint, .. } = *self.entry(var) else {
+            return None;
+        };
         let result = family?;
         // An arithmetic callback over an open accumulator keeps it open, as `T * 2` keeps `T`:
         // the fold's call gives `Promoted<T>`, which reduces once the init settles `T`.
@@ -1357,7 +1381,7 @@ impl<'db> InferenceTable<'db> {
         {
             let constrained = self.constrain(db, var, joined);
             if constrained.is_ok() {
-                self.folded.push(var);
+                self.folded.push(expected);
             }
             return Some(constrained);
         }
