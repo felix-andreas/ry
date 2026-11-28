@@ -237,6 +237,8 @@ All => values::ry_all,
     ListRangeI64 => values::ry_list_range_i64,
     ListRep => values::ry_list_rep,
     ListSelect => values::ry_list_select,
+    ListPick => values::ry_list_pick,
+    ListPickOne => values::ry_list_pick_one,
     ListSeq => values::ry_list_seq,
     ListSeqLen => values::ry_list_seq_len,
     ListSlice => values::ry_list_slice,
@@ -1775,6 +1777,17 @@ impl Emitter<'_> {
             Op::Select(a, mask) => {
                 let (x, flags) = (self.one(*a)?, self.one(*mask)?);
                 let list = self.call_words(Helper::ListSelect, I64, &[x, flags]);
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
+            Op::Pick(a, positions) => {
+                let helper = match ty(*positions) {
+                    Type::Vector { .. } => Helper::ListPick,
+                    _ => Helper::ListPickOne,
+                };
+                let (x, at) = (self.one(*a)?, self.one(*positions)?);
+                let at = self.wide(at);
+                let list = self.call_words(helper, I64, &[x, at]);
                 self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
             }

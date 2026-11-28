@@ -5961,7 +5961,7 @@ interpreted
 | a name read before the function sets it, as in `acc <- acc + i` in a loop that sets `acc` nowhere else, or after branches that set it to values of different types | set it before the branch or loop, with one type |
 | a name bound before a branch, a loop (its `while` condition included) or the right operand of `&&` or `\|\|` that takes a value of another type inside it, and branches that set a name to different types | a new name for the new value |
 | the value of an `if` without `else` | an `else` branch that gives a value of the same type |
-| `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
+| `xs[]`, and `xs[i]` with a fractional position such as `xs[1.5]` | `xs` itself, or a whole-number position |
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias of an open or generic type, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |

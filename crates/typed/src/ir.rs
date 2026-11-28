@@ -527,6 +527,10 @@ pub enum Op {
     /// `x[mask]` of a vector and a logical vector of the same length. Fails on any other length
     /// and on an `NA` in the mask.
     Select(Local, Local),
+    /// `xs[i]` of a ry list and an `I64` position or a list of whole-number positions, as the
+    /// interpreter's lists read them: a negative position leaves an item out and a zero selects
+    /// nothing. Fails on a position past the end and on positive and negative positions mixed.
+    Pick(Local, Local),
     /// `List.sort_asc`, or `List.sort_desc` when true, of a numeric list. Fails on `NA` or NaN.
     Sort(Local, bool),
     /// Elementwise arithmetic where at least one operand is a vector. The item type is the
@@ -738,6 +742,7 @@ impl Op {
             | Step(a, b)
             | Repeat(a, b)
             | Select(a, b)
+            | Pick(a, b)
             | VectorArith(_, _, a, b)
             | VectorCompare(_, _, a, b)
             | VectorLogic(_, a, b)
