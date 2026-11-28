@@ -234,7 +234,10 @@ pub(crate) fn select_in_slots(
     // SAFETY: the generic's frame holds its function until the call returns, after the
     // caller's scope ends.
     let generic = unsafe {
-        handles::held(context, handles::live_frame(context, position).function().raw())
+        handles::held(
+            context,
+            handles::live_frame(context, position).function().raw(),
+        )
     };
     let Some(mut site) = valid_site(context, handles::live_frame(context, position).function())
     else {

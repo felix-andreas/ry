@@ -15,7 +15,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         dispatch, eval,
-        handles::{self, Environment, Local, Symbol},
+        handles::{self, Cx, Environment, Local, Symbol},
         interp,
         session::{FNV_OFFSET, eval_text, stable_hash},
         unwind::R,
@@ -882,6 +882,12 @@ unsafe fn do_is(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
+    // One scope for both class lookups, which root the class name and the definitions they
+    // find until the answer is known.
+    handles::with(|context| is_instance_in(context, object, class2))
+}
+
+unsafe fn is_instance_in<'s>(context: &mut Cx<'s>, object: Sexp, class2: Sexp) -> R<Option<bool>> {
     let class1 = dispatch::class_of_raw(object)?;
     let mut s3_case = length(class1) > 1;
     let class1 = if s3_case {
@@ -900,13 +906,16 @@ unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
         }
         _ => return Ok(None),
     };
-    let Some(definition1) = cached_class(class1)? else {
+    let class1 = handles::adopt(context, class1);
+    let Some(definition1) = cached_class_in(context, class1)? else {
         return Ok(None);
     };
+    let definition1 = definition1.raw();
+    let class1 = class1.raw();
     let definition2 = match given_definition {
         Some(definition) => definition,
-        None => match cached_class(class2_name)? {
-            Some(definition) => definition,
+        None => match cached_class_in(context, handles::held(context, class2_name))? {
+            Some(definition) => definition.raw(),
             None => return Ok(None),
         },
     };
@@ -1143,21 +1152,27 @@ unsafe fn simple(extension: Sexp) -> R<bool> {
 /// string `class` names (with its `package` attribute), or a class definition passed in.
 /// `None` when the R code would look further, in the environments or packages it searches.
 unsafe fn cached_class(class: Sexp) -> R<Option<Sexp>> {
-    let namespace = interp().globals.methods_namespace;
-    let table = eval::value_of(eval::find_var_in_frame(symbols().class_table, namespace)?)?;
-    if table.kind() != SexpType::Environment {
-        return Ok(None);
-    }
-    let definition = handles::with_result(|context| {
+    handles::with_result(|context| {
         let class = handles::held(context, class);
-        let Some(table) = handles::held(context, table).downcast::<Environment>() else {
-            return Ok(nil());
-        };
-        crate::methods::cached_class_definition(context, class, table).map(Local::raw)
-    })?;
+        Ok(cached_class_in(context, class)?.map(Local::raw))
+    })
+}
+
+/// [`cached_class`] in the caller's handle scope.
+fn cached_class_in<'s>(context: &mut Cx<'s>, class: Local<'s>) -> R<Option<Local<'s>>> {
+    let namespace = interp().globals.methods_namespace;
+    // SAFETY: the methods namespace binds the class table, and the lookup runs no R code.
+    let table =
+        unsafe { eval::value_of(eval::find_var_in_frame(symbols().class_table, namespace)?)? };
+    // SAFETY: the namespace holds the table until the scope ends, whatever R code runs, as
+    // nothing rebinds it.
+    let Some(table) = unsafe { handles::held(context, table) }.downcast::<Environment>() else {
+        return Ok(None);
+    };
+    let definition = crate::methods::cached_class_definition(context, class, table)?;
     // More than one package defines the class: the R code picks one by where it is called from.
-    if definition == nil()
-        || (definition.kind() == SexpType::List && !definition.has_gp(gp::S4_OBJECT))
+    if definition.raw() == nil()
+        || (definition.r_type() == SexpType::List && !handles::is_s4(definition))
     {
         return Ok(None);
     }
