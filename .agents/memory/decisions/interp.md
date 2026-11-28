@@ -139,7 +139,7 @@ The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
   The cost was spread thin over the core, so the fixes are many small cuts, not one redesign.
 - **A closure call's bookkeeping stays off the Rust heap.** Arguments and matched formals live in
   inline `SmallVec`s (`eval::Args` 10, `eval::Matched` 8), callers fill a vector they own
-  (`promise_args_into`, `evaluate_args_into`). A formal whose default is atomic or `NULL` binds the
+  (`collect_arguments`, `evaluate_args_into`). A formal whose default is atomic or `NULL` binds the
   value directly with `BINDING_MISSING` set (a promise of a constant costs an allocation and a
   force); `missing()` reads the bit. A typed closure turns such a binding back into a promise,
   because an inline annotation checks a default only when the body uses it.
@@ -289,7 +289,7 @@ globals (`crates/interp/src/interp.rs`). The other invariants are not verified.
 - **Where the promises come from** (testthat, an instrumented build): symbol arguments bound in
   the caller to a value 421k, a forced promise 267k, an unforced promise 423k; language arguments
   154k; compiled arguments 307k; non-literal defaults 171k. The receivers are mostly small base
-  and rlang predicates. The effect-free eager path (`eager_args_into`) applied to almost none:
+  and rlang predicates. The effect-free eager path (`collect_arguments::<EAGER>`) applied to almost none:
   the callee is rarely provably effect-free, and testthat always has a calling handler.
 - **By-value native entries.** A call of a closure in `base_fast_paths::NATIVE_ENTRIES` first tries
   `native_entry_by_value` on the unevaluated arguments (`op_call_generic`, the closure branch of
@@ -345,7 +345,7 @@ Design and measurements: `development/design/slot-frames.md`.
   (`slot_substitute`), `missing`, `nargs`, `sys.call`, `return` and the dots accessors need none.
 - **The C API** exports no context walker (`R_GlobalContext` is opaque; `R_sysframe` and friends
   are not exported); `R_GetCurrentEnv` reifies through `frame_env`.
-- **Direct calls.** A planned site runs `eval::call_with_plan`, writing arguments straight into
+- **Direct calls.** A planned site runs `handles::call_with_plan`, writing arguments straight into
   slots; the plan is built on a body's second call because allocating on the first pushed start-up
   over a collection threshold (+33M instructions on an empty script). A site stops after eight
   plans. Per `h -> f` pair (JIT off): 3,065 instructions on heap frames, 2,605 on slot frames with
@@ -361,7 +361,7 @@ Design and measurements: `development/design/slot-frames.md`.
   8% more, 2.5% with the JIT on. Making the heap path cheaper again would need a second dispatch
   loop; inlining removes these frames from hot loops. `lookup_outside` is `#[inline(always)]`
   because as a call it cost ~50 instructions per iteration in saved registers.
-- **Forwarding.** `slot_dots_into` appends the slot's promises for `...`; `slot_builtin_call` forces
+- **Forwarding.** `collect_slot_dots` appends the slot's promises for `...`; `slot_builtin_call` forces
   constant and slotted arguments from slots.
 - **No heap-frame fallback for bodies that keep reifying.** A per-body reify counter cut testthat's
   reifies from about 100,000 to 6,700 yet ran 0.2 to 0.7% more instructions: making the
@@ -380,7 +380,7 @@ Design and measurements: `development/design/slot-frames.md`.
   `eval::code_reference` and `eval::env_code_reference` (compiled argument code); the AST evaluator
   passes constants as references too, because lazyeval-style native code reads a promise's
   environment. Each reference's attribute vector lives in `Interp.reference_targets`. The AST
-  evaluator plans through `direct_sources`/`call_with_plan`, so planned calls have one binding
+  evaluator plans through `call_plan`/`call_with_plan`, so planned calls have one binding
   path. A `...` callee plans with `DOTS_SOURCE`; `detach_reference` converts in place so a shared
   reference is not forced twice. A call passing `...` has the single plan `MATCH_PER_CALL`
   (`call_matching`). Tier 1 lowers a direct call's argument code in the caller's frame, so
@@ -545,7 +545,7 @@ without cells, promise forcing in the loop, and one observer word on the general
   x <<- 2; a }; f(x)` returns 2 in GNU R, as do the same shapes with `assign("x", 2, envir =
   parent.frame())` and with a callee that calls a function writing `x` (oracle-pinned).
 - **`...` without cells.** A received `...` is a dots view (start, count) over `Interp.frame_args`;
-  `slot_dots_into`, `...length()`, `..N` and `list(...)` read the view directly, and a `DOTSXP`
+  `collect_slot_dots`, `...length()`, `..N` and `list(...)` read the view directly, and a `DOTSXP`
   chain is built only when a reader needs the pairlist (reify, `substitute(list(...))`,
   `match.call`, C code) and then replaces the view in the slot.
 - **Arguments are written once** onto `Interp.frame_args`; one observer bitset is tested once per
@@ -725,8 +725,8 @@ without cells, promise forcing in the loop, and one observer word on the general
 
 **Status:** built.
 
-- `slot_promises_into` builds in one pass and, in the rare case an argument does not fit, undoes
-  it (restores `unforced` from a snapshot, releases the references). `release_references` indexes
+- `collect_slot_arguments` builds in one pass and, in the rare case an argument does not fit, undoes
+  it (gives back the references it took). `release_references` indexes
   the pool directly (the pool keeps `references_used` within both vectors) and writes each field
   only when it differs from its reset value. testthat_full -0.32% warm instructions, RSS flat.
 - **Trap.** A forced reference's tag is nil whatever its kind (`settle_promise` clears it), so the

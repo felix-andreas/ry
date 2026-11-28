@@ -1310,7 +1310,7 @@ tier is running it, and switching tiers moves no values.
 call of a body there marks the site, and the second builds the plan: for each formal of the
 callee, the position of the argument that fills its slot, or -1 when the site supplies none.
 Later calls of the same formals and body skip argument matching and write the arguments straight
-into the callee's slots (`eval::call_with_plan`); a site that has seen eight different bodies stops
+into the callee's slots (`handles::call_with_plan`); a site that has seen eight different bodies stops
 planning. A plan exists only when matching cannot depend on the values: the callee has no `...`
 formal, the site passes no `...` or `..N`, and every formal the site leaves out has a literal
 default. Everything else binds through the matcher (`bind_slots`, with its per-body match cache),

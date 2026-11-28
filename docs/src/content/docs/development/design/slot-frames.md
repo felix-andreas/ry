@@ -114,7 +114,7 @@ it.
   holds is discarded with it (`finish_frame`, `outliving_cause`).
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
   `bytecode.rs`): which argument fills each formal's slot. The site marks itself seen on its first
-  call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
+  call, builds the plan on the second, and from then on `handles::call_with_plan` writes the arguments
   into the slots without matching. A site stops planning after eight misses (a closure with other
   formals or body than its plan's, or one it cannot plan for). Plans live outside the heap, in
   `CallPlans`, columns indexed by plan id; the site keeps the id in the unused feedback word of its
@@ -456,7 +456,7 @@ passes a reference to the name in that environment (`eval::environment_reference
 `collect_arguments`), so calls from test code and from frames with an environment allocate no
 promise either. Compiled argument code is passed the same way, as a code reference
 (`eval::code_reference` from a slot frame, `eval::env_code_reference` from a caller with an
-environment). The AST evaluator plans its calls too: `apply_call` asks `direct_sources` for the
+environment). The AST evaluator plans its calls too: `apply_call` asks `call_plan` for the
 callee's plan at each call and binds the references it builds with `call_with_plan`, as the
 bytecode call instruction does. It passes constants as references as well, because lazyeval-style
 native code reads a promise's environment and the AST evaluator is what runs uncompiled package
