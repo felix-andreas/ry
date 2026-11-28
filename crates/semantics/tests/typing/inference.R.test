@@ -561,7 +561,7 @@ w1: I64
 w2: double
 c1: logical
 c2: logical | integer
-walker: <T: item> fn(ys: List<T>, init: double) -> double
+walker: <T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U
 
 #---- a_fold_accumulator_takes_the_type_its_init_gives_under_arithmetic
 # The callback settles the accumulator as `double`, and an init that arithmetic promotes or keeps
@@ -645,13 +645,13 @@ r2: Unknown
 
 #---- a_fold_over_an_open_init_stays_generic
 # A fold whose callback computes on its accumulator keeps the init's type when arithmetic keeps
-# it (`promoted`): a ry number, a `double` or a class. An `integer` or `logical` init binds as
+# it (`promoted`): a ry number, a `double` or a class such as `matrix`. An `integer` or `logical` init binds as
 # the `double` R's arithmetic makes of it, and a `character` one is rejected.
 doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 a <- doubled([1i64], 1i64)
 b <- doubled([1i64], 1L)
 c <- doubled([1i64], 2.5)
-d <- doubled([1i64], Sys.Date())
+d <- doubled([1i64], matrix(1, 2, 2))
 summed <- function(xs, init) Reduce(function(acc, x) acc * 0.5, xs, init)
 e <- summed(c(1, 2), 1L)
 f <- summed(c(1, 2), c(1L, 2L))
@@ -669,7 +669,7 @@ doubled: <T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U
 a: I64
 b: double
 c: double
-d: Date
+d: matrix
 summed: <T, U: promoted or F64> fn(xs: list[T] | T[], init: U) -> U
 e: double
 f: double[]
@@ -678,4 +678,4 @@ checked: <T, U: promoted or number> fn(xs: list[T] | T[], init: U) -> U
 h: double
 declared: <U: promoted> fn(init: U) -> U
 i: double
-608..611 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
+630..633 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`

@@ -2953,7 +2953,7 @@ init the callback's arithmetic promotes or keeps gives the fold its own type:
 parameter gives stays generic under `promoted`, so
 `function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` is
 `<T: item, U: promoted or number> fn(ys: List<T>, init: U) -> U`: an `I64` init gives an `I64`,
-`1L` a `double` and `Sys.Date()` a `Date`.
+`1L` a `double` and a `matrix` a `matrix`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
