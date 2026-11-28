@@ -8953,8 +8953,8 @@ unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
 /// checks that the frame's `...` holds what the plan was made for, and then writes those
 /// arguments, which are the frame's caller's and pass on unchanged, where the site has `...`.
 ///
-/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
-/// [`eval::referenced_args_into`], then
+/// It does what [`op_call_generic`] does for the same call through [`collect_slot_arguments`]
+/// or [`eval::collect_arguments`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
 /// needs anything else to them: a debugger, an `Rprof` profile, a tracked move or a refused
 /// object system ([`activity::observers`]), a closure flagged for debugging or with a native
@@ -10910,7 +10910,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             let entered = match (plan, planned) {
                 (Some(_), Some((shape, sources))) if in_place(state, function) => Some((
                     eval::bind_plan(call, function, shape, sources, raw_args, sys_parent.raw()),
-                    shape.slots as usize,
+                    Some(shape.slots as usize),
                 )),
                 (None, _)
                     if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) =>
@@ -10923,7 +10923,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                             sys_parent.raw(),
                             None,
                         ),
-                        slot_count(function.cdr()),
+                        None,
                     ))
                 }
                 _ => None,
@@ -10933,9 +10933,16 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     Ok(entered) if entered.header == crate::NO_SLOTS => {
                         after_call(state, instruction, references, entered.value)
                     }
-                    Ok(entered) => {
-                        enter_in_place(state, instruction.at, function, entered, slots, references)
-                    }
+                    // Only a body compiled with a slot table has a slot count, and only an entry
+                    // that bound slots tells that it was.
+                    Ok(entered) => enter_in_place(
+                        state,
+                        instruction.at,
+                        function,
+                        entered,
+                        slots.unwrap_or_else(|| slot_count(function.cdr())),
+                        references,
+                    ),
                     Err(unwind) => {
                         if (*state.interp).references_used != references {
                             eval::return_references(context, references);
