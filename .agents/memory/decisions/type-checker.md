@@ -1221,7 +1221,8 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - The targets live on `InferenceTable::fold_targets`, which `Checker::infer_ordinary_call` sets and restores around each call; the record of folded targets sits under snapshot and rollback like `comparisons`.
 - A declared accumulator folds the same way when its bound admits arithmetic (`<U: arithmetic or number>`), so the rendered `-> Promoted<U>` checks when written back as the annotation; an unbounded `<U>` is an error at the callback.
 - `Subtracted<T>` and `Compared<T>` keep the fixed point (`Widening::Folded`, `Widening::Joined`).
-- Known gap: an init bound before the callback types the lambda's accumulator parameter as the init's type, so `first <- function<A>(a: A, f: fn(A, integer) -> A) -> A` called as `first(1L, function(acc, x) acc * 2)` is a false error (`this function must return integer`). `List.walk` with a concrete init checks.
+- An init passed before the callback binds the target first, so the callback's return reaches the fixed point as `Promoted<A>` over a bound `A`. `family_fixed_point` resolves only variables there, never the family, or `Promoted<integer>` would compute to `double` and read as a return other than the accumulator's: `first <- function<A>(a: A, f: fn(A, integer) -> A) -> A` called as `first(1L, function(acc, x) acc * 2)` is `double`.
+- Known gap: with the init first, the lambda's accumulator parameter copies the init's binding before the fold settles it, so `ry check --annotate` of `first(1L, function(acc, x) if (x > 0L) acc * 2 else acc)` writes `acc: integer` with a `double | integer` result, which its re-check rejects. Linking the parameter to the target at the callback comparison does not hold, because the argument probes bind the parameter again after the link.
 
 ## A file's top-level literals are ry values only when it uses ry's own types or values
 

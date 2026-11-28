@@ -647,7 +647,8 @@ r2: Unknown
 # A fold whose callback computes on its accumulator gives `Promoted<U>` of its init's type `U`:
 # a ry number, a `double` or a class such as `matrix` comes back as itself, an `integer` init
 # as the `double` R's arithmetic makes of it, and a `character` one is rejected. The init itself
-# keeps its own type, so a function that also returns or computes on it sees `U`.
+# keeps its own type, so a function that also returns or computes on it sees `U`. An init
+# passed before the callback folds the same way.
 doubled <- function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)
 a <- doubled([1i64], 1i64)
 b <- doubled([1i64], 1L)
@@ -757,12 +758,12 @@ t: double
 lst: <A> fn(fs: list[fn(A, integer) -> A], a: A) -> A
 u: double
 dots: <A> fn(a: A, ...: fn(A, integer) -> A) -> A
-v: Unknown
+v: double
 mk3: <U: arithmetic or number> fn(init: U) -> fn(U) -> U
 two: <A> fn(f: fn(A, integer) -> A, a: A, b: A) -> A
 w: double[]
 first: <A> fn(a: A, f: fn(A, integer) -> A) -> A
-x: Unknown
+x: double
 y: double
 both: <A, B> fn(a: A, b: B, k: fn(A) -> integer, f: fn(A, integer) -> A, g: fn(B, integer) -> B) -> B
 z: fn(init: double) -> double
@@ -770,12 +771,10 @@ named: <A> fn(f: fn(acc: A, x: integer) -> A, a: A) -> A
 zz: <T: arithmetic or number> fn(init: T) -> Promoted<T>
 later: <A, B> fn(f: fn(A, integer) -> A, a: A, b: B, c: B) -> B
 zzz: fn(init: integer) -> integer
-713..716 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
-896..901 warning[unused] `total` is assigned but never used
-1012..1017 warning[unused] `total` is assigned but never used
-1096..1106 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
-1134..1139 warning[unused] `total` is assigned but never used
-1486..1510 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
-2748..2772 error[type-mismatch] this function must return `integer`, but it returns `double`
-2851..2868 error[type-mismatch] expected `fn(U) -> U`, found `fn(v: T) -> Promoted<T>`
-3056..3080 error[type-mismatch] this function must return `integer`, but it returns `double`
+770..773 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
+953..958 warning[unused] `total` is assigned but never used
+1069..1074 warning[unused] `total` is assigned but never used
+1153..1163 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
+1191..1196 warning[unused] `total` is assigned but never used
+1543..1567 error[type-mismatch] this function is passed `U`, but its parameter `acc` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
+2908..2925 error[type-mismatch] expected `fn(U) -> U`, found `fn(v: T) -> Promoted<T>`
