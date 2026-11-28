@@ -27,7 +27,7 @@ use {
     },
     heap::{
         activity::{self, Counter},
-        handle::{Cx, Gc, Symbol},
+        handle::{Chars, Cx, Gc, Symbol},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
@@ -878,20 +878,17 @@ pub unsafe fn native_entry_by_value(
 /// handle stack after the call.
 #[inline(never)]
 unsafe fn forced_keeping(gathered: &[Arg], promise: Sexp, rooted: &mut usize) -> R<Sexp> {
-    // SAFETY: the caller is a tier 0 instruction, which releases what this roots.
-    unsafe {
-        handles::in_caller_scope(|context| {
-            for arg in gathered {
-                let value: Gc<'_> = Gc::adopt(arg.value);
-                context.root(value);
-            }
-            *rooted += gathered.len() + 1;
-            let promise: Gc<'_> = Gc::adopt(promise);
-            let promise = context.root(promise);
-            let value: Gc<'_> = Gc::adopt(eval::force_promise(promise.raw())?);
-            Ok(context.root(value).raw())
-        })
-    }
+    handles::in_caller_scope(|context| {
+        for arg in gathered {
+            let value: Gc<'_> = Gc::adopt(arg.value);
+            context.root(value);
+        }
+        *rooted += gathered.len() + 1;
+        let promise: Gc<'_> = Gc::adopt(promise);
+        let promise = context.root(promise);
+        let value: Gc<'_> = Gc::adopt(eval::force_promise(promise.raw())?);
+        Ok(context.root(value).raw())
+    })
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
@@ -1705,8 +1702,8 @@ unsafe fn is_plain_atomic(value: Sexp) -> bool {
         && values::get_attr(value, symbols().dim) == nil()
 }
 
-unsafe fn is_ascii(text: Sexp) -> bool {
-    text != values::na_string() && text.bytes().is_ascii()
+fn is_ascii(text: Gc<'_, Chars>) -> bool {
+    !handles::is_na(text) && text.bytes().is_ascii()
 }
 
 /// `match.arg(arg, choices, several.ok = FALSE)` for one string, or for `arg` left at the
@@ -1751,14 +1748,14 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     let target = arg.element(0);
-    if !is_ascii(target) || target.bytes().is_empty() {
+    if !is_ascii(Gc::adopt(target)) || target.bytes().is_empty() {
         return decline();
     }
     let count = length(choices);
     let mut found = None;
     for index in 0..count {
         let choice = choices.element(index);
-        if !is_ascii(choice) {
+        if !is_ascii(Gc::adopt(choice)) {
             return decline();
         }
         if choice.bytes() == target.bytes() {
